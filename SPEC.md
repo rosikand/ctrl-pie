@@ -294,3 +294,7 @@ open issues. Do not expand scope.
   and no-op Alembic bootstrap because the mandatory gate requires backend
   tests, a migration upgrade, and both dev servers after every milestone.
   Domain persistence remains milestone 2.
+- 2026-08-28 — The milestone 3 mock rig exposes one leader and one follower,
+  each with six named rotary joints plus a gripper. Jog offsets are bounded in
+  memory and the mock pose is derived from those joints; the `YAMDriver`
+  boundary keeps real hardware joint mappings out of the web/API layer.

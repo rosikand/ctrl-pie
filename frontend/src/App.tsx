@@ -12,6 +12,7 @@ import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 
 import { SetupBanner } from "./components/SetupBanner";
 import { fetchSettingsStatus, type SettingsStatus } from "./lib/api";
+import { ArmsPage } from "./pages/ArmsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 type NavigationItem = {
@@ -33,12 +34,6 @@ const pageContent: Record<
   string,
   { eyebrow: string; title: string; description: string; icon: LucideIcon }
 > = {
-  arms: {
-    eyebrow: "Hardware",
-    title: "Arms",
-    description: "Monitor connected YAM arms, inspect live state, and issue manual controls.",
-    icon: Bot,
-  },
   record: {
     eyebrow: "Demonstrations",
     title: "Record / Teleop",
@@ -178,6 +173,7 @@ function AppShell() {
         <SetupBanner status={settingsStatus} error={settingsError} />
         <Routes>
           <Route path="/" element={<Navigate to="/arms" replace />} />
+          <Route path="/arms" element={<ArmsPage />} />
           {Object.entries(pageContent).map(([key, content]) => (
             <Route key={key} path={`/${key}`} element={<PlaceholderPage {...content} />} />
           ))}

@@ -1,3 +1,5 @@
+import type { ArmTelemetry, ArmsResponse, JogCommand } from "../types/arms";
+
 export type ServiceStatus = {
   id: "postgres" | "huggingface" | "modal" | "arms";
   label: string;
@@ -35,6 +37,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export function fetchArms(): Promise<ArmsResponse> {
+  return request<ArmsResponse>("/api/arms");
+}
+
+export function fetchArm(armId: string): Promise<ArmTelemetry> {
+  return request<ArmTelemetry>(`/api/arms/${encodeURIComponent(armId)}`);
+}
+
+export function jogArm(armId: string, command: JogCommand): Promise<ArmTelemetry> {
+  return request<ArmTelemetry>(`/api/arms/${encodeURIComponent(armId)}/jog`, {
+    method: "POST",
+    body: JSON.stringify(command),
+  });
+}
+
 export function fetchSettingsStatus(): Promise<SettingsStatus> {
   return request<SettingsStatus>("/api/settings/status");
 }
@@ -51,4 +68,3 @@ export function savePublicSettings(
     body: JSON.stringify(settings),
   });
 }
-
