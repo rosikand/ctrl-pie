@@ -232,7 +232,7 @@ repo `ctrl-pi` · Python package `ctrl_pi` · trainer client `ctrl_pi.trainer`.
 13. Documentation: `docs/` with architecture overview, development guide,
     setup/configuration (env vars, Supabase, HF, Modal), YAM driver interface,
     recording/teleop workflow, compute targets and runtime adapters; a
-    polished top-level `README.md` (what ctrl-π is, screenshot, quickstart);
+    polished top-level `README.md` (what ctrl-π is, screenshot, quickstart, step by step how to use);
     verify `docs/trainer-api.md` is complete and its examples run
 14. Real `YAMDriver` integration points, polish, tests
 
