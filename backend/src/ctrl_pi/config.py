@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +27,8 @@ class AppConfig(BaseSettings):
     modal_token_id: SecretStr | None = None
     modal_token_secret: SecretStr | None = None
     ctrl_pi_mock_mode: bool = True
+    recording_staging_dir: Path = Path(".ctrl-pi/recordings")
+    recording_fps: int = Field(default=20, ge=1, le=60)
 
     @property
     def mock_mode(self) -> bool:
@@ -35,4 +38,3 @@ class AppConfig(BaseSettings):
 @lru_cache
 def get_config() -> AppConfig:
     return AppConfig()
-

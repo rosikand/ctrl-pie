@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+import math
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -97,6 +98,34 @@ class TelemetryFrame(BaseModel):
     arms: list[ArmTelemetry]
 
 
+class ArmAction(BaseModel):
+    """Absolute actuator targets shared by teleop and future policy runtimes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    timestamp: datetime
+    joint_positions_radians: dict[str, float]
+    gripper_position: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_joint_targets(self) -> ArmAction:
+        if set(self.joint_positions_radians) != set(JOINT_NAMES):
+            raise ValueError("joint targets must contain exactly the six YAM joint names")
+        if not all(math.isfinite(value) for value in self.joint_positions_radians.values()):
+            raise ValueError("joint targets must be finite")
+        return self
+
+    @classmethod
+    def from_telemetry(cls, telemetry: ArmTelemetry) -> ArmAction:
+        return cls(
+            timestamp=telemetry.timestamp,
+            joint_positions_radians={
+                joint.name: joint.position_radians for joint in telemetry.joints
+            },
+            gripper_position=telemetry.gripper.position,
+        )
+
+
 class JogCommand(BaseModel):
     """One bounded relative jog; units depend on the selected kind."""
 
@@ -139,6 +168,10 @@ class JogLimitError(ValueError):
     pass
 
 
+class ActionLimitError(ValueError):
+    pass
+
+
 class YAMDriver(ABC):
     """Hardware boundary used by APIs, teleoperation, and inference loops."""
 
@@ -153,3 +186,7 @@ class YAMDriver(ABC):
     @abstractmethod
     def jog(self, arm_id: str, command: JogCommand) -> ArmTelemetry:
         """Apply a validated, relative manual command and return new state."""
+
+    @abstractmethod
+    def apply_action(self, arm_id: str, action: ArmAction) -> ArmTelemetry:
+        """Apply absolute actuator targets and return the resulting state."""

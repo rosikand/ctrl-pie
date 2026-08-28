@@ -298,3 +298,12 @@ open issues. Do not expand scope.
   each with six named rotary joints plus a gripper. Jog offsets are bounded in
   memory and the mock pose is derived from those joints; the `YAMDriver`
   boundary keeps real hardware joint mappings out of the web/API layer.
+- 2026-08-28 — Before milestone 5 uploads an episode, milestone 4 stages its
+  MP4 and synchronized samples under the gitignored `.ctrl-pi/recordings`
+  directory. PostgreSQL stores only lifecycle state, aggregate metadata, and
+  staging pointers; Hugging Face becomes the artifact source of truth after
+  upload.
+- 2026-08-28 — Live arm IDs such as `yam-leader` are stable driver identities,
+  not database UUIDs. The `robots.driver_id` column maps them to relational
+  robot rows so recordings retain UUID foreign-key integrity while the API
+  continues to use hardware-facing IDs.

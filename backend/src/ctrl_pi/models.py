@@ -41,6 +41,7 @@ class Robot(TimestampMixin, Base):
     __tablename__ = "robots"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    driver_id: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="follower")
     driver: Mapped[str] = mapped_column(String(64), nullable=False, default="mock")
@@ -131,4 +132,3 @@ class AppSetting(TimestampMixin, Base):
 
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[Any] = mapped_column(json_type, nullable=False)
-

@@ -12,3 +12,4 @@ backend/.coverage
 backend/htmlcov/
 .DS_Store
 .context/
+.ctrl-pi/

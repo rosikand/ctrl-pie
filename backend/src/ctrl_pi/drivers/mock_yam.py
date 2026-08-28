@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 
 from ctrl_pi.drivers.yam import (
     JOINT_NAMES,
+    ActionLimitError,
+    ArmAction,
     ArmNotFoundError,
     ArmRole,
     ArmTelemetry,
@@ -111,6 +113,27 @@ class MockYAMDriver(YAMDriver):
                 state.gripper_position = target
                 state.gripper_velocity = command.delta / elapsed
 
+            state.last_command_at = now
+            return self._snapshot(state)
+
+    def apply_action(self, arm_id: str, action: ArmAction) -> ArmTelemetry:
+        with self._lock:
+            state = self._find(arm_id)
+            for name, target in action.joint_positions_radians.items():
+                if not JOINT_LIMIT_RADIANS[0] <= target <= JOINT_LIMIT_RADIANS[1]:
+                    raise ActionLimitError(f"action target for {name} is outside its safe range")
+
+            now = time.monotonic()
+            elapsed = max(now - state.last_command_at, 0.005) if state.last_command_at else 0.05
+            state.joint_velocities = {
+                name: (action.joint_positions_radians[name] - state.joints[name]) / elapsed
+                for name in JOINT_NAMES
+            }
+            state.gripper_velocity = (
+                action.gripper_position - state.gripper_position
+            ) / elapsed
+            state.joints.update(action.joint_positions_radians)
+            state.gripper_position = action.gripper_position
             state.last_command_at = now
             return self._snapshot(state)
 

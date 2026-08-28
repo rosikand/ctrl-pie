@@ -1,4 +1,12 @@
 import type { ArmTelemetry, ArmsResponse, JogCommand } from "../types/arms";
+import type {
+  CreateRecordingRequest,
+  Recording,
+  RecordingsResponse,
+  RecordingState,
+  StartEpisodeRequest,
+  StopEpisodeRequest,
+} from "../types/recordings";
 
 export type ServiceStatus = {
   id: "postgres" | "huggingface" | "modal" | "arms";
@@ -50,6 +58,57 @@ export function jogArm(armId: string, command: JogCommand): Promise<ArmTelemetry
     method: "POST",
     body: JSON.stringify(command),
   });
+}
+
+export function fetchRecordings(): Promise<RecordingsResponse> {
+  return request<RecordingsResponse>("/api/recordings");
+}
+
+export function createRecording(payload: CreateRecordingRequest): Promise<Recording> {
+  return request<Recording>("/api/recordings", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchRecordingState(recordingId: string): Promise<RecordingState> {
+  return request<RecordingState>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/state`,
+  );
+}
+
+export function startTeleop(recordingId: string): Promise<RecordingState> {
+  return request<RecordingState>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/teleop/start`,
+    { method: "POST" },
+  );
+}
+
+export function stopTeleop(recordingId: string): Promise<RecordingState> {
+  return request<RecordingState>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/teleop/stop`,
+    { method: "POST" },
+  );
+}
+
+export function startEpisode(
+  recordingId: string,
+  payload: StartEpisodeRequest,
+): Promise<RecordingState> {
+  return request<RecordingState>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/episodes/start`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export function stopEpisode(
+  recordingId: string,
+  payload: StopEpisodeRequest,
+): Promise<RecordingState> {
+  return request<RecordingState>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/episodes/stop`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
 }
 
 export function fetchSettingsStatus(): Promise<SettingsStatus> {
