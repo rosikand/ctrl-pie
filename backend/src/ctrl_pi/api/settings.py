@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 import httpx
@@ -130,6 +131,13 @@ def modal_status(config: AppConfig) -> ServiceStatus:
             label="Modal",
             status="configured",
             detail="Credentials found; live validation is available with deployment support.",
+        )
+    if (Path.home() / ".modal.toml").exists():
+        return ServiceStatus(
+            id="modal",
+            label="Modal",
+            status="configured",
+            detail="Using credentials from ~/.modal.toml.",
         )
     return ServiceStatus(
         id="modal",
