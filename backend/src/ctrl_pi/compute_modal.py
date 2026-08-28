@@ -5,7 +5,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -29,10 +29,15 @@ from ctrl_pi.compute import (
     deployment_ownership_tag,
     validate_owned_handle,
 )
+from ctrl_pi.inference_runtime import RuntimeHealth
 from ctrl_pi.modal_workload import (
     MODAL_HEALTH_FUNCTION,
     MODAL_OWNERSHIP_TAG_KEY,
     build_modal_workload,
+)
+from ctrl_pi.modal_runtime_workload import (
+    MODAL_RUNTIME_CLASS,
+    build_modal_runtime_workload,
 )
 
 if TYPE_CHECKING:
@@ -43,7 +48,12 @@ _OWNED_APP_NAME = re.compile(
     r"ctrl-pi-(?P<deployment_id>[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12})"
 )
+_MODAL_ENDPOINT_HOST = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+modal\.run"
+)
 _ACTIVE_LIFECYCLES = {"deploying", "running", "stopping", "failed", "unknown"}
+_PROXY_TOKEN_ID = re.compile(r"wk-[A-Za-z0-9_-]{1,508}")
+_PROXY_TOKEN_SECRET = re.compile(r"ws-[A-Za-z0-9_-]{1,508}")
 _FAILED = object()
 _T = TypeVar("_T")
 
@@ -173,10 +183,12 @@ class _OfficialModalGateway:
         token_id: str | None,
         token_secret: str | None,
         environment_name: str | None,
+        hf_token: str | None = None,
     ) -> None:
         self._token_id = token_id
         self._token_secret = token_secret
         self._environment_name = _get_environment_name(environment_name)
+        self._hf_token = hf_token
         self._modal_client: object | None = None
 
     def _client(self) -> object:
@@ -204,11 +216,22 @@ class _OfficialModalGateway:
 
     def deploy(self, spec: DeploymentSpec) -> _ProviderDeployment:
         client = self._client()
-        workload = build_modal_workload(
-            app_name=spec.app_name,
-            deployment_id=spec.deployment_id,
-            resources=spec.resources,
-        )
+        if spec.runtime == "stub":
+            workload = build_modal_workload(
+                app_name=spec.app_name,
+                deployment_id=spec.deployment_id,
+                resources=spec.resources,
+            )
+        else:
+            workload = build_modal_runtime_workload(
+                app_name=spec.app_name,
+                deployment_id=spec.deployment_id,
+                resources=spec.resources,
+                runtime=cast(Literal["lerobot", "openpi"], spec.runtime),
+                model_repo=spec.model_repo,
+                checkpoint_revision=spec.checkpoint_revision or "",
+                hf_token=self._hf_token or "",
+            )
         deploy_failed = False
         deployed_app: object | None = None
         try:
@@ -303,25 +326,44 @@ class _OfficialModalGateway:
         return _rpc_get_tags(self._client(), app_id)
 
     def get_endpoint_url(self, app_name: str) -> str | None:
-        return modal.Function.from_name(
-            app_name,
-            MODAL_HEALTH_FUNCTION,
-            environment_name=self._environment_name,
-            client=self._client(),
-        ).get_web_url()
+        try:
+            endpoint_url = modal.Function.from_name(
+                app_name,
+                MODAL_HEALTH_FUNCTION,
+                environment_name=self._environment_name,
+                client=self._client(),
+            ).get_web_url()
+        except NotFoundError:
+            endpoint_url = None
+        if endpoint_url is not None:
+            return endpoint_url
+        try:
+            runtime_class = modal.Cls.from_name(
+                app_name,
+                MODAL_RUNTIME_CLASS,
+                environment_name=self._environment_name,
+                client=self._client(),
+            )
+            return runtime_class().web.get_web_url()
+        except NotFoundError:
+            pass
+        return None
 
     def stop(self, app_id: str) -> None:
         _rpc_stop_app(self._client(), app_id)
 
 
 class ModalComputeTarget:
-    """Modal lifecycle adapter for ctrl-pi-owned, CPU-only M9 workloads."""
+    """Modal lifecycle adapter for bounded ctrl-pi-owned workloads."""
 
     def __init__(
         self,
         *,
         token_id: str | None = None,
         token_secret: str | None = None,
+        hf_token: str | None = None,
+        proxy_token_id: str | None = None,
+        proxy_token_secret: str | None = None,
         environment_name: str | None = None,
         gateway: _ModalGateway | None = None,
         http_transport: httpx.BaseTransport | None = None,
@@ -344,8 +386,12 @@ class ModalComputeTarget:
                 token_id=token_id,
                 token_secret=token_secret,
                 environment_name=environment_name,
+                hf_token=hf_token,
             )
         )
+        self._hf_token = hf_token
+        self._proxy_token_id = proxy_token_id
+        self._proxy_token_secret = proxy_token_secret
         self._http_transport = http_transport
         self._health_timeout_seconds = health_timeout_seconds
         self._stop_timeout_seconds = stop_timeout_seconds
@@ -365,7 +411,28 @@ class ModalComputeTarget:
             if config.modal_token_secret is not None
             else None
         )
-        return cls(token_id=token_id, token_secret=token_secret)
+        hf_token = (
+            config.hf_token.get_secret_value()
+            if config.hf_token is not None
+            else None
+        )
+        proxy_token_id = (
+            config.modal_proxy_token_id.get_secret_value()
+            if config.modal_proxy_token_id is not None
+            else None
+        )
+        proxy_token_secret = (
+            config.modal_proxy_token_secret.get_secret_value()
+            if config.modal_proxy_token_secret is not None
+            else None
+        )
+        return cls(
+            token_id=token_id,
+            token_secret=token_secret,
+            hf_token=hf_token,
+            proxy_token_id=proxy_token_id,
+            proxy_token_secret=proxy_token_secret,
+        )
 
     @property
     def kind(self) -> TargetKind:
@@ -392,13 +459,14 @@ class ModalComputeTarget:
                     self._validate_modal_endpoint(endpoint_url)
                 except ComputeOwnershipError:
                     endpoint_url = None
-            return DeploymentHandle(
+            handle = DeploymentHandle(
                 deployment_id=spec.deployment_id,
                 provider_app_id=deployment.app_id,
                 app_name=spec.app_name,
                 ownership_tag=spec.ownership_tag,
                 endpoint_url=endpoint_url,
             )
+            return handle
         except (ComputeTargetError, ValueError):
             if identity_verified:
                 self._best_effort_stop_owned(
@@ -416,6 +484,7 @@ class ModalComputeTarget:
         self._validate_modal_endpoint(handle.endpoint_url)
         if not nonce or len(nonce) > 128:
             raise ComputeTargetError("The health nonce is invalid.")
+        headers = self._available_proxy_headers()
         request_failed = False
         response: httpx.Response | None = None
         try:
@@ -424,7 +493,11 @@ class ModalComputeTarget:
                 timeout=self._health_timeout_seconds,
                 follow_redirects=False,
             ) as client:
-                response = client.post(handle.endpoint_url, json={"nonce": nonce})
+                response = client.post(
+                    handle.endpoint_url,
+                    json={"nonce": nonce},
+                    headers=headers,
+                )
         except Exception:
             request_failed = True
         if request_failed or response is None:
@@ -443,10 +516,44 @@ class ModalComputeTarget:
         if not isinstance(echo, str) or len(echo) > 128:
             echo = ""
         matches = echo == nonce
+        runtime_shaped = any(
+            key in payload for key in ("type", "runtime", "model_repo", "revision")
+        )
+        if runtime_shaped:
+            try:
+                runtime_health = RuntimeHealth.model_validate(payload)
+            except Exception:
+                return HealthResult(healthy=False, echo="")
+            matches = runtime_health.echo == nonce
+            if (
+                payload.get("healthy") is not True
+                or not runtime_health.healthy
+                or not matches
+                or runtime_health.model_repo is None
+                or runtime_health.revision is None
+            ):
+                return HealthResult(healthy=False, echo="")
+            return HealthResult(
+                healthy=True,
+                echo=runtime_health.echo,
+                runtime=runtime_health.runtime,
+                model_repo=runtime_health.model_repo,
+                revision=runtime_health.revision,
+            )
         return HealthResult(
             healthy=payload.get("healthy") is True and matches,
             echo=echo if matches else "",
         )
+
+    def _available_proxy_headers(self) -> dict[str, str]:
+        if not self._proxy_credentials_valid():
+            return {}
+        assert self._proxy_token_id is not None
+        assert self._proxy_token_secret is not None
+        return {
+            "Modal-Key": self._proxy_token_id,
+            "Modal-Secret": self._proxy_token_secret,
+        }
 
     def inspect(self, handle: DeploymentHandle) -> TargetState:
         validate_owned_handle(handle)
@@ -855,12 +962,37 @@ class ModalComputeTarget:
             return None
         return endpoint_url
 
-    @staticmethod
-    def _validate_spec(spec: DeploymentSpec) -> None:
+    def _validate_spec(self, spec: DeploymentSpec) -> None:
         resources = spec.resources
-        if spec.runtime != "stub" or resources.compute_size != "CPU":
+        if spec.runtime == "stub" and resources.compute_size == "CPU":
+            pass
+        elif spec.runtime == "openpi":
             raise ComputeConfigurationError(
-                "The M9 Modal probe supports only the stub CPU workload."
+                "The real OpenPI Modal runtime is not available in V1."
+            )
+        elif spec.runtime == "lerobot" and resources.compute_size in {
+            "Modal: A10G",
+            "Modal: A100",
+            "Modal: H100",
+        }:
+            if (
+                spec.checkpoint_revision is None
+                or re.fullmatch(r"[0-9a-f]{40}", spec.checkpoint_revision) is None
+            ):
+                raise ComputeConfigurationError(
+                    "The model revision must be an immutable Hub commit SHA."
+                )
+            if self._hf_token is None or not self._hf_token.strip():
+                raise ComputeConfigurationError(
+                    "Hugging Face credentials are required for Modal model builds."
+                )
+            if not self._proxy_credentials_valid():
+                raise ComputeConfigurationError(
+                    "Modal proxy credentials are required for runtime endpoints."
+                )
+        else:
+            raise ComputeConfigurationError(
+                "The Modal runtime and compute size violate the supported guardrails."
             )
         if (
             resources.min_containers != 0
@@ -872,6 +1004,14 @@ class ModalComputeTarget:
             raise ComputeConfigurationError(
                 "The Modal resource policy violates the V1 cost guardrails."
             )
+
+    def _proxy_credentials_valid(self) -> bool:
+        return (
+            self._proxy_token_id is not None
+            and self._proxy_token_secret is not None
+            and _PROXY_TOKEN_ID.fullmatch(self._proxy_token_id) is not None
+            and _PROXY_TOKEN_SECRET.fullmatch(self._proxy_token_secret) is not None
+        )
 
     @staticmethod
     def _validate_state_identity(state: TargetState) -> None:
@@ -905,17 +1045,22 @@ class ModalComputeTarget:
     def _validate_modal_endpoint(endpoint_url: str) -> None:
         try:
             parsed = urlsplit(endpoint_url)
-        except ValueError:
+            parsed_port = parsed.port
+        except (TypeError, ValueError):
             parsed = None
+            parsed_port = None
         if (
             parsed is None
             or parsed.scheme != "https"
             or parsed.hostname is None
-            or not parsed.hostname.endswith(".modal.run")
+            or _MODAL_ENDPOINT_HOST.fullmatch(parsed.hostname) is None
+            or parsed_port is not None
+            or parsed.netloc.endswith(":")
             or parsed.username is not None
             or parsed.password is not None
             or parsed.query
             or parsed.fragment
+            or parsed.path not in {"", "/"}
         ):
             raise ComputeOwnershipError("The Modal endpoint URL is invalid.")
 

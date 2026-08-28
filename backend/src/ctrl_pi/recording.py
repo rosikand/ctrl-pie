@@ -12,6 +12,7 @@ from typing import Any, TextIO
 
 from ctrl_pi.camera import CameraFrame, MockCamera
 from ctrl_pi.drivers.yam import ArmAction, ArmTelemetry, YAMDriver
+from ctrl_pi.rig import RigLease, RigLeaseConflictError, RigLeaseToken
 
 
 class RecordingConflictError(RuntimeError):
@@ -177,10 +178,12 @@ class _RecordingRuntime:
     teleop_task: asyncio.Task[None] | None = None
     episode: _ActiveEpisode | None = None
     finalizing_episode: _ActiveEpisode | None = None
+    finalize_task: asyncio.Task[EpisodeResult] | None = None
     latest_leader: ArmTelemetry | None = None
     latest_follower: ArmTelemetry | None = None
     latest_action: ArmAction | None = None
     last_error: str | None = None
+    rig_token: RigLeaseToken | None = None
 
 
 class RecordingManager:
@@ -192,11 +195,13 @@ class RecordingManager:
         camera: MockCamera,
         staging_dir: Path,
         teleop_frequency_hz: float = 50.0,
+        rig_lease: RigLease | None = None,
     ) -> None:
         self.driver = driver
         self.camera = camera
         self.staging_dir = staging_dir
         self.teleop_frequency_hz = teleop_frequency_hz
+        self.rig_lease = rig_lease or RigLease()
         self._runtimes: dict[str, _RecordingRuntime] = {}
         self._lock = asyncio.Lock()
         self._shutting_down = False
@@ -273,6 +278,10 @@ class RecordingManager:
         async with self._lock:
             if self._shutting_down:
                 raise RecordingConflictError("recording service is shutting down")
+            if runtime.finalizing_episode is not None:
+                raise RecordingConflictError(
+                    "the previous episode is still finalizing"
+                )
             if self._task_active(runtime.teleop_task):
                 raise RecordingConflictError("teleoperation is already active")
             if any(
@@ -288,13 +297,24 @@ class RecordingManager:
             if leader.id == follower.id:
                 raise RecordingConflictError("leader and follower must be different arms")
 
-            runtime.status = "teleop"
-            runtime.last_error = None
-            self._teleop_step(runtime)
-            runtime.teleop_task = asyncio.create_task(
-                self._teleop_loop(runtime),
-                name=f"ctrl-pi-teleop-{recording_id}",
-            )
+            try:
+                rig_token = self.rig_lease.acquire("teleop", recording_id)
+            except RigLeaseConflictError as error:
+                raise RecordingConflictError(str(error)) from None
+            runtime.rig_token = rig_token
+            try:
+                runtime.status = "teleop"
+                runtime.last_error = None
+                self._teleop_step(runtime)
+                runtime.teleop_task = asyncio.create_task(
+                    self._teleop_loop(runtime),
+                    name=f"ctrl-pi-teleop-{recording_id}",
+                )
+            except Exception:
+                runtime.rig_token = None
+                runtime.status = "ready" if runtime.episode_count else "draft"
+                self.rig_lease.release(rig_token)
+                raise
             return self._snapshot(runtime)
 
     async def stop_teleop(self, recording_id: str) -> RecordingStateSnapshot:
@@ -306,9 +326,15 @@ class RecordingManager:
                 raise RecordingConflictError("teleoperation is not active")
             task = runtime.teleop_task
             runtime.teleop_task = None
+            rig_token = runtime.rig_token
+            runtime.rig_token = None
             runtime.status = "ready" if runtime.episode_count else "draft"
 
-        await self._cancel_task(task)
+        try:
+            await self._cancel_task(task)
+        finally:
+            if rig_token is not None:
+                self.rig_lease.release(rig_token)
         async with self._lock:
             return self._snapshot(runtime)
 
@@ -392,22 +418,44 @@ class RecordingManager:
                 raise RecordingConflictError("no episode is recording")
             runtime.episode = None
             runtime.finalizing_episode = episode
+            finalize_task = asyncio.create_task(
+                asyncio.to_thread(self._finalize_episode, episode, success, notes),
+                name=f"ctrl-pi-finalize-{recording_id}-{episode.index}",
+            )
+            runtime.finalize_task = finalize_task
 
         try:
-            result = await asyncio.to_thread(
-                self._finalize_episode, episode, success, notes
-            )
+            # Once ffmpeg finalization starts it cannot safely be cancelled: the
+            # worker thread would continue closing and renaming the same files.
+            # Settle it before any caller or shutdown path changes ownership.
+            result = await self._settle_task(finalize_task)
         except Exception as error:
             await asyncio.to_thread(self._abort_episode, episode)
             self._remove_failed_episode_files(episode)
             async with self._lock:
                 runtime.status = "failed"
                 runtime.last_error = str(error)
-                runtime.finalizing_episode = None
+                if runtime.finalize_task is finalize_task:
+                    runtime.finalize_task = None
+                    runtime.finalizing_episode = None
             raise
 
         async with self._lock:
-            runtime.status = "teleop"
+            if runtime.finalize_task is finalize_task:
+                runtime.finalize_task = None
+            teleop_still_owns_rig = (
+                self._task_active(runtime.teleop_task)
+                and runtime.rig_token is not None
+                and self.rig_lease.current() == runtime.rig_token
+                and runtime.last_error is None
+                and not self._shutting_down
+            )
+            if teleop_still_owns_rig:
+                runtime.status = "teleop"
+            else:
+                runtime.status = "failed"
+                if runtime.last_error is None:
+                    runtime.last_error = "teleoperation stopped while finalizing the episode"
             snapshot = self._snapshot(runtime)
             snapshot = RecordingStateSnapshot(
                 **{
@@ -422,12 +470,27 @@ class RecordingManager:
 
     async def confirm_episode_persisted(
         self, recording_id: str, episode_count: int, status: str
-    ) -> None:
+    ) -> RecordingStateSnapshot:
         async with self._lock:
             runtime = self._require_runtime(recording_id)
             runtime.episode_count = episode_count
-            runtime.status = status
+            teleop_still_owns_rig = (
+                self._task_active(runtime.teleop_task)
+                and runtime.rig_token is not None
+                and self.rig_lease.current() == runtime.rig_token
+                and runtime.last_error is None
+                and not self._shutting_down
+            )
+            if status == "teleop" and not teleop_still_owns_rig:
+                runtime.status = "failed"
+                if runtime.last_error is None:
+                    runtime.last_error = (
+                        "teleoperation stopped while persisting episode metadata"
+                    )
+            elif runtime.status != "failed":
+                runtime.status = status
             runtime.finalizing_episode = None
+            return self._snapshot(runtime)
 
     async def episode_persistence_failed(self, recording_id: str) -> None:
         async with self._lock:
@@ -445,20 +508,52 @@ class RecordingManager:
                 if self._task_active(runtime.teleop_task)
             ]
             episodes = [
-                episode
+                runtime.episode
                 for runtime in self._runtimes.values()
-                for episode in (runtime.episode, runtime.finalizing_episode)
-                if episode is not None
+                if runtime.episode is not None
+            ]
+            finalizers = [
+                (runtime, runtime.finalizing_episode, runtime.finalize_task)
+                for runtime in self._runtimes.values()
+                if runtime.finalizing_episode is not None
+                and runtime.finalize_task is not None
             ]
             for runtime in self._runtimes.values():
                 runtime.teleop_task = None
                 runtime.episode = None
-                runtime.finalizing_episode = None
+            rig_tokens = [
+                runtime.rig_token
+                for runtime in self._runtimes.values()
+                if runtime.rig_token is not None
+            ]
+            for runtime in self._runtimes.values():
+                runtime.rig_token = None
 
-        for task in tasks:
-            await self._cancel_task(task)
+        try:
+            for task in tasks:
+                await self._cancel_task(task)
+        finally:
+            for rig_token in rig_tokens:
+                self.rig_lease.release(rig_token)
         for episode in episodes:
             await asyncio.to_thread(self._abort_episode, episode)
+        for runtime, episode, finalize_task in finalizers:
+            try:
+                await self._settle_task(finalize_task)
+            except Exception:
+                await asyncio.to_thread(self._abort_episode, episode)
+                self._remove_failed_episode_files(episode)
+            finally:
+                async with self._lock:
+                    if runtime.finalize_task is finalize_task:
+                        runtime.finalize_task = None
+                        runtime.finalizing_episode = None
+        async with self._lock:
+            # A completed episode can remain as a short persistence sentinel
+            # after its finalizer task has settled. It owns no open resources.
+            for runtime in self._runtimes.values():
+                if runtime.finalize_task is None:
+                    runtime.finalizing_episode = None
 
     async def active_resource_counts(self) -> tuple[int, int]:
         async with self._lock:
@@ -487,12 +582,17 @@ class RecordingManager:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            rig_token: RigLeaseToken | None = None
             async with self._lock:
                 runtime.last_error = str(error)
                 runtime.status = "failed"
                 episode = runtime.episode
                 runtime.episode = None
                 runtime.teleop_task = None
+                rig_token = runtime.rig_token
+                runtime.rig_token = None
+            if rig_token is not None:
+                self.rig_lease.release(rig_token)
             if episode is not None:
                 self._abort_episode(episode)
                 self._remove_failed_episode_files(episode)
@@ -595,6 +695,18 @@ class RecordingManager:
             await task
         except asyncio.CancelledError:
             pass
+
+    @staticmethod
+    async def _settle_task(task: asyncio.Task[EpisodeResult]) -> EpisodeResult:
+        """Wait for a non-cancellable file finalizer, even if its caller is cancelled."""
+
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # The blocking worker still owns ffmpeg/files. Deferring caller
+                # cancellation is the only way to avoid a concurrent abort.
+                continue
 
     def _require_runtime(self, recording_id: str) -> _RecordingRuntime:
         try:

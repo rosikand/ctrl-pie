@@ -53,6 +53,37 @@ def test_stub_lifecycle_is_deterministic_and_nonce_verified() -> None:
         target.deploy(spec)
 
 
+@pytest.mark.parametrize("runtime", ["lerobot", "openpi"])
+def test_stub_target_emulates_runtime_identity_without_provider_calls(
+    runtime: str,
+) -> None:
+    target = StubComputeTarget()
+    deployment_id = uuid.uuid4()
+    spec = DeploymentSpec(
+        deployment_id=deployment_id,
+        app_name=deployment_app_name(deployment_id),
+        ownership_tag=deployment_ownership_tag(deployment_id),
+        model_repo="acme/mock-policy",
+        checkpoint_revision="b" * 40,
+        runtime=runtime,
+        resources=ResourcePolicy(
+            compute_size="Modal: A10G",
+            timeout_seconds=1800,
+        ),
+    )
+
+    handle = target.deploy(spec)
+    health = target.health(handle, "runtime-nonce")
+
+    assert health.healthy is True
+    assert health.echo == "runtime-nonce"
+    assert (health.runtime, health.model_repo, health.revision) == (
+        runtime,
+        spec.model_repo,
+        spec.checkpoint_revision,
+    )
+
+
 def test_resource_policy_enforces_no_warm_pool_and_runaway_bounds() -> None:
     with pytest.raises(ValueError, match="warm"):
         ResourcePolicy(

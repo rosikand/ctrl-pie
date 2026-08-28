@@ -55,6 +55,25 @@ def test_joint_jog_changes_only_process_local_live_state(client: TestClient) -> 
     )
 
 
+def test_jog_rejects_a_busy_rig_before_mutating_the_arm(client: TestClient) -> None:
+    before = client.get("/api/arms/yam-follower").json()
+    token = client.app.state.rig_lease.acquire("inference", "deployment-1")
+    try:
+        response = client.post(
+            "/api/arms/yam-follower/jog",
+            json={"kind": "joint", "axis": "shoulder_yaw", "delta": 0.1},
+        )
+    finally:
+        client.app.state.rig_lease.release(token)
+
+    after = client.get("/api/arms/yam-follower").json()
+    assert response.status_code == 409
+    assert "controlled by inference" in response.json()["detail"]
+    assert after["joints"][0]["position_radians"] == pytest.approx(
+        before["joints"][0]["position_radians"]
+    )
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [

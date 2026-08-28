@@ -346,3 +346,17 @@ open issues. Do not expand scope.
   App API does not yet expose those teardown primitives. Modal forbids `/` in
   App tag keys and values, so the provider losslessly represents the domain
   ownership tag as `ctrl-pi-deployment=<deployment UUID>`.
+- 2026-08-28 — Runtime serving uses strict, bounded JSON observation/action
+  envelopes over a provider-authenticated Modal POST/WebSocket surface rather
+  than LeRobot's native pickle/gRPC transport. A real LeRobot adapter loads
+  only an immutable local SHA-marked checkpoint through LeRobot 0.4.4's
+  config, policy, preprocessing, and postprocessing APIs; OpenPI uses the same
+  deterministic stub in mock mode while its real V1 adapter fails explicitly.
+  After the revision-pinned image build, the serving image enforces Hub and
+  Transformers offline mode so nested processor/model loads cannot resolve a
+  mutable remote dependency at container start or inference time.
+  Modal Proxy Tokens (`wk-`/`ws-`) are distinct backend-only configuration
+  from Modal API credentials (`ak-`/`as-`). The robot loop holds the shared rig
+  lease, verifies both runtime responses against the persisted deployment
+  identity, permits one in-flight request, and ages every queued action before
+  writing to the arm.

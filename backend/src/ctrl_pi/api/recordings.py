@@ -466,9 +466,12 @@ async def stop_episode(
         db.rollback()
         await manager.episode_persistence_failed(str(recording.id))
         raise
-    await manager.confirm_episode_persisted(
+    snapshot = await manager.confirm_episode_persisted(
         str(recording.id), recording.episode_count, recording.status
     )
+    if recording.status != snapshot.status:
+        recording.status = snapshot.status
+        db.commit()
     return _state(snapshot)
 
 

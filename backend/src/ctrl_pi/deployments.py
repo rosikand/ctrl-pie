@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 import secrets
 import threading
 import time
@@ -10,7 +11,7 @@ from collections.abc import Callable
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -64,6 +65,109 @@ class DeploymentStorageError(DeploymentServiceError):
 
 
 @dataclass(frozen=True)
+class ResolvedModelRevision:
+    model_repo: str
+    revision: str
+
+
+class ModelRevisionResolver(Protocol):
+    def resolve(
+        self,
+        *,
+        model_repo: str,
+        revision: str | None,
+    ) -> ResolvedModelRevision: ...
+
+
+class HFModelRevisionResolver:
+    """Resolve one requested model ref to its exact Hub repository and SHA."""
+
+    def __init__(
+        self,
+        token: str | None,
+        namespace: str | None,
+        *,
+        hub_api_factory: Callable[[str], Any] | None = None,
+    ) -> None:
+        self._token = token
+        self._namespace = namespace
+        self._hub_api_factory = hub_api_factory
+
+    def resolve(
+        self,
+        *,
+        model_repo: str,
+        revision: str | None,
+    ) -> ResolvedModelRevision:
+        namespace = self._namespace
+        if (
+            namespace is None
+            or not namespace
+            or namespace.strip() != namespace
+            or re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?",
+                namespace,
+            )
+            is None
+            or ".." in namespace
+            or "--" in namespace
+        ):
+            raise DeploymentConfigurationError(
+                "HF_NAMESPACE is required to resolve model revisions."
+            )
+        if model_repo.count("/") != 1 or model_repo.split("/", 1)[0] != namespace:
+            raise DeploymentConfigurationError(
+                "The model repository is outside the configured HF_NAMESPACE."
+            )
+        token = self._token
+        if token is None or not token.strip():
+            raise DeploymentConfigurationError(
+                "HF_TOKEN is required to resolve model revisions."
+            )
+        resolution_failed = False
+        info: Any = None
+        try:
+            if self._hub_api_factory is None:
+                from huggingface_hub import HfApi
+
+                api = HfApi(token=token)
+            else:
+                api = self._hub_api_factory(token)
+            info = api.model_info(
+                repo_id=model_repo,
+                revision=revision,
+                token=token,
+            )
+        except Exception:
+            resolution_failed = True
+        if resolution_failed:
+            raise DeploymentProviderError(
+                "The Hugging Face model revision could not be resolved."
+            )
+
+        returned_repo = getattr(info, "id", None) or getattr(info, "repo_id", None)
+        returned_revision = getattr(info, "sha", None)
+        if (
+            not isinstance(returned_repo, str)
+            or returned_repo != model_repo
+            or not isinstance(returned_revision, str)
+            or re.fullmatch(r"[0-9a-fA-F]{40}", returned_revision) is None
+            or (
+                revision is not None
+                and re.fullmatch(r"[0-9a-fA-F]{40}", revision) is not None
+                and returned_revision.casefold() != revision.casefold()
+            )
+        ):
+            raise DeploymentProviderError(
+                "Hugging Face returned an invalid model revision identity."
+            )
+        return ResolvedModelRevision(
+            model_repo=returned_repo,
+            revision=returned_revision.casefold(),
+        )
+
+
+@dataclass(frozen=True)
 class DeploymentRecord:
     id: uuid.UUID
     endpoint_id: uuid.UUID
@@ -89,6 +193,7 @@ class DeploymentService:
         self,
         target: ComputeTarget,
         *,
+        model_revision_resolver: ModelRevisionResolver | None = None,
         session_factory: Callable[[], Session] | None = None,
         nonce_factory: Callable[[], str] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
@@ -96,6 +201,7 @@ class DeploymentService:
         poll_interval_seconds: float = 0.25,
     ) -> None:
         self.target = target
+        self._model_revision_resolver = model_revision_resolver
         self._session_factory = session_factory
         self._nonce_factory = nonce_factory or (lambda: secrets.token_urlsafe(24))
         self._monotonic = monotonic
@@ -146,6 +252,13 @@ class DeploymentService:
         compute_size: str,
         timeout_seconds: int,
     ) -> DeploymentRecord:
+        model_repo, checkpoint_revision, resources = await self._prepare_deployment(
+            model_repo=model_repo,
+            checkpoint_revision=checkpoint_revision,
+            runtime=runtime,
+            compute_size=compute_size,
+            timeout_seconds=timeout_seconds,
+        )
         endpoint = InferenceEndpoint(
             name=name,
             runtime=runtime,
@@ -181,10 +294,7 @@ class DeploymentService:
             model_repo=model_repo,
             checkpoint_revision=checkpoint_revision,
             runtime=runtime,
-            resources=ResourcePolicy(
-                compute_size=compute_size,
-                timeout_seconds=timeout_seconds,
-            ),
+            resources=resources,
         )
         self._set_status(
             db,
@@ -209,7 +319,13 @@ class DeploymentService:
                     "The compute target health check could not be verified."
                 )
             health = await asyncio.to_thread(self.target.health, handle, nonce)
-            self._validate_health(health, nonce)
+            self._validate_health(
+                health,
+                nonce,
+                runtime=runtime,
+                model_repo=model_repo,
+                checkpoint_revision=checkpoint_revision,
+            )
             state = await asyncio.to_thread(self.target.inspect, handle)
             self._validate_state(state, handle)
             if not state.running_verified:
@@ -254,6 +370,86 @@ class DeploymentService:
             raise DeploymentProviderError(
                 "The compute target deployment or health check failed."
             ) from None
+
+    async def _prepare_deployment(
+        self,
+        *,
+        model_repo: str,
+        checkpoint_revision: str | None,
+        runtime: str,
+        compute_size: str,
+        timeout_seconds: int,
+    ) -> tuple[str, str | None, ResourcePolicy]:
+        supported_gpu_sizes = {"Modal: A10G", "Modal: A100", "Modal: H100"}
+        if runtime == "stub":
+            if compute_size != "CPU":
+                raise DeploymentConfigurationError(
+                    "The stub runtime requires CPU compute."
+                )
+        elif runtime in {"lerobot", "openpi"}:
+            if compute_size not in supported_gpu_sizes:
+                raise DeploymentConfigurationError(
+                    "The inference runtime requires a supported Modal GPU."
+                )
+            if runtime == "openpi" and self.target.kind == "modal":
+                raise DeploymentConfigurationError(
+                    "The real OpenPI Modal runtime is not available in V1."
+                )
+        else:
+            raise DeploymentConfigurationError(
+                "The inference runtime is not supported."
+            )
+
+        try:
+            resources = ResourcePolicy(
+                compute_size=compute_size,
+                timeout_seconds=timeout_seconds,
+            )
+        except ValueError:
+            raise DeploymentConfigurationError(
+                "The deployment resource policy is invalid."
+            ) from None
+        if runtime == "stub":
+            return model_repo, checkpoint_revision, resources
+
+        resolver = self._model_revision_resolver
+        if resolver is None:
+            raise DeploymentConfigurationError(
+                "Model revision resolution is not configured."
+            )
+        configuration_failed = False
+        resolution_failed = False
+        resolved: ResolvedModelRevision | None = None
+        try:
+            resolved = await asyncio.to_thread(
+                resolver.resolve,
+                model_repo=model_repo,
+                revision=checkpoint_revision,
+            )
+        except DeploymentConfigurationError:
+            configuration_failed = True
+        except DeploymentProviderError:
+            resolution_failed = True
+        except Exception:
+            resolution_failed = True
+        if configuration_failed:
+            raise DeploymentConfigurationError(
+                "Model revision resolution is not configured."
+            )
+        if resolution_failed:
+            raise DeploymentProviderError(
+                "The Hugging Face model revision could not be resolved."
+            )
+        if not isinstance(resolved, ResolvedModelRevision) or (
+            not isinstance(resolved.model_repo, str)
+            or resolved.model_repo != model_repo
+            or not isinstance(resolved.revision, str)
+            or re.fullmatch(r"[0-9a-f]{40}", resolved.revision) is None
+        ):
+            raise DeploymentProviderError(
+                "Hugging Face returned an invalid model revision identity."
+            )
+        return resolved.model_repo, resolved.revision, resources
 
     def get(self, db: Session, deployment_id: uuid.UUID) -> DeploymentRecord:
         deployment, endpoint = self._load_pair(db, deployment_id, lock=False)
@@ -365,10 +561,16 @@ class DeploymentService:
         if self._session_factory is None:
             return
         status: str
+        runtime: str
+        model_repo: str
+        checkpoint_revision: str | None
         persisted_handle: DeploymentHandle | None = None
         with self._session_factory() as db:
             deployment, endpoint = self._load_pair(db, deployment_id, lock=True)
             status = deployment.status
+            runtime = deployment.runtime
+            model_repo = deployment.model_repo
+            checkpoint_revision = deployment.checkpoint_revision
             if status not in {"deploying", "stopping", "running", "failed"}:
                 return
             if endpoint.provider_app_id is not None:
@@ -453,7 +655,13 @@ class DeploymentService:
         nonce = self._nonce_factory()
         try:
             health = await asyncio.to_thread(self.target.health, handle, nonce)
-            self._validate_health(health, nonce)
+            self._validate_health(
+                health,
+                nonce,
+                runtime=runtime,
+                model_repo=model_repo,
+                checkpoint_revision=checkpoint_revision,
+            )
         except Exception:
             await self._compensating_stop(handle)
             with self._session_factory() as db:
@@ -785,10 +993,33 @@ class DeploymentService:
             )
 
     @staticmethod
-    def _validate_health(health: HealthResult, nonce: str) -> None:
+    def _validate_health(
+        health: HealthResult,
+        nonce: str,
+        *,
+        runtime: str,
+        model_repo: str,
+        checkpoint_revision: str | None,
+    ) -> None:
         if not health.healthy or not secrets.compare_digest(health.echo, nonce):
             raise DeploymentProviderError(
                 "The compute target health check could not be verified."
+            )
+        identity = (health.runtime, health.model_repo, health.revision)
+        if runtime == "stub":
+            if any(value is not None for value in identity):
+                raise DeploymentProviderError(
+                    "The compute target health identity could not be verified."
+                )
+            return
+        if (
+            checkpoint_revision is None
+            or health.runtime != runtime
+            or health.model_repo != model_repo
+            or health.revision != checkpoint_revision
+        ):
+            raise DeploymentProviderError(
+                "The compute target health identity could not be verified."
             )
 
     @classmethod

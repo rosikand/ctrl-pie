@@ -26,6 +26,8 @@ class AppConfig(BaseSettings):
     hf_namespace: str | None = None
     modal_token_id: SecretStr | None = None
     modal_token_secret: SecretStr | None = None
+    modal_proxy_token_id: SecretStr | None = None
+    modal_proxy_token_secret: SecretStr | None = None
     ctrl_pi_mock_mode: bool = True
     recording_staging_dir: Path = Path(".ctrl-pi/recordings")
     recording_fps: int = Field(default=20, ge=1, le=60)

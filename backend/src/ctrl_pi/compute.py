@@ -107,6 +107,25 @@ class DeploymentHandle:
 class HealthResult:
     healthy: bool
     echo: str
+    runtime: str | None = None
+    model_repo: str | None = None
+    revision: str | None = None
+
+    def __post_init__(self) -> None:
+        identity = (self.runtime, self.model_repo, self.revision)
+        if all(value is None for value in identity):
+            return
+        if any(value is None for value in identity):
+            raise ValueError("compute health identity must be complete")
+        assert self.runtime is not None
+        assert self.model_repo is not None
+        assert self.revision is not None
+        if not _SAFE_IDENTIFIER.fullmatch(self.runtime):
+            raise ValueError("compute health runtime is invalid")
+        if not 1 <= len(self.model_repo) <= 255 or self.model_repo.count("/") != 1:
+            raise ValueError("compute health model repo is invalid")
+        if re.fullmatch(r"[0-9a-f]{40}", self.revision) is None:
+            raise ValueError("compute health revision is invalid")
 
 
 @dataclass(frozen=True)

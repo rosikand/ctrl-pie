@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import uuid
 from dataclasses import replace
@@ -23,6 +24,7 @@ class StubComputeTarget:
 
     def __init__(self) -> None:
         self._states: dict[uuid.UUID, TargetState] = {}
+        self._runtime_identities: dict[uuid.UUID, tuple[str, str, str]] = {}
         self._lock = threading.Lock()
 
     @property
@@ -30,8 +32,30 @@ class StubComputeTarget:
         return "stub"
 
     def deploy(self, spec: DeploymentSpec) -> DeploymentHandle:
-        if spec.resources.compute_size != "CPU":
-            raise ComputeTargetError("The stub compute target supports CPU only.")
+        runtime_identity: tuple[str, str, str] | None = None
+        if spec.runtime == "stub" and spec.resources.compute_size == "CPU":
+            pass
+        elif spec.runtime in {"lerobot", "openpi"} and spec.resources.compute_size in {
+            "Modal: A10G",
+            "Modal: A100",
+            "Modal: H100",
+        }:
+            if (
+                spec.checkpoint_revision is None
+                or re.fullmatch(r"[0-9a-f]{40}", spec.checkpoint_revision) is None
+            ):
+                raise ComputeTargetError(
+                    "The mock runtime requires an immutable model revision."
+                )
+            runtime_identity = (
+                spec.runtime,
+                spec.model_repo,
+                spec.checkpoint_revision,
+            )
+        else:
+            raise ComputeTargetError(
+                "The stub compute target does not support this runtime and compute size."
+            )
         provider_app_id = f"stub-{spec.deployment_id.hex}"
         handle = DeploymentHandle(
             deployment_id=spec.deployment_id,
@@ -55,6 +79,8 @@ class StubComputeTarget:
                 running_tasks=1,
                 endpoint_url=handle.endpoint_url,
             )
+            if runtime_identity is not None:
+                self._runtime_identities[spec.deployment_id] = runtime_identity
         return handle
 
     def health(self, handle: DeploymentHandle, nonce: str) -> HealthResult:
@@ -65,7 +91,18 @@ class StubComputeTarget:
         state = self.inspect(handle)
         if not state.running_verified:
             return HealthResult(healthy=False, echo="")
-        return HealthResult(healthy=True, echo=nonce)
+        with self._lock:
+            runtime_identity = self._runtime_identities.get(handle.deployment_id)
+        if runtime_identity is None:
+            return HealthResult(healthy=True, echo=nonce)
+        runtime, model_repo, revision = runtime_identity
+        return HealthResult(
+            healthy=True,
+            echo=nonce,
+            runtime=runtime,
+            model_repo=model_repo,
+            revision=revision,
+        )
 
     def inspect(self, handle: DeploymentHandle) -> TargetState:
         self._validate_handle(handle)

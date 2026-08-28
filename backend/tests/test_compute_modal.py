@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import modal
 import pytest
+from modal.exception import NotFoundError
 
 from ctrl_pi.compute import (
     ComputeConfigurationError,
@@ -16,6 +18,7 @@ from ctrl_pi.compute import (
     ComputeTargetError,
     DeploymentHandle,
     DeploymentSpec,
+    HealthResult,
     ResourcePolicy,
     TargetState,
     deployment_app_name,
@@ -35,6 +38,7 @@ from ctrl_pi.modal_workload import (
     build_modal_workload,
     health_echo,
 )
+from ctrl_pi.modal_runtime_workload import MODAL_RUNTIME_CLASS
 
 DEPLOYMENT_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 OTHER_DEPLOYMENT_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -49,13 +53,14 @@ def _spec(
     runtime: str = "stub",
     compute_size: str = "CPU",
     scaledown_window_seconds: int = 60,
+    checkpoint_revision: str | None = None,
 ) -> DeploymentSpec:
     return DeploymentSpec(
         deployment_id=deployment_id,
         app_name=deployment_app_name(deployment_id),
         ownership_tag=deployment_ownership_tag(deployment_id),
         model_repo="ctrl-pi/m9-echo",
-        checkpoint_revision=None,
+        checkpoint_revision=checkpoint_revision,
         runtime=runtime,
         resources=ResourcePolicy(
             compute_size=compute_size,
@@ -651,6 +656,174 @@ def test_health_nonce_round_trip_and_mismatch() -> None:
     assert mismatch.echo == ""
 
 
+def test_runtime_deploy_health_uses_proxy_credentials_and_exact_model_identity() -> None:
+    gateway = FakeGateway()
+    proxy_id = "wk-runtime-proxy"
+    proxy_secret = "ws-runtime-proxy-secret"
+    revision = "a" * 40
+    observed_headers: list[tuple[str | None, str | None]] = []
+    returned_revision = revision
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed_headers.append(
+            (request.headers.get("Modal-Key"), request.headers.get("Modal-Secret"))
+        )
+        return httpx.Response(
+            200,
+            json={
+                "type": "health",
+                "healthy": True,
+                "echo": "runtime-nonce",
+                "runtime": "lerobot",
+                "model_repo": "ctrl-pi/m9-echo",
+                "revision": returned_revision,
+            },
+        )
+
+    deploy_target = ModalComputeTarget(
+        gateway=gateway,
+        hf_token="hf_build_token",
+        proxy_token_id=proxy_id,
+        proxy_token_secret=proxy_secret,
+        http_transport=httpx.MockTransport(handler),
+    )
+    handle = deploy_target.deploy(
+        _spec(
+            runtime="lerobot",
+            compute_size="Modal: A10G",
+            checkpoint_revision=revision,
+        )
+    )
+
+    # A fresh adapter has no process-local deployment memory. The response
+    # still carries the identity for the service to compare with persistence.
+    target = ModalComputeTarget(
+        gateway=gateway,
+        proxy_token_id=proxy_id,
+        proxy_token_secret=proxy_secret,
+        http_transport=httpx.MockTransport(handler),
+    )
+    assert target.health(handle, "runtime-nonce") == HealthResult(
+        healthy=True,
+        echo="runtime-nonce",
+        runtime="lerobot",
+        model_repo="ctrl-pi/m9-echo",
+        revision=revision,
+    )
+    assert observed_headers == [(proxy_id, proxy_secret)]
+
+    returned_revision = "b" * 40
+    changed = target.health(handle, "runtime-nonce")
+    assert changed.healthy
+    assert changed.revision == returned_revision
+
+
+def test_partial_proxy_credentials_do_not_affect_public_m9_health() -> None:
+    observed_proxy_headers: list[tuple[str | None, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed_proxy_headers.append(
+            (request.headers.get("Modal-Key"), request.headers.get("Modal-Secret"))
+        )
+        return httpx.Response(200, json={"healthy": True, "echo": "nonce"})
+
+    target = ModalComputeTarget(
+        gateway=FakeGateway(),
+        proxy_token_id="wk-partial",
+        http_transport=httpx.MockTransport(handler),
+    )
+
+    assert target.health(_handle(), "nonce").healthy
+    assert observed_proxy_headers == [(None, None)]
+
+
+@pytest.mark.parametrize(
+    "endpoint_url",
+    [
+        "https://ctrl-pi--runtime.modal.run:443/",
+        "https://ctrl-pi--runtime.modal.run:/",
+        "https://ctrl-pi--runtime.modal.run/runtime",
+        "https://.modal.run/",
+        "https://modal.run/",
+        "https://bad_label.modal.run/",
+    ],
+)
+def test_health_rejects_noncanonical_modal_url_before_sending_proxy_credentials(
+    endpoint_url: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"healthy": True, "echo": "nonce"})
+
+    handle = replace(_handle(), endpoint_url=endpoint_url)
+    target = ModalComputeTarget(
+        gateway=FakeGateway(),
+        proxy_token_id="wk-runtime",
+        proxy_token_secret="ws-runtime",
+        http_transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ComputeOwnershipError, match="endpoint URL"):
+        target.health(handle, "nonce")
+
+    assert requests == []
+
+
+def test_partial_proxy_credentials_reject_runtime_deploy_before_provider_access() -> None:
+    gateway = FakeGateway()
+    target = ModalComputeTarget(
+        gateway=gateway,
+        hf_token="hf_build_token",
+        proxy_token_id="wk-partial",
+    )
+
+    with pytest.raises(ComputeConfigurationError, match="proxy credentials"):
+        target.deploy(
+            _spec(
+                runtime="lerobot",
+                compute_size="Modal: A10G",
+                checkpoint_revision="a" * 40,
+            )
+        )
+
+    assert gateway.deploy_calls == []
+
+
+@pytest.mark.parametrize(
+    ("proxy_id", "proxy_secret"),
+    [
+        ("ak-lifecycle", "ws-runtime"),
+        ("wk-runtime", "as-lifecycle"),
+        (" wk-runtime", "ws-runtime"),
+        ("wk-runtime", "ws-runtime\n"),
+    ],
+)
+def test_invalid_proxy_token_formats_reject_runtime_deploy_before_provider_access(
+    proxy_id: str,
+    proxy_secret: str,
+) -> None:
+    gateway = FakeGateway()
+    target = ModalComputeTarget(
+        gateway=gateway,
+        hf_token="hf_build_token",
+        proxy_token_id=proxy_id,
+        proxy_token_secret=proxy_secret,
+    )
+
+    with pytest.raises(ComputeConfigurationError, match="proxy credentials"):
+        target.deploy(
+            _spec(
+                runtime="lerobot",
+                compute_size="Modal: A10G",
+                checkpoint_revision="a" * 40,
+            )
+        )
+
+    assert gateway.deploy_calls == []
+
+
 def test_gateway_and_http_errors_never_leak_credentials_or_exception_chains() -> None:
     gateway = FakeGateway()
     gateway.deploy_error = RuntimeError(f"provider rejected {SECRET}")
@@ -665,11 +838,70 @@ def test_gateway_and_http_errors_never_leak_credentials_or_exception_chains() ->
 
     health_target = ModalComputeTarget(
         gateway=FakeGateway(),
+        proxy_token_id="wk-safe-error-test",
+        proxy_token_secret=f"ws-{SECRET}",
         http_transport=httpx.MockTransport(network_error),
     )
     with pytest.raises(ComputeTargetError, match="could not be reached") as health:
         health_target.health(_handle(), "nonce")
     _assert_secret_safe(health.value)
+
+
+def test_official_gateway_recovers_class_web_url_with_supported_modal_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = object()
+    calls: list[tuple[str, str, str | None, object]] = []
+
+    def missing_function(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise NotFoundError("function is not deployed")
+
+    class FakeWeb:
+        @staticmethod
+        def get_web_url() -> str:
+            return ENDPOINT_URL
+
+    class FakeClassReference:
+        def __call__(self) -> SimpleNamespace:
+            return SimpleNamespace(web=FakeWeb())
+
+    def class_from_name(
+        app_name: str,
+        class_name: str,
+        *,
+        environment_name: str | None,
+        client: object,
+    ) -> FakeClassReference:
+        calls.append((app_name, class_name, environment_name, client))
+        return FakeClassReference()
+
+    monkeypatch.setattr(
+        modal.Function,
+        "from_name",
+        staticmethod(missing_function),
+    )
+    monkeypatch.setattr(
+        modal.Cls,
+        "from_name",
+        staticmethod(class_from_name),
+    )
+    gateway = _OfficialModalGateway(
+        token_id=None,
+        token_secret=None,
+        environment_name="main",
+    )
+    gateway._modal_client = client
+
+    assert gateway.get_endpoint_url(deployment_app_name(DEPLOYMENT_ID)) == ENDPOINT_URL
+    assert calls == [
+        (
+            deployment_app_name(DEPLOYMENT_ID),
+            MODAL_RUNTIME_CLASS,
+            "main",
+            client,
+        )
+    ]
 
 
 @pytest.mark.parametrize("owned", [True, False])

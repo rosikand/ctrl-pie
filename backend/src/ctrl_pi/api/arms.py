@@ -14,6 +14,7 @@ from ctrl_pi.drivers.yam import (
     TelemetryFrame,
     YAMDriver,
 )
+from ctrl_pi.rig import RigLease, RigLeaseConflictError
 
 router = APIRouter(tags=["arms"])
 TELEMETRY_INTERVAL_SECONDS = 0.05
@@ -21,6 +22,10 @@ TELEMETRY_INTERVAL_SECONDS = 0.05
 
 def get_yam_driver(request: Request) -> YAMDriver:
     return request.app.state.yam_driver
+
+
+def get_rig_lease(request: Request) -> RigLease:
+    return request.app.state.rig_lease
 
 
 @router.get("/api/arms", response_model=ArmsResponse)
@@ -41,9 +46,13 @@ def jog_arm(
     arm_id: str,
     command: JogCommand,
     driver: YAMDriver = Depends(get_yam_driver),
+    rig_lease: RigLease = Depends(get_rig_lease),
 ) -> ArmTelemetry:
     try:
-        return driver.jog(arm_id, command)
+        with rig_lease.hold("manual", f"jog:{arm_id}"):
+            return driver.jog(arm_id, command)
+    except RigLeaseConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
     except ArmNotFoundError as error:
         raise HTTPException(status_code=404, detail=f"Arm '{arm_id}' was not found.") from error
     except JogLimitError as error:

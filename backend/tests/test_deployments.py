@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import traceback
 import uuid
 from collections.abc import Generator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,10 +31,13 @@ from ctrl_pi.compute import (
 )
 from ctrl_pi.db import Base, get_db
 from ctrl_pi.deployments import (
+    DeploymentConfigurationError,
     DeploymentConflictError,
     DeploymentProviderError,
     DeploymentService,
     DeploymentStorageError,
+    HFModelRevisionResolver,
+    ResolvedModelRevision,
 )
 from ctrl_pi.main import create_app
 from ctrl_pi.models import AppSetting, Deployment, InferenceEndpoint
@@ -47,6 +52,7 @@ class FakeTarget:
         self.deploy_error: str | None = None
         self.health_error: Exception | None = None
         self.health_echo_matches = True
+        self.health_identity: tuple[str, str, str] | None = None
         self.deploy_without_url = False
         self.stop_failures = 0
         self.stop_leaves_running = False
@@ -87,6 +93,15 @@ class FakeTarget:
         self.health_calls += 1
         if self.health_error is not None:
             raise self.health_error
+        if self.health_identity is not None:
+            runtime, model_repo, revision = self.health_identity
+            return HealthResult(
+                healthy=True,
+                echo=nonce if self.health_echo_matches else "wrong-nonce",
+                runtime=runtime,
+                model_repo=model_repo,
+                revision=revision,
+            )
         return HealthResult(
             healthy=True,
             echo=nonce if self.health_echo_matches else "wrong-nonce",
@@ -147,6 +162,29 @@ class FakeTarget:
         )
 
 
+class FakeModelRevisionResolver:
+    def __init__(
+        self,
+        result: ResolvedModelRevision | object,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.calls: list[tuple[str, str | None]] = []
+
+    def resolve(
+        self,
+        *,
+        model_repo: str,
+        revision: str | None,
+    ) -> ResolvedModelRevision:
+        self.calls.append((model_repo, revision))
+        if self.error is not None:
+            raise self.error
+        return self.result  # type: ignore[return-value]
+
+
 @pytest.fixture
 def deployment_app(tmp_path: Path):
     engine = create_engine(
@@ -184,6 +222,260 @@ def _deploy(client: TestClient, **overrides):
     }
     payload.update(overrides)
     return client.post("/api/inference/deployments", json=payload)
+
+
+def test_hf_model_revision_resolver_uses_explicit_token_and_pins_branch() -> None:
+    token = "hf_explicit_model_token"
+    calls: list[dict[str, object]] = []
+
+    class FakeHub:
+        def model_info(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(id="acme/policy", sha="A" * 40)
+
+    factory_tokens: list[str] = []
+
+    def hub_factory(value: str) -> FakeHub:
+        factory_tokens.append(value)
+        return FakeHub()
+
+    resolver = HFModelRevisionResolver(
+        token,
+        "acme",
+        hub_api_factory=hub_factory,
+    )
+
+    assert resolver.resolve(
+        model_repo="acme/policy",
+        revision="release/v1",
+    ) == ResolvedModelRevision(
+        model_repo="acme/policy",
+        revision="a" * 40,
+    )
+    assert factory_tokens == [token]
+    assert calls == [
+        {
+            "repo_id": "acme/policy",
+            "revision": "release/v1",
+            "token": token,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("requested_revision", "returned_repo", "returned_revision"),
+    [
+        ("main", "other/policy", "a" * 40),
+        ("main", None, "a" * 40),
+        ("a" * 40, "acme/policy", "b" * 40),
+        ("main", "acme/policy", "not-a-sha"),
+        ("main", "acme/policy", None),
+    ],
+)
+def test_hf_model_revision_resolver_rejects_mismatched_identity(
+    requested_revision: str,
+    returned_repo: str | None,
+    returned_revision: str | None,
+) -> None:
+    class FakeHub:
+        def model_info(self, **kwargs):
+            del kwargs
+            return SimpleNamespace(id=returned_repo, sha=returned_revision)
+
+    resolver = HFModelRevisionResolver(
+        "hf_explicit_model_token",
+        "acme",
+        hub_api_factory=lambda _token: FakeHub(),
+    )
+
+    with pytest.raises(DeploymentProviderError, match="identity"):
+        resolver.resolve(
+            model_repo="acme/policy",
+            revision=requested_revision,
+        )
+
+
+def test_hf_model_revision_errors_have_no_raw_exception_chain() -> None:
+    secret = "hf_literal_secret_in_exception"
+
+    class FailingHub:
+        def model_info(self, **kwargs):
+            del kwargs
+            raise RuntimeError(f"remote response included {secret}")
+
+    resolver = HFModelRevisionResolver(
+        "hf_explicit_model_token",
+        "acme",
+        hub_api_factory=lambda _token: FailingHub(),
+    )
+
+    with pytest.raises(DeploymentProviderError) as caught:
+        resolver.resolve(model_repo="acme/policy", revision=None)
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert secret not in str(caught.value)
+    assert secret not in rendered
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("token", "namespace", "model_repo"),
+    [
+        (None, "acme", "acme/policy"),
+        ("hf_explicit_model_token", None, "acme/policy"),
+        ("hf_explicit_model_token", "acme", "other/policy"),
+    ],
+)
+def test_hf_model_revision_requires_configured_namespace_before_hub_access(
+    token: str | None,
+    namespace: str | None,
+    model_repo: str,
+) -> None:
+    factory_calls: list[str] = []
+
+    def hub_factory(value: str) -> object:
+        factory_calls.append(value)
+        raise AssertionError("Hub access must not occur")
+
+    resolver = HFModelRevisionResolver(
+        token,
+        namespace,
+        hub_api_factory=hub_factory,
+    )
+
+    with pytest.raises(DeploymentConfigurationError):
+        resolver.resolve(model_repo=model_repo, revision="main")
+
+    assert factory_calls == []
+
+
+@pytest.mark.parametrize("runtime", ["lerobot", "openpi"])
+@pytest.mark.parametrize(
+    "compute_size",
+    ["Modal: A10G", "Modal: A100", "Modal: H100"],
+)
+@pytest.mark.asyncio
+async def test_service_mock_runtime_resolves_before_persistence_and_provider(
+    deployment_app,
+    runtime: str,
+    compute_size: str,
+) -> None:
+    _, engine, factory, _, _ = deployment_app
+    target = FakeTarget()
+    revision = "f" * 40
+    target.health_identity = (runtime, "acme/runtime-policy", revision)
+    resolver = FakeModelRevisionResolver(
+        ResolvedModelRevision("acme/runtime-policy", revision)
+    )
+    service = DeploymentService(
+        target,
+        model_revision_resolver=resolver,
+        session_factory=factory,
+        nonce_factory=lambda: "fixed-runtime-nonce",
+        stop_verify_timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+
+    with factory() as db:
+        record = await service.deploy(
+            db,
+            name="Mock runtime",
+            model_repo="acme/runtime-policy",
+            checkpoint_revision="release/v1",
+            runtime=runtime,
+            compute_size=compute_size,
+            timeout_seconds=1800,
+        )
+
+    assert record.checkpoint_revision == revision
+    assert record.runtime == runtime
+    assert record.compute_size == compute_size
+    assert resolver.calls == [("acme/runtime-policy", "release/v1")]
+    assert target.deploy_calls == 1
+    assert target.specs[0].checkpoint_revision == revision
+    assert target.specs[0].resources.compute_size == compute_size
+    with Session(engine) as db:
+        deployment = db.scalar(select(Deployment))
+        assert deployment is not None
+        assert deployment.model_repo == "acme/runtime-policy"
+        assert deployment.checkpoint_revision == revision
+
+
+@pytest.mark.asyncio
+async def test_missing_hf_token_and_broken_resolver_fail_before_rows_or_provider(
+    deployment_app,
+) -> None:
+    _, engine, factory, target, _ = deployment_app
+    missing = HFModelRevisionResolver(None, "acme")
+    service = DeploymentService(target, model_revision_resolver=missing)
+    with factory() as db:
+        with pytest.raises(DeploymentConfigurationError):
+            await service.deploy(
+                db,
+                name="Missing token",
+                model_repo="acme/runtime-policy",
+                checkpoint_revision="main",
+                runtime="lerobot",
+                compute_size="Modal: A10G",
+                timeout_seconds=1800,
+            )
+    assert target.deploy_calls == 0
+    with Session(engine) as db:
+        assert db.scalar(select(Deployment)) is None
+        assert db.scalar(select(InferenceEndpoint)) is None
+
+    for invalid_result in (
+        None,
+        ResolvedModelRevision(
+            "acme/runtime-policy",
+            None,  # type: ignore[arg-type]
+        ),
+    ):
+        broken = FakeModelRevisionResolver(invalid_result)
+        service = DeploymentService(target, model_revision_resolver=broken)
+        with factory() as db:
+            with pytest.raises(DeploymentProviderError):
+                await service.deploy(
+                    db,
+                    name="Broken resolver",
+                    model_repo="acme/runtime-policy",
+                    checkpoint_revision="main",
+                    runtime="lerobot",
+                    compute_size="Modal: A10G",
+                    timeout_seconds=1800,
+                )
+        assert target.deploy_calls == 0
+        with Session(engine) as db:
+            assert db.scalar(select(Deployment)) is None
+
+
+@pytest.mark.asyncio
+async def test_real_modal_openpi_rejects_before_hf_or_provider(
+    deployment_app,
+) -> None:
+    _, engine, factory, target, _ = deployment_app
+    target.kind = "modal"
+    resolver = FakeModelRevisionResolver(
+        ResolvedModelRevision("acme/runtime-policy", "a" * 40)
+    )
+    service = DeploymentService(target, model_revision_resolver=resolver)
+    with factory() as db:
+        with pytest.raises(DeploymentConfigurationError):
+            await service.deploy(
+                db,
+                name="Unavailable OpenPI",
+                model_repo="acme/runtime-policy",
+                checkpoint_revision="main",
+                runtime="openpi",
+                compute_size="Modal: A10G",
+                timeout_seconds=1800,
+            )
+    assert resolver.calls == []
+    assert target.deploy_calls == 0
+    with Session(engine) as db:
+        assert db.scalar(select(Deployment)) is None
+        assert db.scalar(select(InferenceEndpoint)) is None
 
 
 def test_api_stub_success_persists_atomic_state_and_idempotent_stop(
@@ -815,6 +1107,81 @@ async def test_startup_leaves_other_target_kind_resources_untouched(
         deployment = db.get(Deployment, deployment_id)
         endpoint = db.get(InferenceEndpoint, deployment.endpoint_id)
         assert deployment.status == endpoint.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_startup_revalidates_runtime_identity_from_persisted_row(
+    deployment_app,
+) -> None:
+    _, engine, _, target, service = deployment_app
+    deployment_id = uuid.uuid4()
+    revision = "c" * 40
+    handle = target._handle(deployment_id)
+    target.states[deployment_id] = target._state(handle, "running", 1)
+    target.health_identity = ("lerobot", "acme/runtime-model", revision)
+    with Session(engine) as db:
+        endpoint = InferenceEndpoint(
+            name="runtime",
+            runtime="lerobot",
+            status="running",
+            endpoint_url=handle.endpoint_url,
+            provider_app_id=handle.provider_app_id,
+        )
+        db.add(endpoint)
+        db.flush()
+        db.add(
+            Deployment(
+                id=deployment_id,
+                endpoint_id=endpoint.id,
+                model_repo="acme/runtime-model",
+                checkpoint_revision=revision,
+                runtime="lerobot",
+                compute_size="Modal: A10G",
+                status="running",
+            )
+        )
+        db.commit()
+
+    await service.reconcile_startup()
+
+    assert target.health_calls == 1
+    assert target.stop_calls == 0
+    with Session(engine) as db:
+        deployment = db.get(Deployment, deployment_id)
+        endpoint = db.get(InferenceEndpoint, deployment.endpoint_id)
+        assert deployment.status == endpoint.status == "running"
+
+
+def test_runtime_health_identity_must_match_the_persisted_model() -> None:
+    nonce = "identity-nonce"
+
+    DeploymentService._validate_health(
+        HealthResult(
+            healthy=True,
+            echo=nonce,
+            runtime="lerobot",
+            model_repo="acme/runtime-model",
+            revision="d" * 40,
+        ),
+        nonce,
+        runtime="lerobot",
+        model_repo="acme/runtime-model",
+        checkpoint_revision="d" * 40,
+    )
+    with pytest.raises(DeploymentProviderError, match="identity"):
+        DeploymentService._validate_health(
+            HealthResult(
+                healthy=True,
+                echo=nonce,
+                runtime="lerobot",
+                model_repo="acme/runtime-model",
+                revision="e" * 40,
+            ),
+            nonce,
+            runtime="lerobot",
+            model_repo="acme/runtime-model",
+            checkpoint_revision="d" * 40,
+        )
 
 
 def test_deployment_target_kind_has_database_default_and_constraint() -> None:

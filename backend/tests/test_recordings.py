@@ -25,6 +25,19 @@ from ctrl_pi.models import AppSetting, Recording, Robot
 from ctrl_pi.recording import RecordingConflictError, RecordingManager
 
 
+class _FailingActionDriver(MockYAMDriver):
+    def __init__(self, fail_on_call: int) -> None:
+        super().__init__()
+        self.fail_on_call = fail_on_call
+        self.action_calls = 0
+
+    def apply_action(self, arm_id, action):
+        self.action_calls += 1
+        if self.action_calls >= self.fail_on_call:
+            raise RuntimeError("mock action failure")
+        return super().apply_action(arm_id, action)
+
+
 @pytest.fixture
 def recording_app(tmp_path: Path):
     engine = create_engine(
@@ -107,6 +120,12 @@ def test_recording_lifecycle_writes_atomic_mp4_and_synchronized_samples(
         started = client.post(f"/api/recordings/{recording_id}/teleop/start")
         assert started.status_code == 200
         assert started.json()["teleop_active"] is True
+        blocked_jog = client.post(
+            "/api/arms/yam-follower/jog",
+            json={"kind": "joint", "axis": "shoulder_yaw", "delta": 0.1},
+        )
+        assert blocked_jog.status_code == 409
+        assert "controlled by teleop" in blocked_jog.json()["detail"]
 
         episode = client.post(
             f"/api/recordings/{recording_id}/episodes/start",
@@ -125,6 +144,11 @@ def test_recording_lifecycle_writes_atomic_mp4_and_synchronized_samples(
         assert stopped.json()["episode_count"] == 1
         assert stopped.json()["episode_active"] is False
         assert client.post(f"/api/recordings/{recording_id}/teleop/stop").status_code == 200
+        released_jog = client.post(
+            "/api/arms/yam-follower/jog",
+            json={"kind": "joint", "axis": "shoulder_yaw", "delta": 0.1},
+        )
+        assert released_jog.status_code == 200
 
     episode_dir = staging / str(recording_id) / "episode_000000"
     video_path = episode_dir / "video.mp4"
@@ -176,6 +200,7 @@ def test_recording_lifecycle_writes_atomic_mp4_and_synchronized_samples(
         assert not Path(summary["artifact_key"]).is_absolute()
 
     assert asyncio.run(manager.active_resource_counts()) == (0, 0)
+    assert manager.rig_lease.current() is None
 
 
 def test_app_shutdown_stops_active_teleop_and_ffmpeg(recording_app) -> None:
@@ -187,7 +212,63 @@ def test_app_shutdown_stops_active_teleop_and_ffmpeg(recording_app) -> None:
         time.sleep(0.05)
 
     assert asyncio.run(manager.active_resource_counts()) == (0, 0)
+    assert manager.rig_lease.current() is None
     assert not (staging / str(recording_id) / "episode_000000" / "video.mp4").exists()
+
+
+@pytest.mark.asyncio
+async def test_teleop_releases_rig_when_the_first_driver_action_fails(
+    tmp_path: Path,
+) -> None:
+    driver = _FailingActionDriver(fail_on_call=1)
+    manager = RecordingManager(
+        driver,
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+    )
+
+    with pytest.raises(RuntimeError, match="mock action failure"):
+        await manager.start_teleop(
+            "session",
+            "yam-leader",
+            "yam-follower",
+            episode_count=0,
+            status="draft",
+        )
+
+    assert await manager.active_resource_counts() == (0, 0)
+    assert manager.rig_lease.current() is None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_teleop_releases_rig_when_the_background_loop_fails(
+    tmp_path: Path,
+) -> None:
+    driver = _FailingActionDriver(fail_on_call=2)
+    manager = RecordingManager(
+        driver,
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+        teleop_frequency_hz=100.0,
+    )
+    await manager.start_teleop(
+        "session",
+        "yam-leader",
+        "yam-follower",
+        episode_count=0,
+        status="draft",
+    )
+
+    for _ in range(50):
+        if manager.rig_lease.current() is None:
+            break
+        await asyncio.sleep(0.01)
+
+    assert driver.action_calls == 2
+    assert await manager.active_resource_counts() == (0, 0)
+    assert manager.rig_lease.current() is None
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -254,6 +335,151 @@ async def test_episode_finalization_keeps_the_global_rig_locked(
     await manager.confirm_episode_persisted("session", 1, "teleop")
     await manager.stop_teleop("session")
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_teleop_failure_during_finalization_is_not_restored_to_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver = _FailingActionDriver(fail_on_call=10_000)
+    manager = RecordingManager(
+        driver,
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+        teleop_frequency_hz=100.0,
+    )
+    await manager.start_teleop(
+        "session",
+        "yam-leader",
+        "yam-follower",
+        episode_count=0,
+        status="draft",
+    )
+    await manager.start_episode("session", fps=10, metadata={})
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_finalize = manager._finalize_episode
+
+    def slow_finalize(episode, success, notes):
+        entered.set()
+        assert release.wait(timeout=3)
+        return original_finalize(episode, success, notes)
+
+    monkeypatch.setattr(manager, "_finalize_episode", slow_finalize)
+    stop_task = asyncio.create_task(
+        manager.stop_episode("session", success=True, notes=None)
+    )
+    assert await asyncio.to_thread(entered.wait, 3)
+    driver.fail_on_call = driver.action_calls + 1
+
+    for _ in range(100):
+        if manager.rig_lease.current() is None:
+            break
+        await asyncio.sleep(0.01)
+    assert manager.rig_lease.current() is None
+
+    release.set()
+    stopped, _ = await stop_task
+    assert stopped.status == "failed"
+    assert stopped.teleop_active is False
+    await manager.confirm_episode_persisted("session", 1, "failed")
+    assert await manager.active_resource_counts() == (0, 0)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_persistence_confirmation_preserves_a_late_teleop_failure(
+    tmp_path: Path,
+) -> None:
+    driver = _FailingActionDriver(fail_on_call=10_000)
+    manager = RecordingManager(
+        driver,
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+        teleop_frequency_hz=100.0,
+    )
+    await manager.start_teleop(
+        "session",
+        "yam-leader",
+        "yam-follower",
+        episode_count=0,
+        status="draft",
+    )
+    await manager.start_episode("session", fps=10, metadata={})
+    stopped, _ = await manager.stop_episode("session", success=True, notes=None)
+    assert stopped.status == "teleop"
+
+    driver.fail_on_call = driver.action_calls + 1
+    for _ in range(100):
+        if manager.rig_lease.current() is None:
+            break
+        await asyncio.sleep(0.01)
+    assert manager.rig_lease.current() is None
+
+    with pytest.raises(RecordingConflictError, match="still finalizing"):
+        await manager.start_teleop(
+            "session",
+            "yam-leader",
+            "yam-follower",
+            episode_count=0,
+            status="teleop",
+        )
+    confirmed = await manager.confirm_episode_persisted("session", 1, "teleop")
+    assert confirmed.status == "failed"
+    assert confirmed.teleop_active is False
+    assert confirmed.episode_count == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_in_flight_episode_finalizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = RecordingManager(
+        MockYAMDriver(),
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+        teleop_frequency_hz=100.0,
+    )
+    await manager.start_teleop(
+        "session",
+        "yam-leader",
+        "yam-follower",
+        episode_count=0,
+        status="draft",
+    )
+    await manager.start_episode("session", fps=10, metadata={})
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_finalize = manager._finalize_episode
+
+    def slow_finalize(episode, success, notes):
+        entered.set()
+        assert release.wait(timeout=3)
+        return original_finalize(episode, success, notes)
+
+    monkeypatch.setattr(manager, "_finalize_episode", slow_finalize)
+    stop_task = asyncio.create_task(
+        manager.stop_episode("session", success=True, notes=None)
+    )
+    assert await asyncio.to_thread(entered.wait, 3)
+
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    await asyncio.sleep(0.05)
+    assert shutdown_task.done() is False
+    release.set()
+
+    stopped, _ = await stop_task
+    await shutdown_task
+    assert stopped.status == "failed"
+    assert await manager.active_resource_counts() == (0, 0)
+    assert manager.rig_lease.current() is None
+    episode_dir = tmp_path / "staging" / "session" / "episode_000000"
+    assert (episode_dir / "video.mp4").is_file()
+    assert (episode_dir / "samples.jsonl").is_file()
+    assert not (episode_dir / "video.partial.mp4").exists()
 
 
 def test_recording_create_validates_arm_roles_and_reserved_metadata(recording_app) -> None:

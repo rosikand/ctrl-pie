@@ -17,7 +17,11 @@ from ctrl_pi.compute import ComputeTarget
 from ctrl_pi.compute_stub import StubComputeTarget
 from ctrl_pi.config import get_config
 from ctrl_pi.db import configured_engine
-from ctrl_pi.deployments import DeploymentService
+from ctrl_pi.deployments import (
+    DeploymentService,
+    HFModelRevisionResolver,
+    ModelRevisionResolver,
+)
 from ctrl_pi.drivers.mock_yam import MockYAMDriver
 from ctrl_pi.drivers.yam import YAMDriver
 from ctrl_pi.hf import HFDatasetUploader
@@ -25,6 +29,7 @@ from ctrl_pi.hf_datasets import HFDatasetBrowser
 from ctrl_pi.hf_episodes import HFEpisodeBrowser
 from ctrl_pi.hf_models import HFModelBrowser
 from ctrl_pi.recording import RecordingManager
+from ctrl_pi.rig import RigLease
 
 
 def create_app(
@@ -36,16 +41,23 @@ def create_app(
     hf_episode_browser: HFEpisodeBrowser | None = None,
     hf_model_browser: HFModelBrowser | None = None,
     compute_target: ComputeTarget | None = None,
+    model_revision_resolver: ModelRevisionResolver | None = None,
     deployment_service: DeploymentService | None = None,
 ) -> FastAPI:
     config = get_config()
     driver = yam_driver or MockYAMDriver()
     camera = mock_camera or MockCamera()
-    manager = recording_manager or RecordingManager(
-        driver=driver,
-        camera=camera,
-        staging_dir=config.recording_staging_dir,
-    )
+    if recording_manager is None:
+        rig_lease = RigLease()
+        manager = RecordingManager(
+            driver=driver,
+            camera=camera,
+            staging_dir=config.recording_staging_dir,
+            rig_lease=rig_lease,
+        )
+    else:
+        manager = recording_manager
+        rig_lease = manager.rig_lease
     uploader = hf_uploader or HFDatasetUploader(config.recording_staging_dir)
     dataset_browser = hf_dataset_browser or HFDatasetBrowser()
     episode_browser = hf_episode_browser or HFEpisodeBrowser()
@@ -67,6 +79,16 @@ def create_app(
         )
         deployment_service = DeploymentService(
             target,
+            model_revision_resolver=(
+                model_revision_resolver
+                if model_revision_resolver is not None
+                else HFModelRevisionResolver(
+                    config.hf_token.get_secret_value()
+                    if config.hf_token is not None
+                    else None,
+                    config.hf_namespace,
+                )
+            ),
             session_factory=deployment_session_factory,
         )
 
@@ -99,6 +121,7 @@ def create_app(
         return JSONResponse(status_code=422, content={"detail": details})
 
     application.state.yam_driver = driver
+    application.state.rig_lease = rig_lease
     application.state.mock_camera = manager.camera
     application.state.recording_manager = manager
     application.state.hf_uploader = uploader
