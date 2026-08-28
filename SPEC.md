@@ -371,3 +371,9 @@ open issues. Do not expand scope.
   Mock mode uses the immutable built-in identity
   `ctrl-pi/mock-policy@0000000000000000000000000000000000000000`, so all
   runtime selections remain deterministic and make no Hub or Modal calls.
+- 2026-08-28 — The production Docker option is one non-root container where
+  one Uvicorn process serves both the built Vite assets and the API and owns
+  the process-local robot rig. PostgreSQL, Hugging Face, and Modal remain
+  external user-owned services. The Ubuntu host configures SocketCAN; Docker
+  receives only explicitly selected USB devices or an explicit host-network
+  opt-in, never privileged access.

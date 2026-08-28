@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -36,6 +37,7 @@ from ctrl_pi.inference_transport import (
 )
 from ctrl_pi.recording import RecordingManager
 from ctrl_pi.rig import RigLease
+from ctrl_pi.spa import install_spa
 
 
 def create_app(
@@ -51,6 +53,7 @@ def create_app(
     deployment_service: DeploymentService | None = None,
     inference_session_manager: InferenceSessionManager | None = None,
     inference_transport_factory: TransportFactory | None = None,
+    frontend_dist_dir: Path | None = None,
 ) -> FastAPI:
     config = get_config()
     driver = yam_driver or MockYAMDriver()
@@ -191,6 +194,13 @@ def create_app(
     @application.get("/api/health", tags=["system"])
     def health() -> dict[str, str]:
         return {"status": "ok", "mode": "mock"}
+
+    install_spa(
+        application,
+        frontend_dist_dir
+        if frontend_dist_dir is not None
+        else config.frontend_dist_dir,
+    )
 
     return application
 

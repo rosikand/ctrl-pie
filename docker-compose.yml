@@ -1,0 +1,40 @@
+name: ctrl-pi
+
+services:
+  app:
+    image: ctrl-pi:local
+    build:
+      context: .
+      target: runtime
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      HF_NAMESPACE: "${HF_NAMESPACE:-}"
+      MODAL_TOKEN_ID: "${MODAL_TOKEN_ID:-}"
+      MODAL_TOKEN_SECRET: "${MODAL_TOKEN_SECRET:-}"
+      MODAL_PROXY_TOKEN_ID: "${MODAL_PROXY_TOKEN_ID:-}"
+      MODAL_PROXY_TOKEN_SECRET: "${MODAL_PROXY_TOKEN_SECRET:-}"
+      CTRL_PI_MOCK_MODE: "${CTRL_PI_MOCK_MODE:-true}"
+      RECORDING_STAGING_DIR: /var/lib/ctrl-pi/recordings
+      XDG_CACHE_HOME: /var/lib/ctrl-pi/cache
+      HF_HOME: /var/lib/ctrl-pi/cache/huggingface
+      FRONTEND_DIST_DIR: /app/frontend/dist
+    volumes:
+      - ctrl-pi-data:/var/lib/ctrl-pi
+    init: true
+    stop_grace_period: 90s
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${CTRL_PI_BIND_ADDRESS:-127.0.0.1}:${CTRL_PI_PORT:-8000}:8000"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  ctrl-pi-data:
