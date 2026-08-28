@@ -331,3 +331,18 @@ open issues. Do not expand scope.
   additional run-status state machine. Model discovery stays inside the
   configured HF namespace and pins cards/checkpoint paths to an immutable
   revision using an explicitly token-bound Hub client.
+- 2026-08-28 — Each inference deployment owns exactly one deterministic
+  compute app (`ctrl-pi-<deployment UUID>`) and an exact deployment ownership
+  tag. The deployment row persists its `stub` or `modal` target kind so a
+  restart or mode change can never stop a resource through the wrong
+  provider. Stub and Modal targets share the same nonce-health and
+  stop-with-verification lifecycle; only provider-proof transitions the
+  atomic deployment/endpoint rows to `running` or `stopped`.
+- 2026-08-28 — The Modal boundary is pinned to the Python 3.11-compatible
+  `modal==1.5.4`. Deployment, App tags, and web-function lookup use public SDK
+  APIs; task-count inspection, lifecycle proof, and stop-by-provider-ID use
+  the same `AppList`, `AppGetLifecycle`, and `AppStop` protobuf calls as the
+  pinned official CLI, isolated inside `ModalComputeTarget` because the stable
+  App API does not yet expose those teardown primitives. Modal forbids `/` in
+  App tag keys and values, so the provider losslessly represents the domain
+  ownership tag as `ctrl-pi-deployment=<deployment UUID>`.

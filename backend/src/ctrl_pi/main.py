@@ -3,15 +3,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import sessionmaker
 
 from ctrl_pi.api.arms import router as arms_router
 from ctrl_pi.api.camera import router as camera_router
 from ctrl_pi.api.datasets import router as datasets_router
+from ctrl_pi.api.inference import router as inference_router
 from ctrl_pi.api.recordings import router as recordings_router
 from ctrl_pi.api.settings import router as settings_router
 from ctrl_pi.api.trainer import router as trainer_router
 from ctrl_pi.camera import MockCamera
+from ctrl_pi.compute import ComputeTarget
+from ctrl_pi.compute_stub import StubComputeTarget
 from ctrl_pi.config import get_config
+from ctrl_pi.db import configured_engine
+from ctrl_pi.deployments import DeploymentService
 from ctrl_pi.drivers.mock_yam import MockYAMDriver
 from ctrl_pi.drivers.yam import YAMDriver
 from ctrl_pi.hf import HFDatasetUploader
@@ -29,6 +35,8 @@ def create_app(
     hf_dataset_browser: HFDatasetBrowser | None = None,
     hf_episode_browser: HFEpisodeBrowser | None = None,
     hf_model_browser: HFModelBrowser | None = None,
+    compute_target: ComputeTarget | None = None,
+    deployment_service: DeploymentService | None = None,
 ) -> FastAPI:
     config = get_config()
     driver = yam_driver or MockYAMDriver()
@@ -42,10 +50,30 @@ def create_app(
     dataset_browser = hf_dataset_browser or HFDatasetBrowser()
     episode_browser = hf_episode_browser or HFEpisodeBrowser()
     model_browser = hf_model_browser or HFModelBrowser()
+    if deployment_service is None:
+        if compute_target is not None:
+            target = compute_target
+        elif config.mock_mode:
+            target = StubComputeTarget()
+        else:
+            from ctrl_pi.compute_modal import ModalComputeTarget
+
+            target = ModalComputeTarget.from_config(config)
+        engine = configured_engine()
+        deployment_session_factory = (
+            None
+            if engine is None
+            else sessionmaker(bind=engine, expire_on_commit=False)
+        )
+        deployment_service = DeploymentService(
+            target,
+            session_factory=deployment_session_factory,
+        )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         await application.state.recording_manager.startup()
+        await application.state.deployment_service.reconcile_startup()
         yield
         await application.state.recording_manager.shutdown()
 
@@ -77,12 +105,14 @@ def create_app(
     application.state.hf_dataset_browser = dataset_browser
     application.state.hf_episode_browser = episode_browser
     application.state.hf_model_browser = model_browser
+    application.state.deployment_service = deployment_service
     application.include_router(settings_router)
     application.include_router(arms_router)
     application.include_router(recordings_router)
     application.include_router(camera_router)
     application.include_router(datasets_router)
     application.include_router(trainer_router)
+    application.include_router(inference_router)
 
     @application.get("/api/health", tags=["system"])
     def health() -> dict[str, str]:

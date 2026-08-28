@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -109,7 +110,13 @@ class InferenceEndpoint(TimestampMixin, Base):
 
 class Deployment(TimestampMixin, Base):
     __tablename__ = "deployments"
-    __table_args__ = (Index("ix_deployments_status", "status"),)
+    __table_args__ = (
+        Index("ix_deployments_status", "status"),
+        CheckConstraint(
+            "target_kind IN ('stub', 'modal')",
+            name="ck_deployments_target_kind",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     endpoint_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -125,6 +132,9 @@ class Deployment(TimestampMixin, Base):
     checkpoint_revision: Mapped[str | None] = mapped_column(String(255))
     runtime: Mapped[str] = mapped_column(String(64), nullable=False)
     compute_size: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="stub", server_default="stub"
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
