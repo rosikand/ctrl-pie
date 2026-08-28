@@ -263,8 +263,8 @@ function CameraFeed() {
       <div className="relative aspect-[4/3] overflow-hidden bg-slate-950">
         <img
           key={imageKey}
-          src={`/api/camera/mock/stream?connection=${imageKey}`}
-          alt="Live workspace view from the mock camera"
+          src={`/api/camera/stream?connection=${imageKey}`}
+          alt="Live workspace camera view"
           onLoad={() => setCameraState("live")}
           onError={() => setCameraState("error")}
           className={`h-full w-full object-contain transition-opacity ${cameraState === "live" ? "opacity-100" : "opacity-20"}`}
@@ -278,7 +278,7 @@ function CameraFeed() {
                 <LoaderCircle className="mx-auto h-6 w-6 animate-spin text-slate-500" />
               )}
               <p className="mt-2 text-xs font-medium text-slate-300">
-                {cameraState === "error" ? "Camera stream unavailable" : "Connecting to mock camera"}
+                {cameraState === "error" ? "Camera stream unavailable" : "Connecting to camera"}
               </p>
               {cameraState === "error" && (
                 <button type="button" onClick={reconnect} className="mt-3 text-[11px] font-semibold text-blue-300 hover:text-blue-200">
@@ -289,7 +289,7 @@ function CameraFeed() {
           </div>
         )}
         <div className="absolute bottom-3 left-3 rounded-md bg-slate-950/70 px-2 py-1 font-mono text-[10px] text-white/70 backdrop-blur">
-          MOCK CAMERA · MJPEG
+          CAMERA · MJPEG
         </div>
       </div>
     </section>
