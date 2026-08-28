@@ -289,3 +289,8 @@ open issues. Do not expand scope.
 ## Decisions
 
 (Agent: append dated entries here when resolving ambiguities.)
+
+- 2026-08-28 — Milestone 1 includes a minimal FastAPI package, health test,
+  and no-op Alembic bootstrap because the mandatory gate requires backend
+  tests, a migration upgrade, and both dev servers after every milestone.
+  Domain persistence remains milestone 2.
