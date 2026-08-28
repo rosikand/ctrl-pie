@@ -1,0 +1,197 @@
+# Architecture
+
+ctrl-π is a single-user, self-hosted control plane for the YAM robot-learning
+workflow. Application traffic and private assets never bypass the backend to
+reach hardware, PostgreSQL, Hugging Face, or Modal. One FastAPI process on the
+arm-connected machine owns those boundaries; user-clicked Hub links may still
+open the corresponding Hugging Face page in a new browser tab.
+
+```text
+Browser
+  │  same-origin HTTP, MJPEG, byte ranges, and WebSockets
+  ▼
+FastAPI control plane ───────────────► PostgreSQL
+  │       │       │                    small durable metadata
+  │       │       └──────────────────► Hugging Face Hub
+  │       │                            datasets and model artifacts
+  │       └──────────────────────────► Modal
+  │                                    inference workloads only
+  ▼
+YAMDriver + camera
+  │
+CAN / USB / local mock rig
+```
+
+The production container serves the built Vite application and API from one
+origin on port 8000. Source development runs Vite on port 5173 and proxies
+`/api` and `/ws` to Uvicorn on port 8000. See [Development](development.md)
+and [Docker deployment](docker-deployment.md) for the two launch paths.
+
+## Boundaries and components
+
+| Layer | Responsibility | Representative code |
+| --- | --- | --- |
+| React frontend | Five workflow tabs and Settings; renders typed API state only | `frontend/src/` |
+| FastAPI routers | Validate browser input, return sanitized errors, and serialize public state | `backend/src/ctrl_pi/api/` |
+| Hardware boundary | Typed arm snapshots, bounded jogs, and absolute actions | `drivers/yam.py`, `drivers/mock_yam.py` |
+| Recording service | Teleop, camera capture, FFmpeg lifecycle, and synchronized samples | `recording.py`, `camera.py` |
+| Hub services | LeRobot conversion/upload and SHA-pinned dataset/model browsing | `hf.py`, `hf_datasets.py`, `hf_episodes.py`, `hf_models.py` |
+| Training tracker | PostgreSQL run metadata plus the synchronous reporting client | `api/trainer.py`, `trainer.py` |
+| Compute boundary | Provider-neutral deployment identity, health, inspection, and verified stop | `compute.py`, `compute_stub.py`, `compute_modal.py` |
+| Runtime boundary | Strict observation/action envelopes and LeRobot policy execution | `inference_runtime.py`, `runtime_lerobot.py`, `inference_transport.py` |
+| Inference orchestration | Arm loop, live metrics, passive recording, and teardown ordering | `robot_inference.py`, `inference_sessions.py` |
+
+Framework- and provider-specific objects stop at these boundaries. React does
+not import YAM, LeRobot, Hugging Face, or Modal concepts beyond the public API
+fields it renders.
+
+## State and ownership
+
+ctrl-π deliberately separates four kinds of state.
+
+### PostgreSQL: durable control-plane metadata
+
+PostgreSQL stores robots, recording summaries, training runs and their bounded
+metric/checkpoint metadata, inference endpoints/deployments, and non-secret
+settings. Alembic owns the schema. Robot rows use a database UUID internally
+and a stable hardware-facing `driver_id` such as `yam-follower` at API and
+driver boundaries.
+
+PostgreSQL never stores live joint telemetry, camera frames, raw observation
+images, action queues, full policy artifacts, MP4 bytes, or LeRobot parquet
+files.
+
+### Hugging Face Hub: durable artifact storage
+
+Uploaded demonstrations are canonical LeRobot v3 dataset repositories. Model
+weights and cards remain model repositories produced by external training
+tools. Discovery is restricted to the configured `HF_NAMESPACE`; private
+media is fetched and byte-range proxied by the backend at an immutable Hub
+revision, so `HF_TOKEN` never enters browser code.
+
+### Local staging: durable only on the host or Docker volume
+
+Before upload, each finalized episode contains an MP4 and synchronized JSONL
+samples below `RECORDING_STAGING_DIR`. PostgreSQL holds only a relative
+artifact key and aggregate metadata. Preserve this directory until upload is
+verified. Restoring PostgreSQL without the staging directory cannot recreate
+an unuploaded episode. The production Compose volume persists this data across
+normal container replacement, but `docker compose down --volumes` deletes it.
+
+After a successful upload, Hugging Face is the artifact source of truth. The
+original staging files are not automatically deleted, so operators must still
+budget and manage local disk usage.
+
+### Process memory: live state
+
+Arm telemetry, camera frames, active teleop/inference tasks, rig ownership,
+action queues, endpoint latency, frequency, and current episode duration live
+only in one backend process. A restart resets these values and never resumes
+motion. This is why ctrl-π must run with exactly one Uvicorn worker and must
+not be horizontally scaled.
+
+Modal Apps are external ephemeral resources. Their identity and lifecycle are
+represented in PostgreSQL, but a stopped deployment must also be proven
+stopped at the provider with zero running tasks.
+
+## Control flows
+
+### Arms and teleoperation
+
+`YAMDriver` returns typed point-in-time snapshots. `/ws/arms` publishes those
+snapshots without persistence. Manual jog, teleoperation, and inference all
+write through the same driver and compete for one process-local `RigLease`.
+The lease fails immediately on a conflict; it is not a distributed lock or a
+queue.
+
+Teleop samples the leader, converts it to an absolute `ArmAction`, and applies
+that action to the follower. Recording adds camera capture and synchronized
+observation/action samples without changing the driver boundary. The complete
+lifecycle is in [Recording and teleoperation](recording.md).
+
+### Dataset and model browsing
+
+The backend authenticates to Hub with an explicit token, verifies that the
+configured namespace belongs to the authenticated user or organization, and
+post-filters results to that exact owner. Metadata and cards are resolved at a
+40-character commit SHA and held in short in-memory caches. An unavailable or
+malformed card degrades one item instead of failing the whole listing.
+
+Episode detail reads LeRobot metadata/parquet at the same SHA. Video URLs carry
+that revision through the backend proxy, preventing a mutable Hub `HEAD` from
+mixing timeline data with a newer MP4.
+
+### Training
+
+Training never executes inside ctrl-π. External scripts use the REST API or
+the synchronous `ctrl_pi.trainer.Client` to create runs, report bounded scalar
+curves, and register model repository revisions. PostgreSQL stores that small
+state; the external training process uploads weights to Hub. See the
+[Trainer API](trainer-api.md).
+
+### Inference
+
+Provider deployment and robot motion are separate gates. Deploy first creates
+one exactly owned Stub or Modal resource and verifies its runtime, model
+repository, and immutable revision. A later Start selects one connected
+follower, acquires the rig, verifies the same runtime identity again, and
+runs one-in-flight observation/action streaming.
+
+Optional inference recording is passive: it reuses the inference lease and
+records only actions the loop actually applied. Stop joins local arm writes,
+finalizes the episode, and then verifies provider teardown in a
+cancellation-deferring path. Recording upload remains an explicit later
+operation. Details are in [Compute and inference](inference.md).
+
+## Startup, recovery, and shutdown
+
+FastAPI lifespan startup performs three ordered operations:
+
+1. enable the recording manager;
+2. reconcile persisted deployment rows with the configured compute target;
+3. tear down any running provider resource that has no process-local robot
+   loop.
+
+No loop is auto-resumed after a crash or restart. Interrupted upload statuses
+are reconciled to a safe retryable failure when no in-process uploader owns
+them. Recording statuses such as `teleop` or `recording` are normalized when
+their process-local task no longer exists.
+
+Shutdown first asks the inference session manager to stop arm writes and
+verify compute teardown. It then joins or aborts recording work, closes
+FFmpeg, and releases rig ownership. Compose supplies a 90-second grace period.
+If Modal cleanup remains uncertain, use the procedure in
+[Modal operator cleanup](modal-operations.md).
+
+## Trust and security boundary
+
+V1 has no ctrl-π login, API key, or multi-user authorization. Run it only on a
+trusted, firewalled host or LAN; do not publish port 8000 or the Vite
+development server directly to the Internet.
+
+Secrets come from the backend environment or Modal's local profile. They are
+never accepted through Settings, stored in PostgreSQL, serialized in API
+responses, placed in endpoint URLs, or sent to the browser. Modal API
+credentials and Modal Proxy Tokens are separate credential pairs. Hub and
+Modal calls use explicit credentials at their narrow service boundary, and
+public errors discard provider response bodies and raw exception text.
+
+Private Hub videos use a same-origin backend proxy. Modal inference endpoints
+require provider-native proxy authentication and accept only canonical HTTPS
+`.modal.run` roots. Strict bounded JSON envelopes replace native pickle/gRPC
+transport at the network boundary.
+
+This boundary assumes the machine and configured external accounts belong to
+one operator. Authentication, multi-user collaboration, message queues,
+Kubernetes, and additional compute providers are intentionally outside V1.
+
+## Further reading
+
+- [Setup and configuration](setup.md)
+- [Development](development.md)
+- [YAM driver interface](yam-driver.md)
+- [Recording and teleoperation](recording.md)
+- [Compute and inference](inference.md)
+- [Trainer API](trainer-api.md)
+- [Docker deployment](docker-deployment.md)
+- [Full mock smoke gate](smoke-test.md)

@@ -281,6 +281,11 @@ The model response is:
 Normal model responses use a 30-second private cache. `refresh=true` bypasses
 both Hub enumeration and revision-card caches and returns `Cache-Control:
 private, no-store`. A missing or malformed card degrades only that model.
+The `checkpoints` entries are artifact paths found inside the listed immutable
+model revision; they are not Hub branch names or commit revisions and must not
+be sent as an inference `checkpoint_revision`. Deployment selects the model's
+40-character `revision` and loads a policy from that revision's repository
+root.
 
 HTTP errors are stable and sanitized:
 
@@ -297,7 +302,13 @@ HTTP errors are stable and sanitized:
 LeRobot 0.4.4 owns the training and checkpoint layout. ctrl-π only observes
 small scalar/control-plane events. The following complete script launches the
 real `lerobot-train` command, streams its scalar log lines into ctrl-π, pushes
-the final `pretrained_model` directory, and registers the immutable Hub commit.
+the final `pretrained_model` directory at the **model repository root**, and
+registers the immutable Hub commit. Root placement is required for deployment:
+the LeRobot runtime opens `config.json`, `model.safetensors`,
+`policy_preprocessor.json`, and `policy_postprocessor.json` directly from the
+selected revision's root. Do not upload that directory under
+`checkpoints/<step>` and then register the resulting commit; such a repository
+can appear in Models but cannot be loaded as a policy snapshot.
 
 Set `CTRL_PI_URL`, `HF_TOKEN`, `DATASET_REPO`, and a **new, dedicated**
 `MODEL_REPO`. The example intentionally uses `exist_ok=False`: it refuses to
@@ -467,7 +478,6 @@ def main(
                 repo_id=model_repo,
                 repo_type="model",
                 folder_path=checkpoint_dir,
-                path_in_repo=f"checkpoints/{steps:0{width}d}",
                 commit_message=f"LeRobot checkpoint at step {steps}",
                 token=hf_token,
             )

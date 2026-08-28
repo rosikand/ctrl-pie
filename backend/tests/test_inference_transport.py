@@ -239,6 +239,33 @@ def test_modal_http_transport_sends_proxy_headers_and_parses_all_envelopes() -> 
     assert PROXY_ID not in calls[0]["url"] and PROXY_SECRET not in calls[0]["url"]
 
 
+def test_modal_http_transport_ignores_ambient_proxy_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    client_options: list[dict[str, Any]] = []
+    original_client = httpx.Client
+
+    def recording_client(*args: Any, **kwargs: Any) -> httpx.Client:
+        client_options.append(kwargs.copy())
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "ctrl_pi.inference_transport.httpx.Client",
+        recording_client,
+    )
+    transport = ModalInferenceTransport(
+        ENDPOINT,
+        proxy_token_id=PROXY_ID,
+        proxy_token_secret=PROXY_SECRET,
+        http_transport=httpx.MockTransport(_runtime_http_handler(calls)),
+        prefer_websocket=False,
+    )
+
+    assert transport.describe() == _descriptor()
+    assert client_options and all(options["trust_env"] is False for options in client_options)
+
+
 def test_large_valid_observation_uses_post_before_opening_websocket() -> None:
     calls: list[dict[str, Any]] = []
     connector_calls = 0

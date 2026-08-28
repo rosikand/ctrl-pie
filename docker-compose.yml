@@ -15,6 +15,7 @@ services:
       MODAL_PROXY_TOKEN_ID: "${MODAL_PROXY_TOKEN_ID:-}"
       MODAL_PROXY_TOKEN_SECRET: "${MODAL_PROXY_TOKEN_SECRET:-}"
       CTRL_PI_MOCK_MODE: "${CTRL_PI_MOCK_MODE:-true}"
+      RECORDING_FPS: "${RECORDING_FPS:-20}"
       RECORDING_STAGING_DIR: /var/lib/ctrl-pi/recordings
       XDG_CACHE_HOME: /var/lib/ctrl-pi/cache
       HF_HOME: /var/lib/ctrl-pi/cache/huggingface

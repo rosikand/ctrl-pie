@@ -57,6 +57,7 @@ def test_end_to_end_lerobot_example_executes_offline_with_fakes(
     exec(compile(source, "trainer-api.md:lerobot-example", "exec"), module)
 
     events: list[tuple[str, object]] = []
+    uploaded_model_files: dict[str, bytes] = {}
 
     class FakeTrainer:
         def __enter__(self):
@@ -95,7 +96,16 @@ def test_end_to_end_lerobot_example_executes_offline_with_fakes(
 
         def upload_folder(self, **kwargs):
             assert kwargs["token"] == "hf_docs_token"
-            assert Path(kwargs["folder_path"]).is_dir()
+            assert "path_in_repo" not in kwargs
+            folder = Path(kwargs["folder_path"])
+            assert folder.is_dir()
+            uploaded_model_files.update(
+                {
+                    path.relative_to(folder).as_posix(): path.read_bytes()
+                    for path in folder.rglob("*")
+                    if path.is_file()
+                }
+            )
             return SimpleNamespace(oid="a" * 40)
 
     output_dir = tmp_path / "training"
@@ -118,6 +128,14 @@ def test_end_to_end_lerobot_example_executes_offline_with_fakes(
         assert kwargs["env"]["HF_TOKEN"] == "hf_docs_token"
         checkpoint = output_dir / "checkpoints" / "000100" / "pretrained_model"
         checkpoint.mkdir(parents=True)
+        (checkpoint / "config.json").write_text("{}", encoding="utf-8")
+        (checkpoint / "model.safetensors").write_bytes(b"model")
+        (checkpoint / "policy_preprocessor.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        (checkpoint / "policy_postprocessor.json").write_text(
+            "{}", encoding="utf-8"
+        )
         return FakeProcess()
 
     module["main"](
@@ -139,6 +157,13 @@ def test_end_to_end_lerobot_example_executes_offline_with_fakes(
     assert ("metrics", {"step": 100, "metrics": {"lerobot/loss": 0.42, "lerobot/lr": 0.0001}}) in events
     assert ("checkpoint", {"repo_id": "acme/new-act-model", "revision": "a" * 40, "step": 100}) in events
     assert events[-1] == ("update", {"status": "completed", "current_step": 100})
+    assert set(uploaded_model_files) == {
+        "config.json",
+        "model.safetensors",
+        "policy_postprocessor.json",
+        "policy_preprocessor.json",
+    }
+    assert not any(path.startswith("checkpoints/") for path in uploaded_model_files)
 
 
 def test_end_to_end_lerobot_example_terminates_child_on_reporting_failure(

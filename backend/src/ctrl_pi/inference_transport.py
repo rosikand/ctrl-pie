@@ -215,6 +215,7 @@ class ModalInferenceTransport:
                 transport=self._http_transport,
                 timeout=self._timeout_seconds,
                 follow_redirects=False,
+                trust_env=False,
             ) as client:
                 with client.stream(
                     "POST",
