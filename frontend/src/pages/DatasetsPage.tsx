@@ -8,6 +8,7 @@ import {
   Layers3,
   LoaderCircle,
   Lock,
+  PlayCircle,
   RefreshCw,
   ShieldAlert,
   Tag,
@@ -176,19 +177,28 @@ function DatasetCard({ dataset }: { dataset: DatasetSummary }) {
             <span title={dataset.last_modified ?? undefined}>Updated {formatTimestamp(dataset.last_modified)}</span>
             {dataset.revision && <span className="font-mono" title={dataset.revision}>@{dataset.revision.slice(0, 8)}</span>}
           </div>
-          {hubUrl ? (
-            <a
-              href={hubUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 transition hover:text-brand-700 focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <Link
+              to={`/datasets/${encodeURIComponent(dataset.name)}`}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 transition hover:text-brand-700 focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
             >
-              Open on Hugging Face
-              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-            </a>
-          ) : (
-            <p className="mt-3 text-xs text-slate-400">Hub link unavailable</p>
-          )}
+              <PlayCircle className="h-3.5 w-3.5" aria-hidden="true" />
+              Browse episodes
+            </Link>
+            {hubUrl ? (
+              <a
+                href={hubUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 transition hover:text-slate-700 focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
+              >
+                Open on Hugging Face
+                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+              </a>
+            ) : (
+              <span className="text-xs text-slate-400">Hub link unavailable</span>
+            )}
+          </div>
         </div>
       </div>
     </article>

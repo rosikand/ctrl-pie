@@ -1,4 +1,8 @@
 import type { ArmTelemetry, ArmsResponse, JogCommand } from "../types/arms";
+import type {
+  DatasetEpisodeDetail,
+  DatasetEpisodesResponse,
+} from "../types/datasetEpisodes";
 import type { DatasetsResponse } from "../types/datasets";
 import type {
   CreateRecordingRequest,
@@ -52,8 +56,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new ApiError(response.status, payload?.detail ?? `Request failed (${response.status})`);
+    const payload = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+    const message = typeof payload?.detail === "string"
+      ? payload.detail
+      : `Request failed (${response.status})`;
+    throw new ApiError(response.status, message);
   }
   return response.json() as Promise<T>;
 }
@@ -74,6 +81,29 @@ export function fetchDatasets({
     signal,
     cache: refresh ? "no-store" : "default",
   });
+}
+
+export function fetchDatasetEpisodes(
+  repoName: string,
+  signal?: AbortSignal,
+): Promise<DatasetEpisodesResponse> {
+  return request<DatasetEpisodesResponse>(
+    `/api/datasets/${encodeURIComponent(repoName)}/episodes`,
+    { signal, cache: "no-store" },
+  );
+}
+
+export function fetchDatasetEpisode(
+  repoName: string,
+  episodeIndex: number,
+  revision: string,
+  signal?: AbortSignal,
+): Promise<DatasetEpisodeDetail> {
+  const query = new URLSearchParams({ revision });
+  return request<DatasetEpisodeDetail>(
+    `/api/datasets/${encodeURIComponent(repoName)}/episodes/${episodeIndex}?${query.toString()}`,
+    { signal },
+  );
 }
 
 export function fetchArms(): Promise<ArmsResponse> {

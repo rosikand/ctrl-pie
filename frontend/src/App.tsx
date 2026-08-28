@@ -13,6 +13,7 @@ import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { SetupBanner } from "./components/SetupBanner";
 import { fetchSettingsStatus, type SettingsStatus } from "./lib/api";
 import { ArmsPage } from "./pages/ArmsPage";
+import { DatasetEpisodePage } from "./pages/DatasetEpisodePage";
 import { DatasetsPage } from "./pages/DatasetsPage";
 import { RecordPage } from "./pages/RecordPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -166,6 +167,7 @@ function AppShell() {
           <Route path="/arms" element={<ArmsPage />} />
           <Route path="/record" element={<RecordPage />} />
           <Route path="/datasets" element={<DatasetsPage />} />
+          <Route path="/datasets/:repoName" element={<DatasetEpisodePage />} />
           {Object.entries(pageContent).map(([key, content]) => (
             <Route key={key} path={`/${key}`} element={<PlaceholderPage {...content} />} />
           ))}

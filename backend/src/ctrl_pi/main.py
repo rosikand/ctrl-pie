@@ -13,6 +13,7 @@ from ctrl_pi.drivers.mock_yam import MockYAMDriver
 from ctrl_pi.drivers.yam import YAMDriver
 from ctrl_pi.hf import HFDatasetUploader
 from ctrl_pi.hf_datasets import HFDatasetBrowser
+from ctrl_pi.hf_episodes import HFEpisodeBrowser
 from ctrl_pi.recording import RecordingManager
 
 
@@ -22,6 +23,7 @@ def create_app(
     recording_manager: RecordingManager | None = None,
     hf_uploader: HFDatasetUploader | None = None,
     hf_dataset_browser: HFDatasetBrowser | None = None,
+    hf_episode_browser: HFEpisodeBrowser | None = None,
 ) -> FastAPI:
     config = get_config()
     driver = yam_driver or MockYAMDriver()
@@ -33,6 +35,7 @@ def create_app(
     )
     uploader = hf_uploader or HFDatasetUploader(config.recording_staging_dir)
     dataset_browser = hf_dataset_browser or HFDatasetBrowser()
+    episode_browser = hf_episode_browser or HFEpisodeBrowser()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -51,6 +54,7 @@ def create_app(
     application.state.recording_manager = manager
     application.state.hf_uploader = uploader
     application.state.hf_dataset_browser = dataset_browser
+    application.state.hf_episode_browser = episode_browser
     application.include_router(settings_router)
     application.include_router(arms_router)
     application.include_router(recordings_router)
