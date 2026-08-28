@@ -4,11 +4,15 @@ import {
   Database,
   RadioTower,
   Settings,
-  SlidersHorizontal,
   Video,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+
+import { SetupBanner } from "./components/SetupBanner";
+import { fetchSettingsStatus, type SettingsStatus } from "./lib/api";
+import { SettingsPage } from "./pages/SettingsPage";
 
 type NavigationItem = {
   label: string;
@@ -59,12 +63,6 @@ const pageContent: Record<
     description: "Deploy policies to Modal and execute action chunks on connected arms.",
     icon: RadioTower,
   },
-  settings: {
-    eyebrow: "Configuration",
-    title: "Settings",
-    description: "Check service connections and configure this ctrl-π installation.",
-    icon: SlidersHorizontal,
-  },
 };
 
 function ShellNavLink({ item }: { item: NavigationItem }) {
@@ -89,6 +87,25 @@ function ShellNavLink({ item }: { item: NavigationItem }) {
 }
 
 function AppShell() {
+  const [settingsStatus, setSettingsStatus] = useState<SettingsStatus | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+
+  const refreshSettings = useCallback(() => {
+    setSettingsLoading(true);
+    setSettingsError(null);
+    void fetchSettingsStatus()
+      .then(setSettingsStatus)
+      .catch((reason: unknown) => {
+        setSettingsError(reason instanceof Error ? reason.message : "Could not reach the backend.");
+      })
+      .finally(() => setSettingsLoading(false));
+  }, []);
+
+  useEffect(() => {
+    refreshSettings();
+  }, [refreshSettings]);
+
   return (
     <div className="min-h-screen bg-canvas text-ink">
       <aside className="fixed inset-y-0 left-0 z-20 hidden w-60 border-r border-slate-200/80 bg-slate-50/90 px-4 py-5 backdrop-blur lg:flex lg:flex-col">
@@ -158,11 +175,23 @@ function AppShell() {
       </nav>
 
       <main className="pb-24 lg:ml-60 lg:pb-0">
+        <SetupBanner status={settingsStatus} error={settingsError} />
         <Routes>
           <Route path="/" element={<Navigate to="/arms" replace />} />
           {Object.entries(pageContent).map(([key, content]) => (
             <Route key={key} path={`/${key}`} element={<PlaceholderPage {...content} />} />
           ))}
+          <Route
+            path="/settings"
+            element={
+              <SettingsPage
+                status={settingsStatus}
+                loading={settingsLoading}
+                error={settingsError}
+                refresh={refreshSettings}
+              />
+            }
+          />
           <Route path="*" element={<Navigate to="/arms" replace />} />
         </Routes>
       </main>
