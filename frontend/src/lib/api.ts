@@ -1,4 +1,5 @@
 import type { ArmTelemetry, ArmsResponse, JogCommand } from "../types/arms";
+import type { DatasetsResponse } from "../types/datasets";
 import type {
   CreateRecordingRequest,
   Recording,
@@ -32,6 +33,16 @@ export type PublicSettings = {
   modal_timeout_minutes: number;
 };
 
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -42,9 +53,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `Request failed (${response.status})`);
+    throw new ApiError(response.status, payload?.detail ?? `Request failed (${response.status})`);
   }
   return response.json() as Promise<T>;
+}
+
+export function fetchDatasets({
+  cursor,
+  refresh = false,
+  signal,
+}: {
+  cursor?: string | null;
+  refresh?: boolean;
+  signal?: AbortSignal;
+} = {}): Promise<DatasetsResponse> {
+  const query = new URLSearchParams({ limit: "24" });
+  if (cursor) query.set("cursor", cursor);
+  if (refresh) query.set("refresh", "true");
+  return request<DatasetsResponse>(`/api/datasets?${query.toString()}`, {
+    signal,
+    cache: refresh ? "no-store" : "default",
+  });
 }
 
 export function fetchArms(): Promise<ArmsResponse> {

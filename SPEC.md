@@ -313,3 +313,9 @@ open issues. Do not expand scope.
   and use an explicitly token-bound `HfApi` after LeRobot finalizes the
   package-generated dataset so credentials loaded from `.env` never depend on
   global login state.
+- 2026-08-28 — Dataset discovery is limited to LeRobot-tagged repositories in
+  the configured HF namespace and uses keyset pagination ordered by
+  last-modified time then repository ID. Enumeration and SHA-pinned card
+  metadata use short in-memory caches; an unavailable README or
+  `meta/info.json` degrades
+  only that dataset summary instead of failing the namespace listing.
