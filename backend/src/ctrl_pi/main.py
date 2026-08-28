@@ -10,6 +10,7 @@ from ctrl_pi.camera import MockCamera
 from ctrl_pi.config import get_config
 from ctrl_pi.drivers.mock_yam import MockYAMDriver
 from ctrl_pi.drivers.yam import YAMDriver
+from ctrl_pi.hf import HFDatasetUploader
 from ctrl_pi.recording import RecordingManager
 
 
@@ -17,14 +18,17 @@ def create_app(
     yam_driver: YAMDriver | None = None,
     mock_camera: MockCamera | None = None,
     recording_manager: RecordingManager | None = None,
+    hf_uploader: HFDatasetUploader | None = None,
 ) -> FastAPI:
+    config = get_config()
     driver = yam_driver or MockYAMDriver()
     camera = mock_camera or MockCamera()
     manager = recording_manager or RecordingManager(
         driver=driver,
         camera=camera,
-        staging_dir=get_config().recording_staging_dir,
+        staging_dir=config.recording_staging_dir,
     )
+    uploader = hf_uploader or HFDatasetUploader(config.recording_staging_dir)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -41,6 +45,7 @@ def create_app(
     application.state.yam_driver = driver
     application.state.mock_camera = manager.camera
     application.state.recording_manager = manager
+    application.state.hf_uploader = uploader
     application.include_router(settings_router)
     application.include_router(arms_router)
     application.include_router(recordings_router)

@@ -6,6 +6,8 @@ import type {
   RecordingState,
   StartEpisodeRequest,
   StopEpisodeRequest,
+  UploadRecordingRequest,
+  UploadRecordingResponse,
 } from "../types/recordings";
 
 export type ServiceStatus = {
@@ -107,6 +109,16 @@ export function stopEpisode(
 ): Promise<RecordingState> {
   return request<RecordingState>(
     `/api/recordings/${encodeURIComponent(recordingId)}/episodes/stop`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export function uploadRecording(
+  recordingId: string,
+  payload: UploadRecordingRequest,
+): Promise<UploadRecordingResponse> {
+  return request<UploadRecordingResponse>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/upload`,
     { method: "POST", body: JSON.stringify(payload) },
   );
 }

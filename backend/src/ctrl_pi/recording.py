@@ -5,8 +5,7 @@ import json
 import shutil
 import subprocess
 import time
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -45,6 +44,7 @@ class EpisodeResult:
     artifact_key: str
     started_at: datetime
     ended_at: datetime
+    fps: int
 
 
 class FFmpegVideoWriter:
@@ -557,6 +557,7 @@ class RecordingManager:
             artifact_key=f"{episode.directory.parent.name}/{episode.directory.name}",
             started_at=episode.started_at,
             ended_at=ended_at,
+            fps=episode.fps,
         )
 
     @staticmethod

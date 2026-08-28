@@ -307,3 +307,9 @@ open issues. Do not expand scope.
   not database UUIDs. The `robots.driver_id` column maps them to relational
   robot rows so recordings retain UUID foreign-key integrity while the API
   continues to use hardware-facing IDs.
+- 2026-08-28 — Dataset writing is pinned to LeRobot 0.4.4, the current
+  LeRobot v3 release compatible with the project's Python 3.11 floor. Hub
+  uploads default to private, require an explicit confirmation to publish,
+  and use an explicitly token-bound `HfApi` after LeRobot finalizes the
+  package-generated dataset so credentials loaded from `.env` never depend on
+  global login state.

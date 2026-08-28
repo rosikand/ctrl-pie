@@ -55,3 +55,15 @@ export type StopEpisodeRequest = {
   success?: boolean;
   notes?: string;
 };
+
+export type UploadRecordingRequest = {
+  repo_name: string;
+  private: boolean;
+};
+
+export type UploadRecordingResponse = {
+  recording: Recording;
+  repo_id: string;
+  repo_url: string;
+  revision: string | null;
+};

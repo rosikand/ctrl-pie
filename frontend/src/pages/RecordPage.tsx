@@ -3,8 +3,11 @@ import {
   AlertCircle,
   Bot,
   Camera,
+  CheckCircle2,
   ChevronRight,
+  CloudUpload,
   Clock3,
+  ExternalLink,
   FileText,
   Grip,
   LoaderCircle,
@@ -18,16 +21,20 @@ import {
   WifiOff,
 } from "lucide-react";
 import type { FormEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { useArms } from "../hooks/useArms";
 import { useRecordings } from "../hooks/useRecordings";
+import { fetchPublicSettings } from "../lib/api";
 import type { ArmTelemetry } from "../types/arms";
 import type {
   CreateRecordingRequest,
   Recording,
   RecordingState,
   RecordingStatus,
+  UploadRecordingRequest,
+  UploadRecordingResponse,
 } from "../types/recordings";
 
 function formatDuration(seconds: number): string {
@@ -52,6 +59,55 @@ function degrees(radians: number): string {
   return `${((radians * 180) / Math.PI).toFixed(0)}°`;
 }
 
+function suggestedRepoName(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/\.{2,}/g, ".")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 64);
+  return slug || "robot-demonstrations";
+}
+
+function repoNameIssue(repoName: string): string | null {
+  const value = repoName.trim();
+  if (!value) return "Enter a dataset repository name.";
+  if (value.length > 96) return "Repository names are limited to 96 characters.";
+  if (value.includes("/")) return "Enter the repository name only, without a namespace.";
+  if (!/^[A-Za-z0-9_][A-Za-z0-9._-]*[A-Za-z0-9_]$/.test(value) && !/^[A-Za-z0-9_]$/.test(value)) {
+    return "Use letters, numbers, underscore, hyphen, or period; do not start or end with a hyphen or period.";
+  }
+  if (value.includes("--") || value.includes("..")) {
+    return "Consecutive hyphens or periods are not allowed.";
+  }
+  return null;
+}
+
+type StoredUploadTarget = {
+  repoId: string;
+  namespace: string;
+  repoName: string;
+};
+
+function storedUploadTarget(recording: Recording | null): StoredUploadTarget | null {
+  if (!recording || recording.status !== "failed") return null;
+  const upload = recording.metadata.upload;
+  if (!upload || typeof upload !== "object" || Array.isArray(upload)) return null;
+  const repoId = (upload as Record<string, unknown>).repo_id;
+  if (typeof repoId !== "string") return null;
+  const separator = repoId.indexOf("/");
+  if (separator < 1 || separator !== repoId.lastIndexOf("/")) return null;
+  const storedNamespace = repoId.slice(0, separator);
+  const storedRepoName = repoId.slice(separator + 1);
+  if (!storedNamespace || repoNameIssue(storedRepoName)) return null;
+  return {
+    repoId,
+    namespace: storedNamespace,
+    repoName: storedRepoName,
+  };
+}
+
 const statusStyles: Record<RecordingStatus, string> = {
   draft: "bg-slate-100 text-slate-600",
   teleop: "bg-blue-50 text-blue-700",
@@ -71,6 +127,8 @@ function StatusBadge({ status }: { status: RecordingStatus }) {
         className={`h-1.5 w-1.5 rounded-full ${
           status === "recording"
             ? "animate-pulse bg-rose-500"
+            : status === "uploading"
+              ? "animate-pulse bg-amber-500"
             : status === "failed"
               ? "bg-rose-500"
               : status === "teleop"
@@ -357,27 +415,315 @@ function LivePairState({ recording, arms }: { recording: Recording; arms: ArmTel
   );
 }
 
+function DatasetUploadControls({
+  recording,
+  state,
+  namespace,
+  namespaceError,
+  busy,
+  uploadBusy,
+  uploadError,
+  onRetryNamespace,
+  onUpload,
+}: {
+  recording: Recording | null;
+  state: RecordingState | null;
+  namespace: string | null | undefined;
+  namespaceError: string | null;
+  busy: boolean;
+  uploadBusy: boolean;
+  uploadError: string | null;
+  onRetryNamespace: () => void;
+  onUpload: (payload: UploadRecordingRequest) => Promise<UploadRecordingResponse | null>;
+}) {
+  const retryTarget = storedUploadTarget(recording);
+  const [repoName, setRepoName] = useState(() =>
+    retryTarget?.repoName ?? suggestedRepoName(recording?.name ?? "robot-demonstrations"),
+  );
+  const [isPrivate, setIsPrivate] = useState(true);
+  const [publicConfirmed, setPublicConfirmed] = useState(false);
+  const [result, setResult] = useState<UploadRecordingResponse | null>(null);
+  const status = state?.status ?? recording?.status;
+  const episodeCount = state?.episode_count ?? recording?.episode_count ?? 0;
+  const inactive = state !== null && !state.teleop_active && !state.episode_active;
+  const namespaceMismatch =
+    retryTarget && namespace && retryTarget.namespace !== namespace
+      ? `This retry target belongs to ${retryTarget.namespace}, but HF_NAMESPACE is ${namespace}. Restore the original namespace to retry.`
+      : null;
+  const issue = repoNameIssue(repoName) ?? namespaceMismatch;
+  const uploadAllowedStatus = status === "ready" || status === "failed";
+  const canUpload =
+    recording !== null &&
+    inactive &&
+    episodeCount > 0 &&
+    uploadAllowedStatus &&
+    Boolean(namespace) &&
+    issue === null &&
+    (isPrivate || publicConfirmed) &&
+    !busy;
+  const storedRepoId = result?.repo_id ?? recording?.hf_repo_id;
+  const storedRepoUrl =
+    result?.repo_url ??
+    (storedRepoId ? `https://huggingface.co/datasets/${storedRepoId}` : null);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canUpload) return;
+    const uploaded = await onUpload({ repo_name: repoName.trim(), private: isPrivate });
+    if (uploaded) setResult(uploaded);
+  }
+
+  if ((status === "uploaded" || result) && storedRepoId && storedRepoUrl) {
+    return (
+      <div className="border-t border-slate-100 pt-5">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+          3 · Hugging Face
+        </p>
+        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3" role="status">
+          <div className="flex items-start gap-2.5">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-emerald-800">Dataset uploaded</p>
+              <p className="mt-1 truncate font-mono text-[10px] text-emerald-700">
+                {storedRepoId}
+              </p>
+              {result?.revision && (
+                <p className="mt-1 font-mono text-[9px] text-emerald-600">
+                  Revision {result.revision.slice(0, 12)}
+                </p>
+              )}
+              <a
+                href={storedRepoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-800 hover:text-emerald-950"
+              >
+                Open dataset on Hugging Face
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+          </div>
+        </div>
+        <p className="mt-2 text-[10px] leading-4 text-slate-400">
+          Upload complete. Create a new session to collect additional episodes.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-slate-100 pt-5">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+          3 · Hugging Face
+        </p>
+        <span className={`rounded-full px-2 py-0.5 text-[9px] font-semibold ${isPrivate ? "bg-slate-100 text-slate-500" : "bg-amber-100 text-amber-700"}`}>
+          {isPrivate ? "Private" : "Public"}
+        </span>
+      </div>
+
+      {uploadBusy || status === "uploading" ? (
+        <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3" role="status" aria-live="polite">
+          <div className="flex items-center gap-2 text-xs font-semibold text-blue-800">
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+            Packaging and uploading dataset…
+          </div>
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-blue-100">
+            <div className="h-full w-2/3 animate-pulse rounded-full bg-blue-500" />
+          </div>
+          <p className="mt-2 text-[10px] leading-4 text-blue-700">
+            Keep this page open while episodes are converted to LeRobot format and sent to the Hub.
+          </p>
+          {namespace && (
+            <p className="mt-2 truncate font-mono text-[9px] text-blue-600" title={`${namespace}/${repoName}`}>
+              {namespace}/{repoName} · {isPrivate ? "private" : "public"}
+            </p>
+          )}
+        </div>
+      ) : (
+        <form onSubmit={submit} className="mt-3 space-y-3">
+          <label className="block text-[10px] font-medium uppercase tracking-wider text-slate-400">
+            <span className="flex items-center justify-between gap-2">
+              <span>Dataset repository</span>
+              {retryTarget && (
+                <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[9px] font-semibold normal-case tracking-normal text-amber-700">
+                  Retry target locked
+                </span>
+              )}
+            </span>
+            <div
+              className={`mt-1.5 flex min-w-0 items-center overflow-hidden rounded-lg border bg-white focus-within:ring-4 ${
+                issue
+                  ? "border-rose-300 focus-within:ring-rose-100"
+                  : "border-slate-200 focus-within:border-brand-500 focus-within:ring-brand-100"
+              }`}
+            >
+              <span className="max-w-[48%] truncate border-r border-slate-100 bg-slate-50 px-2.5 py-2 font-mono text-[10px] normal-case tracking-normal text-slate-500" title={namespace ?? undefined}>
+                {namespace === undefined
+                  ? "Loading namespace"
+                  : namespaceError
+                    ? "Settings unavailable"
+                    : namespace || "Not configured"}/
+              </span>
+              <input
+                value={repoName}
+                maxLength={96}
+                disabled={!recording || busy || status === "uploaded" || retryTarget !== null}
+                onChange={(event) => setRepoName(event.target.value)}
+                aria-invalid={issue !== null}
+                aria-describedby="repo-name-help"
+                className="min-w-0 flex-1 border-0 px-2.5 py-2 font-mono text-xs normal-case tracking-normal text-slate-700 outline-none disabled:bg-slate-50"
+              />
+            </div>
+          </label>
+          <p id="repo-name-help" className={`text-[10px] leading-4 ${issue ? "text-rose-600" : "text-slate-400"}`}>
+            {issue
+              ? issue
+              : namespaceError
+                ? "The backend settings endpoint could not be read."
+              : namespace
+                ? `Target: ${namespace}/${repoName.trim() || "…"}`
+                : "HF_NAMESPACE is read from the backend environment."}
+          </p>
+
+          {retryTarget && !namespaceMismatch && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[10px] leading-4 text-amber-700">
+              <p className="font-semibold">Retrying {retryTarget.repoId}</p>
+              <p className="mt-1">
+                The backend requires a failed upload to retry its original repository target.
+              </p>
+            </div>
+          )}
+
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-slate-100 bg-slate-50/60 p-3">
+            <input
+              type="checkbox"
+              checked={isPrivate}
+              disabled={!recording || busy}
+              onChange={(event) => {
+                setIsPrivate(event.target.checked);
+                setPublicConfirmed(false);
+              }}
+              className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+            />
+            <span>
+              <span className="block text-xs font-medium text-slate-700">Private dataset</span>
+              <span className="mt-0.5 block text-[10px] leading-4 text-slate-400">
+                Recommended. Access follows your Hugging Face account permissions.
+              </span>
+            </span>
+          </label>
+
+          {!isPrivate && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-amber-800">
+              <p className="text-xs font-semibold">This dataset will be public</p>
+              <p className="mt-1 text-[10px] leading-4">
+                Camera frames, robot state, actions, task text, and episode metadata will be visible to anyone.
+              </p>
+              <label className="mt-2.5 flex cursor-pointer items-start gap-2 text-[10px] font-medium leading-4">
+                <input
+                  type="checkbox"
+                  checked={publicConfirmed}
+                  disabled={busy}
+                  onChange={(event) => setPublicConfirmed(event.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+                />
+                I understand this recording will be publicly accessible.
+              </label>
+            </div>
+          )}
+
+          {uploadError && (
+            <div role="alert" className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-[10px] leading-4 text-rose-700">
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                <strong className="block text-xs">Upload failed</strong>
+                {uploadError}{" "}
+                {retryTarget
+                  ? "You can retry with the same repository name."
+                  : "Choose an available repository name and retry."}
+              </span>
+            </div>
+          )}
+
+          {namespaceError && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-[10px] leading-4 text-rose-700">
+              <p className="font-semibold">Settings unavailable</p>
+              <p className="mt-1">{namespaceError}</p>
+              <button type="button" onClick={onRetryNamespace} className="mt-2 inline-flex items-center gap-1 font-semibold hover:text-rose-900">
+                <RefreshCw className="h-3 w-3" /> Retry settings
+              </button>
+            </div>
+          )}
+          {!namespace && namespace !== undefined && !namespaceError && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[10px] leading-4 text-amber-700">
+              Configure <code>HF_NAMESPACE</code> and <code>HF_TOKEN</code>, then recheck
+              connections in <Link to="/settings" className="ml-1 font-semibold underline underline-offset-2">Settings</Link>.
+            </div>
+          )}
+          {recording && episodeCount === 0 && (
+            <p className="text-[10px] leading-4 text-slate-400">
+              Save at least one episode before uploading this session.
+            </p>
+          )}
+          {recording && episodeCount > 0 && !inactive && (
+            <p className="text-[10px] leading-4 text-amber-600">
+              Stop the episode and teleoperation before uploading.
+            </p>
+          )}
+
+          <button
+            type="submit"
+            disabled={!canUpload}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-ink px-3 py-2.5 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <CloudUpload className="h-3.5 w-3.5" />
+            {status === "failed" ? "Retry dataset upload" : "Upload dataset"}
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
 function SessionControls({
   recording,
   state,
   busy,
+  uploadBusy,
+  uploadError,
+  namespace,
+  namespaceError,
   onStartTeleop,
   onStopTeleop,
   onStartEpisode,
   onStopEpisode,
+  onUpload,
+  onRetryNamespace,
 }: {
   recording: Recording | null;
   state: RecordingState | null;
   busy: boolean;
+  uploadBusy: boolean;
+  uploadError: string | null;
+  namespace: string | null | undefined;
+  namespaceError: string | null;
   onStartTeleop: () => Promise<RecordingState | null>;
   onStopTeleop: () => Promise<RecordingState | null>;
   onStartEpisode: (payload: { metadata?: { operator?: string; notes?: string } }) => Promise<RecordingState | null>;
   onStopEpisode: (payload: { success?: boolean; notes?: string }) => Promise<RecordingState | null>;
+  onUpload: (payload: UploadRecordingRequest) => Promise<UploadRecordingResponse | null>;
+  onRetryNamespace: () => void;
 }) {
   const [operator, setOperator] = useState("");
   const [notes, setNotes] = useState("");
   const [success, setSuccess] = useState(true);
   const stateReady = recording !== null && state !== null;
+  const lifecycleStatus = state?.status ?? recording?.status;
+  const lifecycleClosed =
+    lifecycleStatus === "uploading" ||
+    lifecycleStatus === "uploaded" ||
+    lifecycleStatus === "failed";
 
   async function beginEpisode() {
     const metadata: { operator?: string; notes?: string } = {};
@@ -435,7 +781,7 @@ function SessionControls({
           </div>
           <button
             type="button"
-            disabled={!stateReady || busy || state?.episode_active}
+            disabled={!stateReady || busy || state?.episode_active || lifecycleClosed}
             onClick={() => void (state?.teleop_active ? onStopTeleop() : onStartTeleop())}
             className={`mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${state?.teleop_active ? "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50" : "bg-ink text-white hover:bg-slate-700"}`}
           >
@@ -443,6 +789,15 @@ function SessionControls({
             {state?.teleop_active ? "Stop teleop" : "Start teleop"}
           </button>
           {state?.episode_active && <p className="mt-1.5 text-[10px] text-amber-600">Stop the active episode before stopping teleop.</p>}
+          {lifecycleClosed && (
+            <p className="mt-1.5 text-[10px] leading-4 text-slate-400">
+              {lifecycleStatus === "uploaded"
+                ? "This session is finalized on Hugging Face."
+                : lifecycleStatus === "uploading"
+                  ? "Robot controls are locked while the dataset uploads."
+                  : "Recording controls are locked after a failed pipeline step; retry the upload below."}
+            </p>
+          )}
         </div>
 
         <div className="border-t border-slate-100 pt-5">
@@ -456,7 +811,7 @@ function SessionControls({
               <input
                 value={operator}
                 onChange={(event) => setOperator(event.target.value)}
-                disabled={state?.episode_active || busy}
+                disabled={state?.episode_active || busy || lifecycleClosed}
                 placeholder="Optional"
                 className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs normal-case tracking-normal text-slate-700 outline-none focus:border-brand-500 disabled:bg-slate-50"
               />
@@ -467,6 +822,7 @@ function SessionControls({
                 rows={2}
                 value={notes}
                 onChange={(event) => setNotes(event.target.value)}
+                disabled={busy || lifecycleClosed}
                 placeholder="Variation, reset, or outcome notes"
                 className="mt-1.5 w-full resize-none rounded-lg border border-slate-200 px-3 py-2 text-xs normal-case leading-5 tracking-normal text-slate-700 outline-none focus:border-brand-500"
               />
@@ -480,15 +836,27 @@ function SessionControls({
           </div>
           <button
             type="button"
-            disabled={!stateReady || busy || (!state?.teleop_active && !state?.episode_active)}
+            disabled={!stateReady || busy || lifecycleClosed || (!state?.teleop_active && !state?.episode_active)}
             onClick={() => void (state?.episode_active ? finishEpisode() : beginEpisode())}
             className={`mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-40 ${state?.episode_active ? "bg-rose-600 hover:bg-rose-700" : "bg-brand-600 hover:bg-brand-700"}`}
           >
             {busy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : state?.episode_active ? <Square className="h-3 w-3" /> : <Radio className="h-3.5 w-3.5" />}
             {state?.episode_active ? "Stop & save episode" : "Record episode"}
           </button>
-          {!state?.teleop_active && !state?.episode_active && recording && <p className="mt-1.5 text-[10px] text-slate-400">Start teleop before recording an episode.</p>}
+          {!lifecycleClosed && !state?.teleop_active && !state?.episode_active && recording && <p className="mt-1.5 text-[10px] text-slate-400">Start teleop before recording an episode.</p>}
         </div>
+        <DatasetUploadControls
+          key={recording?.id ?? "no-recording"}
+          recording={recording}
+          state={state}
+          namespace={namespace}
+          namespaceError={namespaceError}
+          busy={busy}
+          uploadBusy={uploadBusy}
+          uploadError={uploadError}
+          onUpload={onUpload}
+          onRetryNamespace={onRetryNamespace}
+        />
       </div>
     </section>
   );
@@ -559,6 +927,7 @@ export function RecordPage() {
     state,
     loading,
     error,
+    uploadError,
     activeAction,
     refreshRecordings,
     createRecording,
@@ -566,9 +935,30 @@ export function RecordPage() {
     stopTeleop,
     startEpisode,
     stopEpisode,
+    uploadRecording,
   } = useRecordings();
   const busy = activeAction !== null;
   const sessionLocked = state?.teleop_active === true || state?.episode_active === true;
+  const [hfNamespace, setHfNamespace] = useState<string | null | undefined>(undefined);
+  const [hfNamespaceError, setHfNamespaceError] = useState<string | null>(null);
+
+  const loadHfNamespace = useCallback(async () => {
+    setHfNamespace(undefined);
+    setHfNamespaceError(null);
+    try {
+      const settings = await fetchPublicSettings();
+      setHfNamespace(settings.hf_namespace);
+    } catch (reason) {
+      setHfNamespace(null);
+      setHfNamespaceError(
+        reason instanceof Error ? reason.message : "Could not load Hugging Face settings.",
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadHfNamespace();
+  }, [loadHfNamespace]);
 
   const activePair = useMemo(() => {
     if (!selectedRecording) return [];
@@ -623,10 +1013,16 @@ export function RecordPage() {
           recording={selectedRecording}
           state={state}
           busy={busy}
+          uploadBusy={activeAction === "upload"}
+          uploadError={uploadError}
+          namespace={hfNamespace}
+          namespaceError={hfNamespaceError}
           onStartTeleop={startTeleop}
           onStopTeleop={stopTeleop}
           onStartEpisode={startEpisode}
           onStopEpisode={stopEpisode}
+          onUpload={uploadRecording}
+          onRetryNamespace={() => void loadHfNamespace()}
         />
       </div>
 

@@ -29,6 +29,7 @@ async def mjpeg_chunks(camera: MockCamera, fps: int = 15) -> AsyncIterator[bytes
 
 
 @router.get("/stream")
+@router.get("/mock/stream", include_in_schema=False)
 def camera_stream(request: Request) -> StreamingResponse:
     camera: MockCamera = request.app.state.mock_camera
     return StreamingResponse(

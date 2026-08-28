@@ -8,6 +8,7 @@ import {
   startTeleop as startTeleopRequest,
   stopEpisode as stopEpisodeRequest,
   stopTeleop as stopTeleopRequest,
+  uploadRecording as uploadRecordingRequest,
 } from "../lib/api";
 import type {
   CreateRecordingRequest,
@@ -15,9 +16,11 @@ import type {
   RecordingState,
   StartEpisodeRequest,
   StopEpisodeRequest,
+  UploadRecordingRequest,
+  UploadRecordingResponse,
 } from "../types/recordings";
 
-type RecordingAction = "create" | "teleop" | "episode" | null;
+type RecordingAction = "create" | "teleop" | "episode" | "upload" | null;
 
 export function useRecordings() {
   const [recordings, setRecordings] = useState<Recording[]>([]);
@@ -26,6 +29,7 @@ export function useRecordings() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stateError, setStateError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [activeAction, setActiveAction] = useState<RecordingAction>(null);
   const selectedIdRef = useRef("");
 
@@ -80,6 +84,7 @@ export function useRecordings() {
     }
     selectedIdRef.current = selectedId;
     setStateError(null);
+    setUploadError(null);
     let cancelled = false;
     let timer: number | undefined;
     setState(null);
@@ -152,6 +157,42 @@ export function useRecordings() {
     [selectRecording],
   );
 
+  const uploadRecording = useCallback(
+    async (payload: UploadRecordingRequest): Promise<UploadRecordingResponse | null> => {
+      if (!selectedId) return null;
+      setActiveAction("upload");
+      setError(null);
+      setUploadError(null);
+      try {
+        const uploaded = await uploadRecordingRequest(selectedId, payload);
+        setRecordings((current) =>
+          current.map((recording) =>
+            recording.id === uploaded.recording.id ? uploaded.recording : recording,
+          ),
+        );
+        setState((current) =>
+          current?.recording_id === uploaded.recording.id
+            ? {
+                ...current,
+                status: uploaded.recording.status,
+                episode_count: uploaded.recording.episode_count,
+              }
+            : current,
+        );
+        await refreshRecordings();
+        return uploaded;
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : "Dataset upload failed.";
+        setUploadError(message);
+        await refreshRecordings();
+        return null;
+      } finally {
+        setActiveAction(null);
+      }
+    },
+    [refreshRecordings, selectedId],
+  );
+
   const selectedRecording =
     recordings.find((recording) => recording.id === selectedId) ?? null;
 
@@ -163,6 +204,7 @@ export function useRecordings() {
     state,
     loading,
     error: error ?? stateError,
+    uploadError,
     activeAction,
     refreshRecordings,
     createRecording,
@@ -182,5 +224,6 @@ export function useRecordings() {
       selectedId
         ? runStateAction("episode", () => stopEpisodeRequest(selectedId, payload))
         : Promise.resolve(null),
+    uploadRecording,
   };
 }
