@@ -324,3 +324,10 @@ open issues. Do not expand scope.
   private MP4 to one immutable Hub SHA. Timeline values are episode-relative;
   packed-video timestamps provide the media seek offset, and the proxy serves
   byte ranges so native browser playback can scrub without exposing HF_TOKEN.
+- 2026-08-28 — Training remains an external-script responsibility. The
+  control plane stores only bounded JSONB scalar curves and checkpoint
+  descriptors; row-locked, copy-on-write updates replace duplicate
+  metric/step points and keep `current_step` monotonic without imposing an
+  additional run-status state machine. Model discovery stays inside the
+  configured HF namespace and pins cards/checkpoint paths to an immutable
+  revision using an explicitly token-bound Hub client.

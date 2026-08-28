@@ -122,6 +122,28 @@ class HFDatasetUploader:
         with self._active_lock:
             return recording_id in self._active
 
+    def repository_owned_by(
+        self,
+        *,
+        repo_id: str,
+        recording_id: str,
+        token: str,
+    ) -> bool:
+        """Read and validate ctrl-pi ownership without mutating the Hub repo."""
+
+        try:
+            api = self._hub_api(token)
+            self._verify_remote_marker(
+                api,
+                repo_id=repo_id,
+                recording_id=recording_id,
+                token=token,
+                ownership_check=True,
+            )
+        except (UploadConflictError, HubUploadError):
+            return False
+        return True
+
     @staticmethod
     def repo_id(namespace: str, repo_name: str) -> str:
         if "/" in repo_name:

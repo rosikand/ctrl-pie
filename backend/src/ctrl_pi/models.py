@@ -87,6 +87,12 @@ class TrainingRun(TimestampMixin, Base):
     output_model_repo: Mapped[str | None] = mapped_column(String(255))
     checkpoint_revision: Mapped[str | None] = mapped_column(String(255))
     config: Mapped[dict[str, Any]] = mapped_column(json_type, default=dict, nullable=False)
+    metrics: Mapped[dict[str, list[dict[str, float | int]]]] = mapped_column(
+        json_type, default=dict, server_default="{}", nullable=False
+    )
+    checkpoints: Mapped[list[dict[str, Any]]] = mapped_column(
+        json_type, default=list, server_default="[]", nullable=False
+    )
 
 
 class InferenceEndpoint(TimestampMixin, Base):

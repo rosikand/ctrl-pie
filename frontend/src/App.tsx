@@ -17,6 +17,7 @@ import { DatasetEpisodePage } from "./pages/DatasetEpisodePage";
 import { DatasetsPage } from "./pages/DatasetsPage";
 import { RecordPage } from "./pages/RecordPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { TrainingPage } from "./pages/TrainingPage";
 
 type NavigationItem = {
   label: string;
@@ -37,12 +38,6 @@ const pageContent: Record<
   string,
   { eyebrow: string; title: string; description: string; icon: LucideIcon }
 > = {
-  training: {
-    eyebrow: "Experiments",
-    title: "Training",
-    description: "Track external training runs, metrics, checkpoints, and model revisions.",
-    icon: BrainCircuit,
-  },
   inference: {
     eyebrow: "Deployment",
     title: "Inference",
@@ -168,6 +163,7 @@ function AppShell() {
           <Route path="/record" element={<RecordPage />} />
           <Route path="/datasets" element={<DatasetsPage />} />
           <Route path="/datasets/:repoName" element={<DatasetEpisodePage />} />
+          <Route path="/training" element={<TrainingPage />} />
           {Object.entries(pageContent).map(([key, content]) => (
             <Route key={key} path={`/${key}`} element={<PlaceholderPage {...content} />} />
           ))}

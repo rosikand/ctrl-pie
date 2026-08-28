@@ -14,6 +14,11 @@ import type {
   UploadRecordingRequest,
   UploadRecordingResponse,
 } from "../types/recordings";
+import type {
+  TrainerModelsResponse,
+  TrainingRun,
+  TrainingRunsResponse,
+} from "../types/training";
 
 export type ServiceStatus = {
   id: "postgres" | "huggingface" | "modal" | "arms";
@@ -104,6 +109,32 @@ export function fetchDatasetEpisode(
     `/api/datasets/${encodeURIComponent(repoName)}/episodes/${episodeIndex}?${query.toString()}`,
     { signal },
   );
+}
+
+export function fetchTrainingRuns(signal?: AbortSignal): Promise<TrainingRunsResponse> {
+  return request<TrainingRunsResponse>("/api/trainer/runs", { signal });
+}
+
+export function fetchTrainingRun(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<TrainingRun> {
+  return request<TrainingRun>(`/api/trainer/runs/${encodeURIComponent(runId)}`, {
+    signal,
+  });
+}
+
+export function fetchTrainerModels(
+  refresh = false,
+  signal?: AbortSignal,
+): Promise<TrainerModelsResponse> {
+  const query = new URLSearchParams();
+  if (refresh) query.set("refresh", "true");
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<TrainerModelsResponse>(`/api/trainer/models${suffix}`, {
+    signal,
+    cache: refresh ? "no-store" : "default",
+  });
 }
 
 export function fetchArms(): Promise<ArmsResponse> {
