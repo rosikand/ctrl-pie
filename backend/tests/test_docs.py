@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -142,6 +143,56 @@ def test_documentation_contains_no_secret_literals_or_placeholders() -> None:
                 f"{document.relative_to(REPOSITORY_ROOT)}: unfinished placeholder"
             )
     assert failures == []
+
+
+def test_container_entrypoint_does_not_gate_operator_tools_on_database(
+    tmp_path: Path,
+) -> None:
+    """Only the normal server command runs migrations before exec."""
+
+    entrypoint = REPOSITORY_ROOT / "docker" / "entrypoint.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "calls"
+    for executable in ("alembic", "uvicorn"):
+        script = fake_bin / executable
+        script.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$ENTRYPOINT_CALLS\"\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+    environment = {
+        **os.environ,
+        "DATABASE_URL": "postgresql://unreachable.invalid/ctrl_pi",
+        "ENTRYPOINT_CALLS": str(calls),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
+    operator = subprocess.run(
+        [str(entrypoint), "sh", "-c", "exit 0"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert operator.returncode == 0
+    assert not calls.exists(), "operator command unexpectedly invoked migrations"
+
+    server = subprocess.run(
+        [str(entrypoint), "uvicorn", "ctrl_pi.main:app"],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert server.returncode == 0
+    invocations = calls.read_text(encoding="utf-8").splitlines()
+    assert [Path(line.split()[0]).name for line in invocations] == [
+        "alembic",
+        "uvicorn",
+    ]
 
 
 def test_milestone_13_reference_contracts_are_documented() -> None:

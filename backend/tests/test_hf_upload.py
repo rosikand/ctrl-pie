@@ -5,6 +5,7 @@ import json
 import threading
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -13,9 +14,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ctrl_pi.api.recordings import reconcile_recordings_startup
 from ctrl_pi.camera import MockCamera
 from ctrl_pi.config import AppConfig, get_config
 from ctrl_pi.db import Base, get_db
@@ -30,7 +33,12 @@ from ctrl_pi.hf import (
 )
 from ctrl_pi.main import create_app
 from ctrl_pi.models import Recording
-from ctrl_pi.recording import RecordingManager
+from ctrl_pi.recording import (
+    EPISODE_MANIFEST_FILENAME,
+    EPISODE_MANIFEST_SCHEMA,
+    EPISODE_MANIFEST_VERSION,
+    RecordingManager,
+)
 
 
 class StubUploader:
@@ -144,6 +152,46 @@ def _ready_recording(client: TestClient, engine) -> dict[str, Any]:
     return payload
 
 
+def _stage_manifest_backed_episode(app, engine, recording_id: str) -> Path:
+    started = datetime.now(UTC)
+    episode = {
+        "index": 0,
+        "sample_count": 3,
+        "duration_seconds": 0.3,
+        "fps": 10,
+        "success": True,
+        "notes": None,
+        "metadata": {},
+        "artifact_key": f"{recording_id}/episode_000000",
+        "started_at": started.isoformat(),
+        "ended_at": (started + timedelta(seconds=0.3)).isoformat(),
+    }
+    directory = (
+        app.state.recording_manager.staging_dir
+        / recording_id
+        / "episode_000000"
+    )
+    directory.mkdir(parents=True)
+    (directory / "video.mp4").write_bytes(b"video")
+    (directory / "samples.jsonl").write_text("{}\n")
+    (directory / EPISODE_MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema": EPISODE_MANIFEST_SCHEMA,
+                "version": EPISODE_MANIFEST_VERSION,
+                "recording_id": recording_id,
+                "episode": episode,
+            }
+        )
+    )
+    with Session(engine) as db:
+        recording = db.get(Recording, uuid.UUID(recording_id))
+        assert recording is not None
+        recording.recording_metadata = {"episodes": [episode]}
+        db.commit()
+    return directory.parent
+
+
 def test_upload_api_defaults_private_and_persists_verified_result(upload_app) -> None:
     app, engine, uploader = upload_app
     statuses_at_release: list[str] = []
@@ -182,6 +230,102 @@ def test_upload_api_defaults_private_and_persists_verified_result(upload_app) ->
         assert upload["remote_repo_created"] is True
         assert "local_dataset_key" not in upload
         assert "hf_super_secret" not in json.dumps(stored.recording_metadata)
+
+
+def test_verified_upload_removes_raw_staging_only_after_uploaded_commit(
+    upload_app,
+) -> None:
+    app, engine, _ = upload_app
+    with TestClient(app) as client:
+        recording_id = _ready_recording(client, engine)["id"]
+        raw_directory = _stage_manifest_backed_episode(app, engine, recording_id)
+        response = client.post(
+            f"/api/recordings/{recording_id}/upload",
+            json={"repo_name": "cleanup-after-commit"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert not raw_directory.exists()
+    with Session(engine) as db:
+        assert db.get(Recording, uuid.UUID(recording_id)).status == "uploaded"
+
+
+def test_failed_upload_retains_manifest_backed_raw_staging(upload_app) -> None:
+    app, engine, uploader = upload_app
+    uploader.failure = RuntimeError("remote transfer failed")
+    with TestClient(app) as client:
+        recording_id = _ready_recording(client, engine)["id"]
+        raw_directory = _stage_manifest_backed_episode(app, engine, recording_id)
+        response = client.post(
+            f"/api/recordings/{recording_id}/upload",
+            json={"repo_name": "retain-on-failure"},
+        )
+
+    assert response.status_code == 502
+    assert raw_directory.is_dir()
+    assert (raw_directory / "episode_000000" / EPISODE_MANIFEST_FILENAME).is_file()
+
+
+def test_uncertain_uploaded_commit_retains_raw_staging_and_redacts_db_error(
+    upload_app,
+) -> None:
+    app, engine, _ = upload_app
+    secret = "postgresql://private-host/uploaded-commit"
+    with TestClient(app) as client:
+        recording_id = _ready_recording(client, engine)["id"]
+        raw_directory = _stage_manifest_backed_episode(app, engine, recording_id)
+
+        def database() -> Iterator[Session]:
+            with Session(engine, expire_on_commit=False) as session:
+                durable_commit = session.commit
+
+                def conditional_commit() -> None:
+                    if any(
+                        isinstance(value, Recording) and value.status == "uploaded"
+                        for value in session.identity_map.values()
+                    ):
+                        raise SQLAlchemyError(secret)
+                    durable_commit()
+
+                session.commit = conditional_commit  # type: ignore[method-assign]
+                yield session
+
+        app.dependency_overrides[get_db] = database
+        response = client.post(
+            f"/api/recordings/{recording_id}/upload",
+            json={"repo_name": "retain-on-uncertain-commit"},
+        )
+
+    assert response.status_code == 503
+    assert secret not in response.text
+    assert raw_directory.is_dir()
+
+
+def test_startup_removes_retained_raw_staging_for_durable_uploaded_row(
+    upload_app,
+) -> None:
+    app, engine, _ = upload_app
+    with TestClient(app) as client:
+        recording_id = _ready_recording(client, engine)["id"]
+        raw_directory = _stage_manifest_backed_episode(app, engine, recording_id)
+    with Session(engine) as db:
+        recording = db.get(Recording, uuid.UUID(recording_id))
+        assert recording is not None
+        recording.status = "uploaded"
+        recording.hf_repo_id = "test-user/already-durable"
+        db.commit()
+
+    restarted = RecordingManager(
+        MockYAMDriver(), MockCamera(width=96, height=64), raw_directory.parent
+    )
+
+    def factory() -> Session:
+        return Session(engine, expire_on_commit=False)
+
+    asyncio.run(restarted.startup())
+    asyncio.run(reconcile_recordings_startup(factory, restarted))
+
+    assert not raw_directory.exists()
 
 
 def test_create_recording_rejects_server_owned_upload_metadata(upload_app) -> None:
@@ -345,6 +489,7 @@ async def test_cancelled_request_holds_reservation_until_terminal_commit(
     app, engine, uploader = upload_app
     with TestClient(app) as client:
         recording_id = _ready_recording(client, engine)["id"]
+        raw_directory = _stage_manifest_backed_episode(app, engine, recording_id)
 
     started = threading.Event()
     finish = threading.Event()
@@ -383,6 +528,7 @@ async def test_cancelled_request_holds_reservation_until_terminal_commit(
         stored = db.get(Recording, uuid.UUID(recording_id))
         assert stored is not None
         assert stored.status == "uploaded"
+    assert raw_directory.is_dir()
 
 
 @pytest.mark.asyncio
@@ -520,11 +666,15 @@ def test_explicit_hub_upload_verifies_target_revision_and_required_files(
 
     tokens: list[str] = []
     api = FakeApi()
+    card_arguments: list[dict[str, Any]] = []
     uploader = HFDatasetUploader(
         tmp_path / "recordings",
         dataset_staging_dir=dataset_staging,
         hub_api_factory=lambda token: (tokens.append(token), api)[1],
-        card_factory=lambda **kwargs: FakeCard(),
+        card_factory=lambda **kwargs: (
+            card_arguments.append(kwargs),
+            FakeCard(),
+        )[1],
     )
     monkeypatch.setattr(uploader, "convert", lambda *args, **kwargs: converted)
     source = RecordingUploadSource("recording", "Task", 1, {"episodes": [{}]})
@@ -533,6 +683,8 @@ def test_explicit_hub_upload_verifies_target_revision_and_required_files(
 
     assert result.revision == "commit-sha"
     assert tokens == ["hf_private"]
+    assert len(card_arguments) == 1
+    assert "license" not in card_arguments[0]
     assert api.mutations[0][1]["private"] is True
     assert api.mutations[0][1]["exist_ok"] is False
     assert [item[0] for item in api.mutations] == [

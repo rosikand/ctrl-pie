@@ -49,9 +49,6 @@ class LifecycleDeploymentService:
     def __init__(self, events: list[str]) -> None:
         self.events = events
 
-    async def reconcile_startup(self) -> None:
-        self.events.append("deployment.reconcile")
-
 
 class LifecycleInferenceManager:
     def __init__(self, events: list[str]) -> None:
@@ -82,14 +79,12 @@ def test_app_lifespan_starts_driver_first_and_stops_it_after_all_loops() -> None
         assert events == [
             "driver.startup",
             "recording.startup",
-            "deployment.reconcile",
             "inference.startup",
         ]
 
     assert events == [
         "driver.startup",
         "recording.startup",
-        "deployment.reconcile",
         "inference.startup",
         "inference.shutdown",
         "recording.shutdown",

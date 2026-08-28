@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -116,6 +117,10 @@ class Deployment(TimestampMixin, Base):
             "target_kind IN ('stub', 'modal')",
             name="ck_deployments_target_kind",
         ),
+        CheckConstraint(
+            "timeout_seconds BETWEEN 1 AND 1800",
+            name="ck_deployments_timeout_seconds",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -134,6 +139,9 @@ class Deployment(TimestampMixin, Base):
     compute_size: Mapped[str] = mapped_column(String(64), nullable=False)
     target_kind: Mapped[str] = mapped_column(
         String(16), nullable=False, default="stub", server_default="stub"
+    )
+    timeout_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1800, server_default=text("1800")
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

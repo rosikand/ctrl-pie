@@ -4,6 +4,7 @@ import asyncio
 import copy
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -32,6 +33,7 @@ from ctrl_pi.recording import (
     RecordingManager,
     RecordingRuntimeError,
     RecordingStateSnapshot,
+    merge_episode_results,
 )
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
@@ -239,11 +241,22 @@ def _conflict(error: Exception) -> HTTPException:
     return HTTPException(status_code=409, detail=str(error))
 
 
+def _rollback_safely(db: Session) -> None:
+    try:
+        db.rollback()
+    except SQLAlchemyError:
+        pass
+
+
 def _reconcile_stale_upload(
     db: Session, recording: Recording, uploader: HFDatasetUploader
 ) -> bool:
     if recording.status != "uploading" or uploader.is_active(str(recording.id)):
         return False
+    return _mark_upload_interrupted(recording)
+
+
+def _mark_upload_interrupted(recording: Recording) -> bool:
     previous = recording.recording_metadata.get("upload", {})
     previous = previous if isinstance(previous, dict) else {}
     recording.status = "failed"
@@ -286,14 +299,178 @@ async def _wait_for_upload_task(task: asyncio.Task[Any]) -> bool:
     return cancelled
 
 
+async def _wait_for_cleanup_task(task: asyncio.Task[bool]) -> bool:
+    """Settle post-commit cleanup even when the request was cancelled."""
+
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    return cancelled
+
+
+async def _wait_for_confirmation_task(
+    task: asyncio.Task[RecordingStateSnapshot],
+) -> tuple[RecordingStateSnapshot, bool]:
+    """Make a post-commit manager confirmation cancellation-safe."""
+
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    return task.result(), cancelled
+
+
+def _stored_episode_list(recording: Recording) -> list[Any]:
+    stored = recording.recording_metadata.get("episodes", [])
+    return list(stored) if isinstance(stored, list) else []
+
+
+async def _reconcile_episode_manifests(
+    db: Session, recording: Recording, manager: RecordingManager
+) -> bool:
+    """Merge filesystem manifests once and commit before releasing sentinels."""
+
+    before_artifacts = {
+        raw.get("artifact_key")
+        for raw in _stored_episode_list(recording)
+        if isinstance(raw, dict) and isinstance(raw.get("artifact_key"), str)
+    }
+    try:
+        results = await manager.reconcile_recording_artifacts(
+            str(recording.id), _stored_episode_list(recording)
+        )
+    except RecordingConflictError:
+        return False
+    metadata, count, duration, metadata_changed = merge_episode_results(
+        recording.recording_metadata, results
+    )
+    recovered = any(result.artifact_key not in before_artifacts for result in results)
+    changed = (
+        metadata_changed
+        or recording.episode_count != count
+        or recording.duration_seconds != duration
+    )
+    recording.recording_metadata = metadata
+    recording.episode_count = count
+    recording.duration_seconds = duration
+    if (
+        (
+            recovered
+            or (
+                recording.status == "failed"
+                and recording.recording_metadata.get("source") == "inference"
+                and bool(results)
+            )
+        )
+        and recording.status in {"draft", "recording", "failed"}
+        and not _has_upload_target(recording)
+        and not await manager.recording_activity_active(str(recording.id))
+    ):
+        recording.status = "ready"
+        changed = True
+    if not changed:
+        await manager.reconcile_persisted_episodes(
+            str(recording.id), recording.episode_count, recording.status
+        )
+        return False
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        _rollback_safely(db)
+        raise HTTPException(
+            status_code=503,
+            detail="Recording metadata could not be reconciled safely.",
+        ) from None
+    await manager.reconcile_persisted_episodes(
+        str(recording.id), recording.episode_count, recording.status
+    )
+    return True
+
+
+async def reconcile_recordings_startup(
+    session_factory: Callable[[], Session] | None,
+    manager: RecordingManager,
+) -> None:
+    """Reconcile crash remnants before serving recording or inference work."""
+
+    if session_factory is None:
+        return
+    try:
+        with session_factory() as db:
+            recordings = list(db.scalars(select(Recording)).all())
+            owned_ids = {str(recording.id) for recording in recordings}
+            uploaded_ids: list[str] = []
+            reconciled: list[tuple[str, int, str]] = []
+            for recording in recordings:
+                recording_id = str(recording.id)
+                if recording.status == "uploaded":
+                    uploaded_ids.append(recording_id)
+                    continue
+                before_artifacts = {
+                    raw.get("artifact_key")
+                    for raw in _stored_episode_list(recording)
+                    if isinstance(raw, dict)
+                    and isinstance(raw.get("artifact_key"), str)
+                }
+                results = await manager.reconcile_recording_artifacts(
+                    recording_id, _stored_episode_list(recording)
+                )
+                metadata, count, duration, _ = merge_episode_results(
+                    recording.recording_metadata, results
+                )
+                recovered = any(
+                    result.artifact_key not in before_artifacts for result in results
+                )
+                recording.recording_metadata = metadata
+                recording.episode_count = count
+                recording.duration_seconds = duration
+                if recording.status in {"teleop", "recording"}:
+                    recording.status = "ready" if count else "draft"
+                elif (
+                    recording.status == "failed"
+                    and (
+                        recovered
+                        or (
+                            recording.recording_metadata.get("source") == "inference"
+                            and bool(results)
+                        )
+                    )
+                    and not _has_upload_target(recording)
+                ):
+                    recording.status = "ready"
+                elif recording.status == "uploading":
+                    _mark_upload_interrupted(recording)
+                reconciled.append((recording_id, count, recording.status))
+            db.commit()
+    except (SQLAlchemyError, RecordingRuntimeError, OSError):
+        # Files and manifests remain intact for the next retry. Startup must
+        # never resume motion merely because reconciliation storage is down.
+        return
+
+    for recording_id, count, status in reconciled:
+        await manager.reconcile_persisted_episodes(recording_id, count, status)
+    for recording_id in uploaded_ids:
+        await manager.remove_uploaded_staging(recording_id)
+    await manager.prune_unowned_staging(owned_ids)
 @router.get("", response_model=RecordingsResponse)
-def list_recordings(
+async def list_recordings(
     db: Session = Depends(get_db),
+    manager: RecordingManager = Depends(get_recording_manager),
     uploader: HFDatasetUploader = Depends(get_hf_uploader),
 ) -> RecordingsResponse:
     recordings = db.scalars(select(Recording).order_by(Recording.created_at.desc())).all()
     changed = False
     for recording in recordings:
+        await _reconcile_episode_manifests(db, recording, manager)
         changed = _reconcile_stale_upload(db, recording, uploader) or changed
     if changed:
         db.commit()
@@ -340,12 +517,14 @@ def create_recording(
 
 
 @router.get("/{recording_id}", response_model=RecordingRead)
-def get_recording(
+async def get_recording(
     recording_id: uuid.UUID,
     db: Session = Depends(get_db),
+    manager: RecordingManager = Depends(get_recording_manager),
     uploader: HFDatasetUploader = Depends(get_hf_uploader),
 ) -> RecordingRead:
     recording = _recording_or_404(db, recording_id)
+    await _reconcile_episode_manifests(db, recording, manager)
     if _reconcile_stale_upload(db, recording, uploader):
         db.commit()
     return _recording_read(db, recording)
@@ -359,6 +538,7 @@ async def recording_state(
     uploader: HFDatasetUploader = Depends(get_hf_uploader),
 ) -> RecordingState:
     recording = _recording_or_404(db, recording_id)
+    await _reconcile_episode_manifests(db, recording, manager)
     if _reconcile_stale_upload(db, recording, uploader):
         db.commit()
     snapshot = await manager.state(**_runtime_arguments(db, recording))
@@ -376,6 +556,7 @@ async def start_teleop(
     uploader: HFDatasetUploader = Depends(get_hf_uploader),
 ) -> RecordingState:
     recording = _recording_or_404(db, recording_id)
+    await _reconcile_episode_manifests(db, recording, manager)
     if _reconcile_stale_upload(db, recording, uploader):
         db.commit()
     _reject_recording_mutation(recording)
@@ -384,7 +565,14 @@ async def start_teleop(
     except (RecordingConflictError, ArmNotFoundError) as error:
         raise _conflict(error) from error
     recording.status = snapshot.status
-    db.commit()
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        _rollback_safely(db)
+        await manager.compensate_persistence_failure(str(recording.id))
+        raise HTTPException(
+            status_code=503, detail="Teleoperation state could not be persisted."
+        ) from None
     return _state(snapshot)
 
 
@@ -395,13 +583,21 @@ async def stop_teleop(
     manager: RecordingManager = Depends(get_recording_manager),
 ) -> RecordingState:
     recording = _recording_or_404(db, recording_id)
+    await _reconcile_episode_manifests(db, recording, manager)
     await manager.ensure_session(**_runtime_arguments(db, recording))
     try:
         snapshot = await manager.stop_teleop(str(recording.id))
     except RecordingConflictError as error:
         raise _conflict(error) from error
     recording.status = snapshot.status
-    db.commit()
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        _rollback_safely(db)
+        await manager.compensate_persistence_failure(str(recording.id))
+        raise HTTPException(
+            status_code=503, detail="Teleoperation state could not be persisted."
+        ) from None
     return _state(snapshot)
 
 
@@ -415,6 +611,7 @@ async def start_episode(
     uploader: HFDatasetUploader = Depends(get_hf_uploader),
 ) -> RecordingState:
     recording = _recording_or_404(db, recording_id)
+    await _reconcile_episode_manifests(db, recording, manager)
     if _reconcile_stale_upload(db, recording, uploader):
         db.commit()
     _reject_recording_mutation(recording)
@@ -426,10 +623,19 @@ async def start_episode(
         snapshot = await manager.start_episode(str(recording.id), fps=fps, metadata=metadata)
     except RecordingConflictError as error:
         raise _conflict(error) from error
-    except (RecordingRuntimeError, OSError) as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+    except (RecordingRuntimeError, OSError):
+        raise HTTPException(
+            status_code=503, detail="The episode could not be started safely."
+        ) from None
     recording.status = snapshot.status
-    db.commit()
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        _rollback_safely(db)
+        await manager.compensate_persistence_failure(str(recording.id))
+        raise HTTPException(
+            status_code=503, detail="Episode state could not be persisted."
+        ) from None
     return _state(snapshot)
 
 
@@ -441,6 +647,7 @@ async def stop_episode(
     manager: RecordingManager = Depends(get_recording_manager),
 ) -> RecordingState:
     recording = _recording_or_404(db, recording_id)
+    await _reconcile_episode_manifests(db, recording, manager)
     await manager.ensure_session(**_runtime_arguments(db, recording))
     payload = payload or EpisodeStop()
     try:
@@ -449,10 +656,16 @@ async def stop_episode(
         )
     except RecordingConflictError as error:
         raise _conflict(error) from error
-    except (RecordingRuntimeError, OSError) as error:
+    except (RecordingRuntimeError, OSError):
+        await manager.compensate_persistence_failure(str(recording.id))
         recording.status = "failed"
-        db.commit()
-        raise HTTPException(status_code=500, detail=str(error)) from error
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            _rollback_safely(db)
+        raise HTTPException(
+            status_code=500, detail="The episode could not be finalized safely."
+        ) from None
 
     recording.status = snapshot.status
     recording.episode_count += 1
@@ -463,15 +676,34 @@ async def stop_episode(
     try:
         db.commit()
     except SQLAlchemyError:
-        db.rollback()
+        _rollback_safely(db)
         await manager.episode_persistence_failed(str(recording.id))
-        raise
-    snapshot = await manager.confirm_episode_persisted(
-        str(recording.id), recording.episode_count, recording.status
+        raise HTTPException(
+            status_code=503,
+            detail="Episode metadata could not be persisted; it will be recovered from staging.",
+        ) from None
+    confirmation_task = asyncio.create_task(
+        manager.confirm_episode_persisted(
+            str(recording.id), recording.episode_count, recording.status
+        ),
+        name=f"ctrl-pi-episode-confirm-{recording.id}",
+    )
+    snapshot, confirmation_cancelled = await _wait_for_confirmation_task(
+        confirmation_task
     )
     if recording.status != snapshot.status:
         recording.status = snapshot.status
-        db.commit()
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            _rollback_safely(db)
+            await manager.episode_persistence_failed(str(recording.id))
+            raise HTTPException(
+                status_code=503,
+                detail="Episode state could not be persisted; it will be recovered from staging.",
+            ) from None
+    if confirmation_cancelled:
+        raise asyncio.CancelledError
     return _state(snapshot)
 
 
@@ -485,6 +717,7 @@ async def upload_recording(
     uploader: HFDatasetUploader = Depends(get_hf_uploader),
 ) -> RecordingUploadResponse:
     recording = _recording_or_404(db, recording_id)
+    await _reconcile_episode_manifests(db, recording, manager)
     if _reconcile_stale_upload(db, recording, uploader):
         db.commit()
 
@@ -549,7 +782,14 @@ async def upload_recording(
                 "started_at": started_at,
             },
         }
-        db.commit()
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            _rollback_safely(db)
+            raise HTTPException(
+                status_code=503,
+                detail="Upload intent could not be persisted; no transfer was started.",
+            ) from None
 
         upload_task = asyncio.create_task(
             asyncio.to_thread(
@@ -630,9 +870,26 @@ async def upload_recording(
                 "lerobot_version": "0.4.4",
             },
         }
-        db.commit()
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            _rollback_safely(db)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The remote upload was verified, but its local completion "
+                    "could not be confirmed; raw staging was retained."
+                ),
+            ) from None
         db.refresh(recording)
         if cancelled:
+            raise asyncio.CancelledError
+        cleanup_task = asyncio.create_task(
+            manager.remove_uploaded_staging(str(recording.id)),
+            name=f"ctrl-pi-upload-cleanup-{recording.id}",
+        )
+        cleanup_cancelled = await _wait_for_cleanup_task(cleanup_task)
+        if cleanup_cancelled:
             raise asyncio.CancelledError
         return RecordingUploadResponse(
             recording=_recording_read(db, recording),
@@ -685,20 +942,4 @@ def _mark_upload_failed(
 def _metadata_with_episode(
     current: dict[str, Any], result: EpisodeResult
 ) -> dict[str, Any]:
-    stored_episodes = current.get("episodes", [])
-    episodes = list(stored_episodes) if isinstance(stored_episodes, list) else []
-    episodes.append(
-        {
-            "index": result.index,
-            "duration_seconds": result.duration_seconds,
-            "sample_count": result.sample_count,
-            "success": result.success,
-            "notes": result.notes,
-            "metadata": result.metadata,
-            "artifact_key": result.artifact_key,
-            "started_at": result.started_at.isoformat(),
-            "ended_at": result.ended_at.isoformat(),
-            "fps": result.fps,
-        }
-    )
-    return {**current, "episodes": episodes}
+    return merge_episode_results(current, [result])[0]

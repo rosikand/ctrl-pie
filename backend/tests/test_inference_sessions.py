@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from collections.abc import Generator
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -12,11 +14,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from ctrl_pi.api.recordings import reconcile_recordings_startup
 from ctrl_pi.camera import CameraFrame, MockCamera
+from ctrl_pi.compute import ComputeConfigurationError, ComputeTargetError
 from ctrl_pi.compute_stub import StubComputeTarget
 from ctrl_pi.config import AppConfig, get_config
 from ctrl_pi.db import Base, get_db
-from ctrl_pi.deployments import DeploymentService
+from ctrl_pi.deployments import DeploymentProviderError, DeploymentService
 from ctrl_pi.drivers.mock_yam import MockYAMDriver
 from ctrl_pi.inference_runtime import (
     MOCK_MODEL_REPO,
@@ -33,8 +37,8 @@ from ctrl_pi.inference_sessions import (
 )
 from ctrl_pi.inference_transport import InProcessInferenceTransport
 from ctrl_pi.main import create_app
-from ctrl_pi.models import Deployment, Recording
-from ctrl_pi.recording import RecordingManager
+from ctrl_pi.models import Deployment, InferenceEndpoint, Recording
+from ctrl_pi.recording import EPISODE_MANIFEST_FILENAME, RecordingManager
 from ctrl_pi.rig import RigLease
 
 
@@ -57,6 +61,25 @@ class _FakeVideoWriter:
 
     def terminate(self) -> None:
         self.closed = True
+
+
+class _ModalStubComputeTarget(StubComputeTarget):
+    """A network-free Modal-shaped lifecycle target for routing tests."""
+
+    @property
+    def kind(self):
+        return "modal"
+
+
+class _UnavailableModalTarget(_ModalStubComputeTarget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stop_attempts = 0
+
+    def stop(self, handle) -> None:
+        del handle
+        self.stop_attempts += 1
+        raise ComputeConfigurationError("missing Modal credentials")
 
 
 @pytest.fixture
@@ -108,6 +131,9 @@ def inference_stack(tmp_path: Path):
         transport_factory=transport_factory,
         session_factory=factory,
         recording_fps=50,
+        # Most unit tests drive reconciliation explicitly. Dedicated watchdog
+        # tests enable the background loop and always shut it down.
+        watchdog_interval_seconds=None,
     )
     return (
         engine,
@@ -117,6 +143,26 @@ def inference_stack(tmp_path: Path):
         driver,
         recording_manager,
         manager,
+    )
+
+
+def _manager_for_service(
+    inference_stack,
+    service: DeploymentService,
+    cleanup_service_factory,
+) -> InferenceSessionManager:
+    _, factory, _, _, driver, recording_manager, existing = inference_stack
+    return InferenceSessionManager(
+        deployment_service=service,
+        driver=driver,
+        camera=existing.camera,
+        rig_lease=existing.rig_lease,
+        recording_manager=recording_manager,
+        transport_factory=existing.transport_factory,
+        session_factory=factory,
+        cleanup_service_factory=cleanup_service_factory,
+        recording_fps=50,
+        watchdog_interval_seconds=None,
     )
 
 
@@ -293,6 +339,476 @@ async def test_restart_never_resumes_actions_and_tears_down_running_provider(
 
 
 @pytest.mark.asyncio
+async def test_watchdog_expires_an_idle_deployment_from_its_persisted_timeout(
+    inference_stack,
+) -> None:
+    _, factory, target, service, _, _, manager = inference_stack
+    deployment_id = await _deploy(service, factory)
+    with factory() as db:
+        record = service.get(db, deployment_id)
+        assert record.timeout_seconds == 60
+        assert record.started_at is not None
+        expires_after = record.started_at + timedelta(seconds=61)
+    manager._now = lambda: expires_after
+
+    await manager._watchdog_once()
+
+    with factory() as db:
+        assert service.get(db, deployment_id).status == "stopped"
+    assert all(state.stopped_verified for state in target.list_owned())
+
+
+@pytest.mark.asyncio
+async def test_background_watchdog_enforces_deadline_for_deployments_created_later(
+    inference_stack,
+) -> None:
+    _, factory, target, service, _, _, manager = inference_stack
+    manager._watchdog_interval_seconds = 0.01
+    await manager.startup()
+    try:
+        deployment_id = await _deploy(service, factory)
+        with factory() as db:
+            record = service.get(db, deployment_id)
+        assert record.started_at is not None
+        manager._now = lambda: record.started_at + timedelta(seconds=61)
+
+        deadline = asyncio.get_running_loop().time() + 1
+        while True:
+            with factory() as db:
+                if service.get(db, deployment_id).status == "stopped":
+                    break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("deployment watchdog did not enforce the deadline")
+            await asyncio.sleep(0.01)
+        assert all(state.stopped_verified for state in target.list_owned())
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_stops_live_motion_before_provider_teardown(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, target, service, _, recording_manager, manager = inference_stack
+    await recording_manager.startup()
+    deployment_id = await _deploy(service, factory)
+    with factory() as db:
+        started = await manager.start(
+            db,
+            deployment_id,
+            InferenceStartOptions(
+                arm_id="yam-follower",
+                task="Stop at the durable deployment deadline",
+            ),
+        )
+    assert started.deployment.started_at is not None
+    manager._now = lambda: started.deployment.started_at + timedelta(seconds=61)
+    original_stop = target.stop
+    stop_observations: list[bool] = []
+
+    def assert_local_loop_stopped(handle) -> None:
+        stop_observations.append(manager.rig_lease.current() is None)
+        original_stop(handle)
+
+    monkeypatch.setattr(target, "stop", assert_local_loop_stopped)
+    await manager._watchdog_once()
+
+    terminal = await manager.read(deployment_id)
+    assert terminal.session_status == terminal.deployment.status == "stopped"
+    assert terminal.teardown_verified is True
+    assert stop_observations == [True]
+    assert await manager.active_resource_counts() == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_retries_a_failed_expired_teardown(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, target, service, _, _, manager = inference_stack
+    deployment_id = await _deploy(service, factory)
+    with factory() as db:
+        record = service.get(db, deployment_id)
+        assert record.started_at is not None
+        manager._now = lambda: record.started_at + timedelta(seconds=61)
+    original_stop = target.stop
+    attempts = 0
+
+    def fail_once(handle) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ComputeTargetError("raw provider failure")
+        original_stop(handle)
+
+    monkeypatch.setattr(target, "stop", fail_once)
+    await manager._watchdog_once()
+    with factory() as db:
+        assert service.get(db, deployment_id).status == "failed"
+    assert any(not state.stopped_verified for state in target.list_owned())
+
+    await manager._watchdog_once()
+    with factory() as db:
+        assert service.get(db, deployment_id).status == "stopped"
+    assert attempts == 2
+    assert all(state.stopped_verified for state in target.list_owned())
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retries_failed_owned_cleanup_to_verified_stop(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, target, service, _, _, manager = inference_stack
+    deployment_id = await _deploy(service, factory)
+    original_stop = target.stop
+    attempts = 0
+
+    def fail_once(handle) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ComputeTargetError("first provider stop failed")
+        original_stop(handle)
+
+    monkeypatch.setattr(target, "stop", fail_once)
+    with factory() as db:
+        with pytest.raises(DeploymentProviderError):
+            await service.stop(db, deployment_id)
+    with factory() as db:
+        assert service.get(db, deployment_id).status == "failed"
+    assert any(not state.stopped_verified for state in target.list_owned())
+
+    await manager.shutdown()
+
+    with factory() as db:
+        assert service.get(db, deployment_id).status == "stopped"
+    assert attempts == 2
+    assert all(state.stopped_verified for state in target.list_owned())
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cancels_a_blocked_start_and_tears_down_provider_boundedly(
+    inference_stack,
+) -> None:
+    _, factory, target, service, _, recording_manager, manager = inference_stack
+    await recording_manager.startup()
+    deployment_id = await _deploy(service, factory)
+    with factory() as db:
+        record = service.get(db, deployment_id)
+    assert record.started_at is not None
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_factory = manager.transport_factory
+
+    class SlowStartTransport:
+        def __init__(self, delegate) -> None:
+            self.delegate = delegate
+
+        def describe(self):
+            entered.set()
+            assert release.wait(timeout=3)
+            return self.delegate.describe()
+
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+
+    manager.transport_factory = lambda deployment: SlowStartTransport(
+        original_factory(deployment)
+    )
+
+    async def start_blocked():
+        with factory() as db:
+            return await manager.start(
+                db,
+                deployment_id,
+                InferenceStartOptions(
+                    arm_id="yam-follower",
+                    task="Never outlive the provider deadline",
+                ),
+            )
+
+    start_task = asyncio.create_task(start_blocked())
+    assert await asyncio.to_thread(entered.wait, 1)
+    manager._now = lambda: record.started_at + timedelta(seconds=61)
+    before = asyncio.get_running_loop().time()
+    try:
+        await manager._watchdog_once()
+        assert asyncio.get_running_loop().time() - before < 1
+        with factory() as db:
+            assert service.get(db, deployment_id).status == "stopped"
+        assert all(state.stopped_verified for state in target.list_owned())
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+    assert manager.rig_lease.current() is None
+    assert await manager.active_resource_counts() == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_requires_provider_absence_proof_for_prehandle_failures(
+    inference_stack,
+) -> None:
+    _, factory, target, service, _, _, manager = inference_stack
+    endpoint = InferenceEndpoint(
+        name="failed before provider handle",
+        runtime="stub",
+        status="failed",
+    )
+    with factory() as db:
+        db.add(endpoint)
+        db.flush()
+        deployment = Deployment(
+            endpoint_id=endpoint.id,
+            model_repo=MOCK_MODEL_REPO,
+            checkpoint_revision=MOCK_MODEL_REVISION,
+            runtime="stub",
+            compute_size="CPU",
+            target_kind="stub",
+            timeout_seconds=60,
+            status="failed",
+        )
+        db.add(deployment)
+        db.commit()
+        deployment_id = deployment.id
+    assert target.list_owned() == []
+
+    await manager._watchdog_once()
+
+    with factory() as db:
+        stopped = service.get(db, deployment_id)
+    assert stopped.status == "stopped"
+    assert stopped.provider_app_id is None
+
+
+@pytest.mark.asyncio
+async def test_restart_cleans_modal_row_through_modal_target_in_mock_mode(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, stub_target, stub_service, _, _, _ = inference_stack
+    modal_target = _ModalStubComputeTarget()
+    modal_service = DeploymentService(
+        modal_target,
+        session_factory=factory,
+        nonce_factory=lambda: "modal-restart-cleanup",
+        stop_verify_timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+    deployment_id = await _deploy(modal_service, factory)
+    wrong_stop_calls = 0
+    original_stub_stop = stub_target.stop
+
+    def counted_wrong_stop(handle):
+        nonlocal wrong_stop_calls
+        wrong_stop_calls += 1
+        return original_stub_stop(handle)
+
+    monkeypatch.setattr(stub_target, "stop", counted_wrong_stop)
+    manager = _manager_for_service(
+        inference_stack,
+        stub_service,
+        lambda kind: modal_service if kind == "modal" else stub_service,
+    )
+
+    await manager.startup()
+
+    with factory() as db:
+        assert stub_service.get(db, deployment_id).status == "stopped"
+    assert wrong_stop_calls == 0
+    assert all(state.stopped_verified for state in modal_target.list_owned())
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cleans_stub_deadline_through_stub_target_in_modal_mode(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, stub_target, stub_service, _, _, _ = inference_stack
+    deployment_id = await _deploy(stub_service, factory)
+    with factory() as db:
+        record = stub_service.get(db, deployment_id)
+    assert record.started_at is not None
+
+    modal_target = _ModalStubComputeTarget()
+    modal_service = DeploymentService(
+        modal_target,
+        session_factory=factory,
+        nonce_factory=lambda: "modal-current-target",
+        stop_verify_timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+    wrong_stop_calls = 0
+    original_modal_stop = modal_target.stop
+
+    def counted_wrong_stop(handle):
+        nonlocal wrong_stop_calls
+        wrong_stop_calls += 1
+        return original_modal_stop(handle)
+
+    monkeypatch.setattr(modal_target, "stop", counted_wrong_stop)
+    manager = _manager_for_service(
+        inference_stack,
+        modal_service,
+        lambda kind: stub_service if kind == "stub" else modal_service,
+    )
+    manager._now = lambda: record.started_at + timedelta(seconds=61)
+
+    await manager._watchdog_once()
+
+    with factory() as db:
+        assert stub_service.get(db, deployment_id).status == "stopped"
+    assert wrong_stop_calls == 0
+    assert all(state.stopped_verified for state in stub_target.list_owned())
+
+
+@pytest.mark.asyncio
+async def test_missing_modal_cleanup_credentials_remain_failed_and_retryable(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, stub_target, stub_service, _, _, _ = inference_stack
+    provider_target = _ModalStubComputeTarget()
+    provider_service = DeploymentService(
+        provider_target,
+        session_factory=factory,
+        nonce_factory=lambda: "modal-provider",
+        stop_verify_timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+    deployment_id = await _deploy(provider_service, factory)
+    with factory() as db:
+        record = provider_service.get(db, deployment_id)
+    assert record.started_at is not None
+
+    unavailable_target = _UnavailableModalTarget()
+    unavailable_service = DeploymentService(
+        unavailable_target,
+        session_factory=factory,
+        stop_verify_timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+    wrong_stop_calls = 0
+    original_stub_stop = stub_target.stop
+
+    def counted_wrong_stop(handle):
+        nonlocal wrong_stop_calls
+        wrong_stop_calls += 1
+        return original_stub_stop(handle)
+
+    monkeypatch.setattr(stub_target, "stop", counted_wrong_stop)
+    manager = _manager_for_service(
+        inference_stack,
+        stub_service,
+        lambda kind: unavailable_service if kind == "modal" else stub_service,
+    )
+    manager._now = lambda: record.started_at + timedelta(seconds=61)
+
+    await manager._watchdog_once()
+    await manager._watchdog_once()
+
+    with factory() as db:
+        failed = stub_service.get(db, deployment_id)
+    assert failed.status == "failed"
+    assert failed.stopped_at is None
+    assert unavailable_target.stop_attempts == 2
+    assert wrong_stop_calls == 0
+    assert any(not state.stopped_verified for state in provider_target.list_owned())
+
+
+@pytest.mark.asyncio
+async def test_idle_health_is_provider_backed_cached_and_detects_disappearance(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, target, service, _, _, manager = inference_stack
+    ticks = [0.0]
+    manager._monotonic = lambda: ticks[0]
+    manager._idle_health_cache_seconds = 2
+    inspect_calls = 0
+    original_inspect = target.inspect
+
+    def counted_inspect(handle):
+        nonlocal inspect_calls
+        inspect_calls += 1
+        return original_inspect(handle)
+
+    monkeypatch.setattr(target, "inspect", counted_inspect)
+    deployment_id = await _deploy(service, factory)
+    health_calls = 0
+
+    def forbidden_idle_health(handle, nonce):
+        del handle, nonce
+        nonlocal health_calls
+        health_calls += 1
+        raise AssertionError("idle polling must not call the runtime endpoint")
+
+    monkeypatch.setattr(target, "health", forbidden_idle_health)
+
+    assert (await manager.read(deployment_id)).endpoint_healthy is True
+    first_probe_calls = inspect_calls
+    assert first_probe_calls >= 1
+    assert (await manager.read(deployment_id)).endpoint_healthy is True
+    assert inspect_calls == first_probe_calls
+    state = target.list_owned()[0]
+    target.stop(state.handle())
+    assert (await manager.read(deployment_id)).endpoint_healthy is True
+
+    ticks[0] = 3
+    disappeared = await manager.read(deployment_id)
+    assert disappeared.deployment.status == "running"
+    assert disappeared.session_status == "idle"
+    assert disappeared.endpoint_healthy is False
+    assert health_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_idle_health_probe_has_a_bounded_response_time(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, target, service, _, _, _ = inference_stack
+    deployment_id = await _deploy(service, factory)
+    with factory() as db:
+        record = service.get(db, deployment_id)
+    original_inspect = target.inspect
+    entered = threading.Event()
+    release = threading.Event()
+    health_calls = 0
+
+    def slow_inspect(handle):
+        entered.set()
+        assert release.wait(timeout=1)
+        return original_inspect(handle)
+
+    def forbidden_late_health(handle, nonce):
+        del handle, nonce
+        nonlocal health_calls
+        health_calls += 1
+        raise AssertionError("timed-out inspection continued into runtime health")
+
+    monkeypatch.setattr(target, "inspect", slow_inspect)
+    monkeypatch.setattr(target, "health", forbidden_late_health)
+    before = asyncio.get_running_loop().time()
+    assert (
+        await service.endpoint_healthy(record, timeout_seconds=0.01)
+        is False
+    )
+    assert asyncio.get_running_loop().time() - before < 0.1
+    assert entered.is_set()
+    release.set()
+    for _ in range(100):
+        if not service._readiness_probes:
+            break
+        await asyncio.sleep(0.005)
+    assert not service._readiness_probes
+    assert health_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_duplicate_start_conflicts_and_stop_joins_shared_loop(
     inference_stack,
 ) -> None:
@@ -438,6 +954,91 @@ async def test_recording_persistence_failure_still_tears_down_every_resource(
         assert db.get(Recording, recording_id).status == "failed"
     assert await recording_manager.active_resource_counts() == (0, 0)
     assert all(state.stopped_verified for state in target.list_owned())
+
+    episode_directory = (
+        recording_manager.staging_dir
+        / str(recording_id)
+        / "episode_000000"
+    )
+    assert (episode_directory / EPISODE_MANIFEST_FILENAME).is_file()
+    restarted = RecordingManager(
+        driver=manager.driver,
+        camera=manager.camera,
+        staging_dir=recording_manager.staging_dir,
+    )
+    await restarted.startup()
+    await reconcile_recordings_startup(factory, restarted)
+    await reconcile_recordings_startup(factory, restarted)
+    with factory() as db:
+        recovered = db.get(Recording, recording_id)
+        assert recovered is not None
+        assert recovered.status == "ready"
+        assert recovered.episode_count == 1
+        assert len(recovered.recording_metadata["episodes"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_inference_post_commit_confirmation_is_cancellation_safe(
+    inference_stack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory, _, _, _, recording_manager, manager = inference_stack
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    recording_id = uuid.uuid4()
+    with factory() as db:
+        db.add(
+            Recording(
+                id=recording_id,
+                name="Inference cancellation",
+                task="Persist once",
+                status="recording",
+                episode_count=0,
+                duration_seconds=0,
+                recording_metadata={"source": "inference", "episodes": []},
+            )
+        )
+        db.commit()
+
+    await recording_manager.startup()
+    await recording_manager.start_teleop(
+        str(recording_id), "yam-leader", "yam-follower", 0, "draft"
+    )
+    await recording_manager.start_episode(str(recording_id), fps=10, metadata={})
+    _, result = await recording_manager.stop_episode(
+        str(recording_id), success=True, notes=None
+    )
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_confirm = recording_manager.confirm_episode_persisted
+
+    async def blocked_confirm(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original_confirm(*args, **kwargs)
+
+    monkeypatch.setattr(recording_manager, "confirm_episode_persisted", blocked_confirm)
+    persistence = asyncio.create_task(
+        manager._persist_episode_result(recording_id, result)
+    )
+    await entered.wait()
+    persistence.cancel()
+    await asyncio.sleep(0)
+    assert persistence.done() is False
+    release.set()
+    await persistence
+
+    with factory() as db:
+        stored = db.get(Recording, recording_id)
+        assert stored is not None
+        assert stored.status == "ready"
+        assert stored.episode_count == 1
+        assert len(stored.recording_metadata["episodes"]) == 1
+    state = await recording_manager.state(
+        str(recording_id), "yam-leader", "yam-follower", 1, "ready"
+    )
+    assert state.episode_active is False
+    await recording_manager.stop_teleop(str(recording_id))
 
 
 def test_rest_list_idle_health_start_stream_stop_and_secret_redaction(

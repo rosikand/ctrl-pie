@@ -121,6 +121,7 @@ class DeploymentRead(BaseModel):
     compute_size: Literal[
         "CPU", "Modal: A10G", "Modal: A100", "Modal: H100"
     ]
+    timeout_seconds: int = Field(ge=1, le=1800)
     endpoint_url: str | None
     provider_app_id: str | None
     arm_id: str | None

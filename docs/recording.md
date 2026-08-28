@@ -44,8 +44,9 @@ Use the controls in this order:
    captures an initial synchronized sample, then reports `recording`.
 4. Stop the episode with its success flag and optional notes. The backend
    stops accepting samples, closes FFmpeg outside the event loop, validates
-   completion, atomically renames both partial files, then commits aggregate
-   metadata. Teleop remains active so another episode can begin.
+   completion, atomically renames both partial files, publishes a durable
+   bounded manifest, then commits aggregate metadata. Teleop remains active so
+   another episode can begin.
 5. Repeat episode start/stop as needed.
 6. Stop teleoperation. The rig lease is released and the stable status becomes
    `ready` once at least one episode exists.
@@ -99,12 +100,14 @@ RECORDING_STAGING_DIR/
     episode_000000/
       video.mp4
       samples.jsonl
+      episode.json
 ```
 
 Capture begins with `video.partial.mp4` and `samples.partial.jsonl`. A complete
-stop closes the writer and sample stream and then renames both files to their
-final names. Failed starts/finalization remove partial files so they cannot be
-mistaken for an uploadable episode.
+stop closes the writer and sample stream, renames both files to their final
+names, and atomically publishes `episode.json` only after both artifacts are
+durable. Failed starts and finalization remove partial or mixed files so they
+cannot be mistaken for an uploadable episode.
 
 Each due sample pairs one camera frame with leader observation, the absolute
 action sent to the follower, and the resulting follower observation. Sample
@@ -154,9 +157,15 @@ partial remote mutation, the session is immutable and retries may use only the
 same repository target. Once uploaded, no new episodes can be added.
 
 The temporary converted LeRobot copy is removed after the attempt. Original
-staged episodes remain on local disk; ctrl-π has no automatic retention or
-delete API in V1. Hugging Face is the durable artifact source after remote
-verification.
+staged episodes are retained on failure, cancellation, or an uncertain final
+database commit. They are removed only after the Hub revision is verified and
+the `uploaded` database transition commits. If that cleanup is interrupted,
+startup removes the retained raw staging after observing the durable
+`uploaded` row. Hugging Face is then the artifact source of truth.
+
+ctrl-π does not choose or grant a license for captured user data. Generated
+dataset cards leave the Hub license field unset; an operator who publishes a
+dataset must select and document the appropriate data license.
 
 ## Inference recording
 
@@ -177,13 +186,14 @@ waits on a Hub upload.
 
 Live teleop and capture never resume after a process restart. A persisted
 `teleop` or `recording` badge is normalized to `draft`, `ready`, or `failed`
-when no corresponding in-memory task exists. An interrupted `uploading` row is
-marked failed when the uploader has no active reservation, preserving its
-original target for a safe retry.
-
-An open partial episode is not presented as finalized data. If the host or
-container is lost before finalization, keep the files for inspection but do
-not hand-rename them into an uploadable episode.
+when no corresponding in-memory task exists. Valid episode manifests are
+reconciled idempotently into PostgreSQL, including a manifest published before
+a failed episode-metadata commit. Incomplete partial, mixed, or invalid episode
+directories are removed. Valid manifests unknown to the connected database
+and unrelated shared-root entries are preserved, so a fresh or wrong database
+does not destroy finalized raw data. An interrupted `uploading` row is marked
+failed when the uploader has no active reservation, preserving its original
+target for a safe retry.
 
 ## Operational checklist
 
@@ -203,7 +213,8 @@ After the session:
 - verify episode count and duration;
 - upload private unless publication is intentional;
 - record the returned repository and immutable revision; and
-- retain local staging until remote playback and metadata are verified.
+- do not manually remove local staging before the API reports the durable
+  `uploaded` result; ctrl-π removes it after that commit.
 
 ## Related guides
 

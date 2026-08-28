@@ -71,16 +71,19 @@ revision, so `HF_TOKEN` never enters browser code.
 
 ### Local staging: durable only on the host or Docker volume
 
-Before upload, each finalized episode contains an MP4 and synchronized JSONL
-samples below `RECORDING_STAGING_DIR`. PostgreSQL holds only a relative
-artifact key and aggregate metadata. Preserve this directory until upload is
-verified. Restoring PostgreSQL without the staging directory cannot recreate
-an unuploaded episode. The production Compose volume persists this data across
-normal container replacement, but `docker compose down --volumes` deletes it.
+Before upload, each finalized episode contains an MP4, synchronized JSONL
+samples, and a bounded durable manifest below `RECORDING_STAGING_DIR`.
+PostgreSQL holds only a relative artifact key and aggregate metadata. Preserve
+this directory until the Hub revision is verified and the `uploaded` database
+transition commits. Restoring PostgreSQL without the staging directory cannot
+recreate an unuploaded episode. The production Compose volume persists this
+data across normal container replacement, but `docker compose down --volumes`
+deletes it.
 
-After a successful upload, Hugging Face is the artifact source of truth. The
-original staging files are not automatically deleted, so operators must still
-budget and manage local disk usage.
+After that durable upload transition, Hugging Face is the artifact source of
+truth and ctrl-π removes the original raw staging. If immediate cleanup is
+skipped or interrupted, startup observes the durable `uploaded` row and
+retries it. Failed, cancelled, or uncertain uploads retain raw staging.
 
 ### Process memory: live state
 
@@ -136,7 +139,21 @@ malformed card degrades one item instead of failing the whole listing.
 
 Episode detail reads LeRobot metadata/parquet at the same SHA. Video URLs carry
 that revision through the backend proxy, preventing a mutable Hub `HEAD` from
-mixing timeline data with a newer MP4.
+mixing timeline data with a newer MP4. A detail response contains at most
+2,000 deterministic, evenly spaced timeline frames and no more than one
+million state/action scalar values; a lower scalar-derived limit applies to
+wide vectors. The first and last frame are always included. The response
+reports both the returned sample count and whether sampling truncated the
+episode, and the UI labels sampled values accordingly.
+
+The reader validates the episode index against Parquet file and row-group
+bounds before returning data. It uses `ParquetFile` row groups and 1,024-row
+batches to select only the requested offsets instead of converting the full
+episode table to Python objects. Before decoding any batch, it rejects selected
+row groups whose cumulative metadata exceeds one million rows or 16 million
+state/action scalar slots. This keeps even a malicious 100-million-row single
+row group from turning a bounded response into an unbounded scan; normal
+LeRobot chunk files remain within the documented budget.
 
 ### Training
 
@@ -154,6 +171,11 @@ repository, and immutable revision. A later Start selects one connected
 follower, acquires the rig, verifies the same runtime identity again, and
 runs one-in-flight observation/action streaming.
 
+Idle state polling uses only bounded, cached provider lifecycle inspection;
+it does not call the runtime web endpoint or wake a scaled-to-zero GPU. The
+nonce/runtime identity request remains mandatory during Deploy and again at
+explicit Start before the first arm write.
+
 Optional inference recording is passive: it reuses the inference lease and
 records only actions the loop actually applied. Stop joins local arm writes,
 finalizes the episode, and then verifies provider teardown in a
@@ -166,9 +188,10 @@ FastAPI lifespan startup performs these ordered operations:
 
 1. start the selected driver off the asynchronous event loop;
 2. enable and reconcile the recording manager;
-3. reconcile persisted deployment rows with the configured compute target;
-4. start inference-session reconciliation and tear down any running provider
-   resource that has no process-local robot loop.
+3. tear down unattended resources through the provider adapter named by each
+   row's persisted target kind, including rows left by a mock/hardware mode
+   switch, without calling a runtime web endpoint;
+4. start the deployment-lifetime watchdog.
 
 Real-driver construction and imports are lazy. On hardware startup it validates
 the narrow standard-YAM/GELLO/crank configuration, connects with interactive
@@ -181,7 +204,11 @@ the backend restarts.
 No loop is auto-resumed after a crash or restart. Interrupted upload statuses
 are reconciled to a safe retryable failure when no in-process uploader owns
 them. Recording statuses such as `teleop` or `recording` are normalized when
-their process-local task no longer exists.
+their process-local task no longer exists. Complete episode manifests are
+reconciled idempotently into PostgreSQL; incomplete partial or mixed episode
+directories are removed. A valid manifest under a recording root unknown to
+the connected database is preserved, as is unrelated content if the staging
+path was accidentally pointed at a shared directory.
 
 Shutdown first asks the inference session manager to stop arm writes and
 verify compute teardown. It then joins or aborts recording work, closes
@@ -217,6 +244,14 @@ responses, placed in endpoint URLs, or sent to the browser. Modal API
 credentials and Modal Proxy Tokens are separate credential pairs. Hub and
 Modal calls use explicit credentials at their narrow service boundary, and
 public errors discard provider response bodies and raw exception text.
+
+Settings readiness is mode-aware. Mock setup requires PostgreSQL and the mock
+arms; Hugging Face and Modal are reported truthfully but remain optional.
+Hardware setup additionally requires an exact token-authenticated Hugging Face
+user or organization namespace, a complete validated Modal API environment or
+selected profile pair, a complete Modal proxy pair, and connected real arms.
+The Modal readiness check validates local credential configuration rather than
+claiming a live provider connection.
 
 Private Hub videos use a same-origin backend proxy. Modal inference endpoints
 require provider-native proxy authentication and accept only canonical HTTPS

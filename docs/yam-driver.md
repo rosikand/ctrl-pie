@@ -91,12 +91,12 @@ so the adapter maps by name in both directions:
 
 Follower positions and command targets are radians. The GELLO leader reports
 each rotary joint on `[-100, 100]`; the adapter maps that value linearly into
-the corresponding pinned follower range. Its gripper `[0, 100]` becomes
-ctrl-π `[0, 1]` after inversion at the vendor boundary: ctrl-π preserves
-`0=closed` and `1=open`, while the pinned crank plugin uses `0=open` and
-`1=closed`. This conversion, the GELLO gripper endpoint orientation, and the
-`wrist_flex`/`wrist_roll` reordering must be checked on the physical pair
-before enabling teleop.
+the corresponding pinned follower range. The crank follower and the GELLO
+plugin's intended follower-command space use `0=open` and `1=closed` (GELLO
+`0` and `100`). ctrl-π preserves its public `0=closed`, `1=open` convention by
+inverting both sources at the vendor boundary. This conversion, the GELLO
+mounting/calibration endpoint orientation, and the `wrist_flex`/`wrist_roll`
+reordering must be checked on the physical pair before enabling teleop.
 
 ## Cached telemetry and unavailable fields
 
@@ -116,7 +116,7 @@ Real fields have these sources:
 | Leader joint velocity | Difference between consecutive mapped samples. |
 | Leader joint effort | Unavailable (`null`); the GELLO plugin exposes no effort measurement. |
 | End-effector pose | Forward kinematics from the configured MuJoCo XML's `joint1`–`joint6` and `grasp_site`; it is model-derived, not a measured Cartesian sensor. |
-| Gripper position and velocity | Normalized plugin position and follower `joint_vel[6]`; leader velocity is derived between samples. |
+| Gripper position and velocity | Public `0=closed`, `1=open`: follower position is `1 - vendor_position`, follower velocity is `-joint_vel[6]`, and GELLO position is `1 - raw/100`; leader velocity is derived between samples. |
 | Gripper closed state | Derived from normalized position (`<= 0.15`), not an independent contact switch. |
 | Loop frequency, cycle time, jitter, drops | The ctrl-π sampling loop, not an internal motor-control-loop diagnostic. |
 | CAN/serial state | `active` only while sampling succeeds; otherwise `disconnected`. It is not a kernel CAN error-counter query. |
@@ -229,15 +229,19 @@ perform and record all of the following on the target Ubuntu/YAM box:
 3. Verify the pinned packages, MuJoCo XML and referenced assets, `joint1`–
    `joint6`, `grasp_site`, and the existing GELLO calibration file.
 4. With power/motion controls secured and an operator on the emergency stop,
-   run preflight and then the connected probe. Confirm clean close and the
-   expected vendor gravity-compensation/safe-mode behavior.
+   run preflight and then the connected probe. Verify whether bounded shutdown
+   completes and observe the vendor gravity-compensation/safe-mode behavior;
+   treat incomplete cleanup as a blocker and make the hardware safe manually.
 5. Compare each reported joint against independent physical motion. Verify
    zero offsets, directions, radians, the GELLO normalization endpoints, and
    especially the distinct wrist-flex/wrist-roll mapping. Confirm FK pose
    direction and scale against the physical tool point.
-6. Check follower velocity/effort units and signs, optional temperatures,
-   gripper position/velocity, and observed ctrl-π sampling frequency. Do not
-   expect force or CAN error counters from this plugin version.
+6. Check follower velocity/effort units and signs, optional temperatures, and
+   observed ctrl-π sampling frequency. Verify that crank vendor `0=open` and
+   `1=closed` becomes public `1=open` and `0=closed`, that follower gripper
+   velocity changes sign with the inversion, and that the physically mounted
+   GELLO/calibration endpoints follow the same public direction. Do not expect
+   force or CAN error counters from this plugin version.
 7. Align leader and follower safely, then issue individually bounded, low-speed
    joint and gripper jogs. Verify the position-control transition, hard limits,
    per-command limits, emergency stop, current/torque limits, and collision

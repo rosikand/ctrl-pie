@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import traceback
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,7 +12,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ctrl_pi.config import AppConfig, get_config
-from ctrl_pi.hf_episodes import HFEpisodeBrowser
+from ctrl_pi.hf_episodes import (
+    MAX_PARQUET_SCAN_ROWS,
+    MAX_TIMELINE_SAMPLES,
+    MAX_TIMELINE_SCALARS,
+    EpisodeFormatError,
+    HFEpisodeBrowser,
+)
 from ctrl_pi.main import create_app
 
 REVISION_A = "a" * 40
@@ -179,6 +186,89 @@ def _write_revision(root: Path, revision: str, video: bytes) -> dict[str, Path]:
     }
 
 
+def _write_large_revision(
+    root: Path,
+    *,
+    frame_count: int,
+    state_size: int = 2,
+    action_size: int = 2,
+) -> tuple[FakeEpisodeHub, HFEpisodeBrowser, Path]:
+    revision_root = root / f"large-{frame_count}"
+    info_path = revision_root / "meta" / "info.json"
+    episodes_path = (
+        revision_root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    )
+    data_path = revision_root / "data" / "chunk-000" / "file-000.parquet"
+    info_path.parent.mkdir(parents=True)
+    episodes_path.parent.mkdir(parents=True)
+    data_path.parent.mkdir(parents=True)
+    info_path.write_text(
+        json.dumps(
+            {
+                "codebase_version": "v3.0",
+                "total_episodes": 1,
+                "total_frames": frame_count,
+                "fps": 50,
+                "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+                "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+                "features": {
+                    "observation.state": {
+                        "dtype": "float32",
+                        "shape": [state_size],
+                    },
+                    "action": {
+                        "dtype": "float32",
+                        "shape": [action_size],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "episode_index": 0,
+                    "tasks": ["Long task"],
+                    "length": frame_count,
+                    "data/chunk_index": 0,
+                    "data/file_index": 0,
+                    "dataset_from_index": 0,
+                    "dataset_to_index": frame_count,
+                }
+            ]
+        ),
+        episodes_path,
+    )
+    rows = [
+        {
+            "observation.state": [float(index)] * state_size,
+            "action": [float(index + 1)] * action_size,
+            "timestamp": index / 50,
+            "frame_index": index,
+            "episode_index": 0,
+            "index": index,
+        }
+        for index in range(frame_count)
+    ]
+    pq.write_table(
+        pa.Table.from_pylist(rows),
+        data_path,
+        row_group_size=113,
+    )
+    api = FakeEpisodeHub()
+    artifacts = {
+        "meta/info.json": info_path,
+        "meta/episodes/chunk-000/file-000.parquet": episodes_path,
+        "data/chunk-000/file-000.parquet": data_path,
+    }
+    api.repo_files[REVISION_A] = list(artifacts)
+    for name, path in artifacts.items():
+        api.artifacts[(REVISION_A, name)] = path
+    return api, HFEpisodeBrowser(hub_api_factory=lambda _token: api), data_path
+
+
 @pytest.fixture
 def episode_app(tmp_path: Path):
     api = FakeEpisodeHub()
@@ -254,6 +344,8 @@ def test_episode_list_and_pinned_detail_timeline(episode_app) -> None:
     assert payload["video_url"] == (
         f"/api/datasets/yam-demo/episodes/1/video?revision={REVISION_A}"
     )
+    assert payload["sampled_frame_count"] == 3
+    assert payload["frames_truncated"] is False
     assert payload["frames"] == [
         {
             "timestamp": 0.0,
@@ -280,6 +372,235 @@ def test_episode_list_and_pinned_detail_timeline(episode_app) -> None:
     assert all(call["token"] == "hf_episode_secret" for call in api.list_calls)
     assert all(call["token"] == "hf_episode_secret" for call in api.download_calls)
     assert all(call["revision"] in {REVISION_A, REVISION_B} for call in api.download_calls)
+
+
+@pytest.mark.parametrize(
+    ("frame_count", "expected_truncated"),
+    [
+        (MAX_TIMELINE_SAMPLES, False),
+        (MAX_TIMELINE_SAMPLES + 1, True),
+        (MAX_TIMELINE_SAMPLES * 5 + 17, True),
+    ],
+)
+def test_episode_detail_returns_a_strict_first_last_inclusive_sample(
+    tmp_path: Path,
+    frame_count: int,
+    expected_truncated: bool,
+) -> None:
+    _api, browser, _data_path = _write_large_revision(
+        tmp_path,
+        frame_count=frame_count,
+    )
+
+    detail = browser.episode_detail(
+        namespace="acme",
+        repo_name="yam-demo",
+        episode_index=0,
+        revision=REVISION_A,
+        token="hf_token",
+    )
+
+    expected_count = min(frame_count, MAX_TIMELINE_SAMPLES)
+    frame_indices = [frame.frame_index for frame in detail.frames]
+    assert detail.sampled_frame_count == expected_count
+    assert detail.frames_truncated is expected_truncated
+    assert len(detail.frames) == expected_count
+    assert frame_indices[0] == 0
+    assert frame_indices[-1] == frame_count - 1
+    assert frame_indices == sorted(set(frame_indices))
+    assert frame_indices == [
+        sample_index * (frame_count - 1) // (expected_count - 1)
+        for sample_index in range(expected_count)
+    ]
+    assert detail.frames[0].timestamp == 0
+    assert detail.frames[-1].timestamp == pytest.approx((frame_count - 1) / 50)
+
+
+def test_episode_detail_applies_scalar_budget_at_max_vector_dimensions(
+    tmp_path: Path,
+) -> None:
+    vector_width = 2_048
+    expected_count = MAX_TIMELINE_SCALARS // vector_width
+    frame_count = expected_count + 1
+    _api, browser, _data_path = _write_large_revision(
+        tmp_path,
+        frame_count=frame_count,
+        state_size=1_024,
+        action_size=1_024,
+    )
+
+    detail = browser.episode_detail(
+        namespace="acme",
+        repo_name="yam-demo",
+        episode_index=0,
+        revision=REVISION_A,
+        token="hf_token",
+    )
+
+    indices = [frame.frame_index for frame in detail.frames]
+    assert detail.sampled_frame_count == len(detail.frames) == expected_count
+    assert detail.frames_truncated is True
+    assert indices[0] == 0
+    assert indices[-1] == frame_count - 1
+    assert indices == sorted(set(indices))
+
+
+def test_episode_detail_rejects_parquet_bounds_that_disagree_with_index(
+    tmp_path: Path,
+) -> None:
+    frame_count = MAX_TIMELINE_SAMPLES + 1
+    _api, browser, data_path = _write_large_revision(
+        tmp_path,
+        frame_count=frame_count,
+    )
+    table = pq.read_table(data_path).slice(0, frame_count - 1)
+    pq.write_table(table, data_path, row_group_size=113)
+
+    with pytest.raises(
+        EpisodeFormatError,
+        match="data parquet bounds do not match",
+    ):
+        browser.episode_detail(
+            namespace="acme",
+            repo_name="yam-demo",
+            episode_index=0,
+            revision=REVISION_A,
+            token="hf_token",
+        )
+
+
+@pytest.mark.parametrize(
+    ("consumed_rows", "consumed_row_groups", "metadata_rows"),
+    [
+        (0, 0, 100_000_000),
+        (2, 2, 1),
+    ],
+)
+def test_episode_index_rejects_metadata_bounds_before_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    consumed_rows: int,
+    consumed_row_groups: int,
+    metadata_rows: int,
+) -> None:
+    artifacts = _write_revision(tmp_path, REVISION_A, b"video")
+    browser = HFEpisodeBrowser()
+    layout = browser._parse_layout(artifacts["meta/info.json"])
+    decode_attempted: list[bool] = []
+
+    class OversizedMetadata:
+        num_rows = metadata_rows
+        num_row_groups = 1
+
+        @staticmethod
+        def row_group(_index: int) -> SimpleNamespace:
+            raise AssertionError("row-group metadata must not be scanned past bounds")
+
+    class OversizedParquetFile:
+        metadata = OversizedMetadata()
+
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def iter_batches(self, **_kwargs: Any):
+            decode_attempted.append(True)
+            return iter(())
+
+    monkeypatch.setattr(pq, "ParquetFile", OversizedParquetFile)
+
+    with pytest.raises(EpisodeFormatError, match="metadata bounds"):
+        browser._read_episode_records(
+            artifacts["meta/episodes/chunk-000/file-000.parquet"],
+            layout,
+            consumed_rows=consumed_rows,
+            consumed_row_groups=consumed_row_groups,
+        )
+
+    assert decode_attempted == []
+
+
+def test_episode_detail_sanitizes_parquet_reader_failures(tmp_path: Path) -> None:
+    _api, browser, data_path = _write_large_revision(tmp_path, frame_count=3)
+    data_path.write_bytes(b"not a parquet file")
+
+    with pytest.raises(EpisodeFormatError) as caught:
+        browser.episode_detail(
+            namespace="acme",
+            repo_name="yam-demo",
+            episode_index=0,
+            revision=REVISION_A,
+            token="hf_token",
+        )
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert str(caught.value) == "The episode data parquet is malformed."
+    assert str(data_path) not in rendered
+
+
+def test_episode_detail_rejects_oversized_selected_row_group_before_scanning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api, browser, data_path = _write_large_revision(tmp_path, frame_count=3)
+    oversized_rows = max(100_000_000, MAX_PARQUET_SCAN_ROWS + 1)
+    revision_root = data_path.parents[2]
+    info_path = revision_root / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["total_frames"] = oversized_rows
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+    episodes_path = (
+        revision_root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "episode_index": 0,
+                    "tasks": ["Oversized row group"],
+                    "length": oversized_rows,
+                    "data/chunk_index": 0,
+                    "data/file_index": 0,
+                    "dataset_from_index": 0,
+                    "dataset_to_index": oversized_rows,
+                }
+            ]
+        ),
+        episodes_path,
+    )
+    dataset = browser._load_dataset(
+        namespace="acme",
+        repo_name="yam-demo",
+        token="hf_token",
+        revision=REVISION_A,
+    )
+    episode = browser._episode(dataset, 0)
+    scan_attempted: list[bool] = []
+
+    class OversizedMetadata:
+        num_rows = oversized_rows
+        num_row_groups = 1
+
+        @staticmethod
+        def row_group(index: int) -> SimpleNamespace:
+            assert index == 0
+            return SimpleNamespace(num_rows=oversized_rows)
+
+    class OversizedParquetFile:
+        metadata = OversizedMetadata()
+
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def iter_batches(self, **_kwargs: Any):
+            scan_attempted.append(True)
+            return iter(())
+
+    monkeypatch.setattr(pq, "ParquetFile", OversizedParquetFile)
+
+    with pytest.raises(EpisodeFormatError, match="scan budget"):
+        browser._load_frames(api, dataset, episode, "hf_token")
+
+    assert scan_attempted == []
 
 
 def test_media_url_remains_on_detail_revision_when_head_advances(episode_app) -> None:

@@ -36,5 +36,7 @@ export type DatasetEpisodeDetail = {
   video_key: string | null;
   episode: EpisodeSummary;
   frames: TimelineFrame[];
+  sampled_frame_count: number;
+  frames_truncated: boolean;
   video_url: string | null;
 };

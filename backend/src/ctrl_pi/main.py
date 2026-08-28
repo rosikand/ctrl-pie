@@ -11,11 +11,14 @@ from ctrl_pi.api.arms import router as arms_router
 from ctrl_pi.api.camera import router as camera_router
 from ctrl_pi.api.datasets import router as datasets_router
 from ctrl_pi.api.inference import router as inference_router
-from ctrl_pi.api.recordings import router as recordings_router
+from ctrl_pi.api.recordings import (
+    reconcile_recordings_startup,
+    router as recordings_router,
+)
 from ctrl_pi.api.settings import router as settings_router
 from ctrl_pi.api.trainer import router as trainer_router
 from ctrl_pi.camera import MockCamera
-from ctrl_pi.compute import ComputeTarget
+from ctrl_pi.compute import ComputeTarget, TargetKind
 from ctrl_pi.compute_stub import StubComputeTarget
 from ctrl_pi.config import get_config
 from ctrl_pi.db import configured_engine
@@ -103,6 +106,26 @@ def create_app(
         )
     orchestration_session_factory = deployment_service.session_factory
 
+    def cleanup_service_factory(
+        target_kind: TargetKind,
+    ) -> DeploymentService | None:
+        """Lazily bind persisted rows to their original provider adapter."""
+
+        if target_kind == deployment_service.target.kind:
+            return deployment_service
+        if target_kind == "stub":
+            cleanup_target: ComputeTarget = StubComputeTarget()
+        elif target_kind == "modal":
+            from ctrl_pi.compute_modal import ModalComputeTarget
+
+            cleanup_target = ModalComputeTarget.from_config(config)
+        else:
+            return None
+        return DeploymentService(
+            cleanup_target,
+            session_factory=orchestration_session_factory,
+        )
+
     if inference_transport_factory is None:
 
         def inference_transport_factory(record):
@@ -137,6 +160,7 @@ def create_app(
         recording_manager=manager,
         transport_factory=inference_transport_factory,
         session_factory=orchestration_session_factory,
+        cleanup_service_factory=cleanup_service_factory,
         recording_fps=config.recording_fps,
     )
 
@@ -149,7 +173,17 @@ def create_app(
             await asyncio.to_thread(application.state.yam_driver.startup)
             await application.state.recording_manager.startup()
             recording_started = True
-            await application.state.deployment_service.reconcile_startup()
+            if callable(
+                getattr(
+                    application.state.recording_manager,
+                    "reconcile_recording_artifacts",
+                    None,
+                )
+            ):
+                await reconcile_recordings_startup(
+                    application.state.recording_session_factory,
+                    application.state.recording_manager,
+                )
             await application.state.inference_session_manager.startup()
             yield
         finally:
@@ -188,6 +222,9 @@ def create_app(
     application.state.rig_lease = rig_lease
     application.state.mock_camera = manager.camera
     application.state.recording_manager = manager
+    application.state.recording_session_factory = (
+        application_session_factory or orchestration_session_factory
+    )
     application.state.hf_uploader = uploader
     application.state.hf_dataset_browser = dataset_browser
     application.state.hf_episode_browser = episode_browser

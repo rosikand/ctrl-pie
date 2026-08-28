@@ -498,6 +498,9 @@ def test_api_stub_success_persists_atomic_state_and_idempotent_stop(
     with TestClient(app) as client:
         created = _deploy(client)
         deployment_id = created.json()["id"]
+        with Session(engine) as db:
+            db.get(AppSetting, "modal_timeout_minutes").value = 1
+            db.commit()
         detail = client.get(f"/api/inference/deployments/{deployment_id}")
         stopped = client.post(f"/api/inference/deployments/{deployment_id}/stop")
         stopped_again = client.post(
@@ -510,6 +513,7 @@ def test_api_stub_success_persists_atomic_state_and_idempotent_stop(
     assert payload["target_kind"] == "stub"
     assert payload["name"] == "M9 CPU probe"
     assert payload["runtime"] == "stub" and payload["compute_size"] == "CPU"
+    assert payload["timeout_seconds"] == 7 * 60
     assert payload["provider_app_id"].startswith("fake-")
     assert payload["endpoint_url"].startswith("https://compute.invalid/")
     assert payload["started_at"] is not None and payload["stopped_at"] is None
@@ -529,6 +533,7 @@ def test_api_stub_success_persists_atomic_state_and_idempotent_stop(
         deployment = db.get(Deployment, uuid.UUID(deployment_id))
         endpoint = db.get(InferenceEndpoint, deployment.endpoint_id)
         assert deployment.status == endpoint.status == "stopped"
+        assert deployment.timeout_seconds == 7 * 60
 
 
 @pytest.mark.parametrize(
@@ -570,10 +575,19 @@ def test_unknown_and_invalid_transition_statuses(deployment_app) -> None:
     assert conflict.status_code == 409
 
 
-def test_stop_rejects_persisted_target_kind_mismatch_before_mutation(
+def test_api_stop_dispatches_through_the_persisted_target_kind(
     deployment_app,
 ) -> None:
-    app, engine, _, target, _ = deployment_app
+    app, engine, factory, target, _ = deployment_app
+    modal_target = FakeTarget()
+    modal_target.kind = "modal"
+    modal_service = DeploymentService(
+        modal_target,
+        session_factory=factory,
+        nonce_factory=lambda: "modal-cleanup-test",
+        stop_verify_timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
     with TestClient(app) as client:
         created = _deploy(client)
         deployment_id = uuid.UUID(created.json()["id"])
@@ -581,20 +595,27 @@ def test_stop_rejects_persisted_target_kind_mismatch_before_mutation(
             deployment = db.get(Deployment, deployment_id)
             deployment.target_kind = "modal"
             db.commit()
+        modal_target.states[deployment_id] = target.states.pop(deployment_id)
+        manager = app.state.inference_session_manager
+        manager._cleanup_service_factory = (
+            lambda kind: modal_service if kind == "modal" else None
+        )
         detail = client.get(f"/api/inference/deployments/{deployment_id}")
         stop_calls = target.stop_calls
-        rejected = client.post(
+        stopped = client.post(
             f"/api/inference/deployments/{deployment_id}/stop"
         )
 
     assert detail.status_code == 200
     assert detail.json()["target_kind"] == "modal"
-    assert rejected.status_code == 503
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "stopped"
     assert target.stop_calls == stop_calls
+    assert modal_target.stop_calls == 1
     with Session(engine) as db:
         deployment = db.get(Deployment, deployment_id)
         endpoint = db.get(InferenceEndpoint, deployment.endpoint_id)
-        assert deployment.status == endpoint.status == "running"
+        assert deployment.status == endpoint.status == "stopped"
 
 
 @pytest.mark.parametrize("failure", ["before", "after"])
@@ -737,6 +758,53 @@ def test_stop_failure_is_retryable_and_verification_timeout_never_lies(
         endpoint = db.get(InferenceEndpoint, timed_out.endpoint_id)
         assert timed_out.status == endpoint.status == "failed"
         assert timed_out.stopped_at is None
+
+
+def test_lifespan_restart_tears_down_running_provider_without_runtime_health(
+    deployment_app,
+) -> None:
+    app, engine, _, target, _ = deployment_app
+    deployment_id = uuid.uuid4()
+    handle = target._handle(deployment_id)
+    target.states[deployment_id] = target._state(handle, "running", 1)
+    with Session(engine) as db:
+        endpoint = InferenceEndpoint(
+            name="restart teardown",
+            runtime="stub",
+            status="running",
+            endpoint_url=handle.endpoint_url,
+            provider_app_id=handle.provider_app_id,
+        )
+        db.add(endpoint)
+        db.flush()
+        db.add(
+            Deployment(
+                id=deployment_id,
+                endpoint_id=endpoint.id,
+                model_repo="acme/model",
+                checkpoint_revision="a" * 40,
+                runtime="stub",
+                compute_size="CPU",
+                target_kind="stub",
+                timeout_seconds=60,
+                status="running",
+                started_at=datetime.now(UTC),
+            )
+        )
+        db.commit()
+
+    with TestClient(app) as client:
+        detail = client.get(f"/api/inference/deployments/{deployment_id}")
+
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "stopped"
+    assert target.stop_calls == 1
+    assert target.inspect_calls >= 1
+    assert target.health_calls == 0
+    with Session(engine) as db:
+        deployment = db.get(Deployment, deployment_id)
+        endpoint = db.get(InferenceEndpoint, deployment.endpoint_id)
+        assert deployment.status == endpoint.status == "stopped"
 
 
 def test_stop_retries_from_stopping_after_terminal_db_failure(
@@ -1186,10 +1254,17 @@ def test_runtime_health_identity_must_match_the_persisted_model() -> None:
 
 def test_deployment_target_kind_has_database_default_and_constraint() -> None:
     column = Deployment.__table__.c.target_kind
+    timeout_column = Deployment.__table__.c.timeout_seconds
 
     assert column.default is not None
     assert column.server_default is not None
+    assert timeout_column.default is not None
+    assert timeout_column.server_default is not None
     assert any(
         constraint.name == "ck_deployments_target_kind"
+        for constraint in Deployment.__table__.constraints
+    )
+    assert any(
+        constraint.name == "ck_deployments_timeout_seconds"
         for constraint in Deployment.__table__.constraints
     )

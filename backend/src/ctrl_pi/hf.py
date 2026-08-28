@@ -188,7 +188,6 @@ class HFDatasetUploader:
             card = self._card_factory()(
                 tags=["ctrl-pi", "yam"],
                 dataset_info=converted.dataset.meta.info,
-                license="apache-2.0",
                 repo_id=repo_id,
                 dataset_description=source.task,
             )

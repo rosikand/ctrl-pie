@@ -40,6 +40,7 @@ export type DeploymentRead = {
   checkpoint_revision: string | null;
   runtime: InferenceRuntime;
   compute_size: InferenceComputeSize;
+  timeout_seconds: number;
   endpoint_url: string | null;
   provider_app_id: string | null;
   arm_id: string | null;

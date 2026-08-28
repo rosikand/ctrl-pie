@@ -31,6 +31,8 @@ variable with a backend secret.
 | `HF_NAMESPACE` | Hub browsing/upload and real model deployment | Exact user or organization that ctrl-π is allowed to enumerate and mutate. |
 | `MODAL_TOKEN_ID` | Real Modal lifecycle, unless a local Modal profile is mounted | Modal API credential ID. Must be paired with `MODAL_TOKEN_SECRET`. |
 | `MODAL_TOKEN_SECRET` | Real Modal lifecycle, unless a local Modal profile is mounted | Modal API credential secret. |
+| `MODAL_CONFIG_PATH` | No | Optional Modal profile file path; defaults to `~/.modal.toml`. |
+| `MODAL_PROFILE` | No | Explicit Modal profile name. Otherwise the pinned SDK selects the sole active profile or the literal `default` profile. |
 | `MODAL_PROXY_TOKEN_ID` | Real LeRobot endpoint traffic | Distinct Modal Proxy Token ID beginning `wk-`. |
 | `MODAL_PROXY_TOKEN_SECRET` | Real LeRobot endpoint traffic | Distinct Modal Proxy Token secret beginning `ws-`. |
 | `CTRL_PI_MOCK_MODE` | No; defaults to `true` | Selects mock arms plus Stub compute when true, and the real YAM driver plus Modal compute when false. Hardware mode never falls back to the mock driver. |
@@ -50,6 +52,14 @@ Non-secret UI settings live in PostgreSQL: recording FPS, default runtime,
 default Modal GPU label, and a deployment timeout from 1 to 30 minutes.
 `HF_NAMESPACE` is shown read-only from the environment. The Settings API never
 accepts or returns a database URL or Hub/Modal token.
+
+The readiness checklist is mode-aware. Mock mode requires a healthy database
+and mock arms; Hugging Face and Modal may remain absent until their workflows
+are used. Hardware mode requires the database, connected real arms, verified
+Hub access, Modal API credentials, and Modal proxy credentials. Hub readiness
+uses a bounded `whoami` request with the explicit `HF_TOKEN` and succeeds only
+when `HF_NAMESPACE` exactly matches the authenticated user or one of its
+organizations. The response exposes booleans and sanitized status text only.
 
 ## PostgreSQL and Supabase
 
@@ -129,9 +139,14 @@ account plus two distinct credential pairs.
 
 `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` authorize App creation, inspection,
 and teardown. Set both variables or neither. When neither is present, the
-pinned Modal SDK may use the active profile created by `modal setup`. A Docker
-container can use that profile only when the host's `.modal.toml` is mounted
-read-only as described in [Docker deployment](docker-deployment.md).
+pinned Modal SDK may use the profile created by `modal setup`. `MODAL_PROFILE`
+selects a named profile explicitly; otherwise exactly one `active = true`
+profile is selected, falling back to the literal `default` profile. A single
+unmarked, non-`default` profile is not implicitly selected. Profile readiness
+checks a bounded, readable TOML file and a complete, correctly prefixed
+`ak-`/`as-` pair; it does not claim that a Modal API call has succeeded. A
+Docker container can use a profile only when the host's `.modal.toml` is
+mounted read-only as described in [Docker deployment](docker-deployment.md).
 
 ### Proxy credentials
 
@@ -236,6 +251,11 @@ curl --fail http://127.0.0.1:8000/api/settings/status
 ```
 
 The health endpoint proves that FastAPI is reachable. The Settings response
-reports sanitized connection/readiness state; it never echoes credentials.
+reports sanitized connection/readiness state; it never echoes credentials,
+provider exception text, or local profile paths. A configured Modal status
+means the local credential pair passed validation, not that the provider was
+contacted. In hardware mode, `setup_complete` becomes true only when all four
+service cards are ready; in mock mode only PostgreSQL and mock arms are
+required.
 For a complete deterministic integration check, use the
 [full mock smoke gate](smoke-test.md).

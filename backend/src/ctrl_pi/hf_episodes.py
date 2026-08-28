@@ -8,6 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+MAX_TIMELINE_SAMPLES = 2_000
+MAX_TIMELINE_SCALARS = 1_000_000
+PARQUET_BATCH_ROWS = 1_024
+MAX_PARQUET_ROW_GROUPS = 100_000
+MAX_PARQUET_SCAN_ROWS = 1_000_000
+MAX_PARQUET_SCAN_SCALARS = 16_000_000
+
 
 class EpisodeAuthenticationError(RuntimeError):
     pass
@@ -75,6 +82,8 @@ class EpisodeDetail:
     video_key: str | None
     episode: EpisodeSummary
     frames: list[TimelineFrame]
+    sampled_frame_count: int
+    frames_truncated: bool
     video_url: str | None
 
 
@@ -202,6 +211,8 @@ class HFEpisodeBrowser:
             video_key=dataset.layout.video_key,
             episode=episode.summary,
             frames=frames,
+            sampled_frame_count=len(frames),
+            frames_truncated=len(frames) < episode.summary.frame_count,
             video_url=video_url,
         )
 
@@ -305,6 +316,7 @@ class HFEpisodeBrowser:
         if layout.total_episodes > 0 and not episode_paths:
             raise EpisodeFormatError("The LeRobot episode index is missing or too large.")
         episodes: list[_EpisodeRecord] = []
+        episode_row_groups = 0
         for episode_path in episode_paths:
             local_path = self._download_required(
                 api,
@@ -313,7 +325,14 @@ class HFEpisodeBrowser:
                 revision=resolved_revision,
                 token=token,
             )
-            episodes.extend(self._read_episode_records(local_path, layout))
+            records, row_groups = self._read_episode_records(
+                local_path,
+                layout,
+                consumed_rows=len(episodes),
+                consumed_row_groups=episode_row_groups,
+            )
+            episodes.extend(records)
+            episode_row_groups += row_groups
         episodes.sort(key=lambda record: record.summary.episode_index)
         self._validate_episode_index(episodes, layout)
         return _LoadedDataset(
@@ -459,8 +478,13 @@ class HFEpisodeBrowser:
 
     @classmethod
     def _read_episode_records(
-        cls, path: Path, layout: _Layout
-    ) -> list[_EpisodeRecord]:
+        cls,
+        path: Path,
+        layout: _Layout,
+        *,
+        consumed_rows: int,
+        consumed_row_groups: int,
+    ) -> tuple[list[_EpisodeRecord], int]:
         import pyarrow.parquet as pq
 
         columns = [
@@ -482,66 +506,155 @@ class HFEpisodeBrowser:
                     f"{prefix}/to_timestamp",
                 ]
             )
-        try:
-            rows = pq.read_table(path, columns=columns).to_pylist()
-        except Exception as error:
-            raise EpisodeFormatError("The LeRobot episode index is malformed.") from error
         records: list[_EpisodeRecord] = []
-        for row in rows:
-            episode_index = cls._nonnegative_int(row.get("episode_index"), "episode index")
-            frame_count = cls._positive_int(row.get("length"), "episode length")
-            data_chunk = cls._bounded_index(row.get("data/chunk_index"), "data chunk")
-            data_file = cls._bounded_index(row.get("data/file_index"), "data file")
-            data_from = cls._nonnegative_int(row.get("dataset_from_index"), "data start")
-            data_to = cls._positive_int(row.get("dataset_to_index"), "data end")
-            if data_to - data_from != frame_count:
-                raise EpisodeFormatError("Episode row bounds do not match its frame count.")
-            tasks = cls._tasks(row.get("tasks"))
-            video_chunk: int | None = None
-            video_file: int | None = None
-            video_from: float | None = None
-            video_to: float | None = None
-            if layout.video_key is not None:
-                prefix = f"videos/{layout.video_key}"
-                video_values = [
-                    row.get(f"{prefix}/chunk_index"),
-                    row.get(f"{prefix}/file_index"),
-                    row.get(f"{prefix}/from_timestamp"),
-                    row.get(f"{prefix}/to_timestamp"),
-                ]
-                if any(value is not None for value in video_values):
-                    if any(value is None for value in video_values):
-                        raise EpisodeFormatError("Episode video bounds are incomplete.")
-                    video_chunk = cls._bounded_index(video_values[0], "video chunk")
-                    video_file = cls._bounded_index(video_values[1], "video file")
-                    video_from = cls._nonnegative_float(video_values[2], "video start")
-                    video_to = cls._positive_float(video_values[3], "video end")
-                    if video_to <= video_from:
-                        raise EpisodeFormatError("Episode video timestamps are invalid.")
-            duration = (
-                video_to - video_from
-                if video_from is not None and video_to is not None
-                else frame_count / layout.fps
-            )
-            records.append(
-                _EpisodeRecord(
-                    summary=EpisodeSummary(
-                        episode_index=episode_index,
-                        tasks=tasks,
-                        frame_count=frame_count,
-                        duration_seconds=duration,
-                        dataset_from_index=data_from,
-                        dataset_to_index=data_to,
-                        video_from_timestamp=video_from,
-                        video_to_timestamp=video_to,
-                    ),
-                    data_chunk_index=data_chunk,
-                    data_file_index=data_file,
-                    video_chunk_index=video_chunk,
-                    video_file_index=video_file,
+        try:
+            parquet = pq.ParquetFile(path)
+            metadata = parquet.metadata
+            remaining_rows = layout.total_episodes - consumed_rows
+            remaining_row_groups = layout.total_episodes - consumed_row_groups
+            if (
+                metadata is None
+                or isinstance(metadata.num_rows, bool)
+                or not isinstance(metadata.num_rows, int)
+                or metadata.num_rows < 1
+                or metadata.num_rows > remaining_rows
+                or isinstance(metadata.num_row_groups, bool)
+                or not isinstance(metadata.num_row_groups, int)
+                or metadata.num_row_groups < 1
+                or metadata.num_row_groups > metadata.num_rows
+                or metadata.num_row_groups > remaining_row_groups
+            ):
+                raise EpisodeFormatError(
+                    "The LeRobot episode index exceeds dataset metadata bounds."
                 )
-            )
-        return records
+
+            group_rows = 0
+            for group_index in range(metadata.num_row_groups):
+                row_count = metadata.row_group(group_index).num_rows
+                if (
+                    isinstance(row_count, bool)
+                    or not isinstance(row_count, int)
+                    or row_count < 1
+                ):
+                    raise EpisodeFormatError(
+                        "The LeRobot episode index row groups are invalid."
+                    )
+                group_rows += row_count
+                if group_rows > metadata.num_rows:
+                    raise EpisodeFormatError(
+                        "The LeRobot episode index row groups are invalid."
+                    )
+            if group_rows != metadata.num_rows:
+                raise EpisodeFormatError(
+                    "The LeRobot episode index row groups are invalid."
+                )
+
+            decoded_rows = 0
+            for batch in parquet.iter_batches(
+                batch_size=PARQUET_BATCH_ROWS,
+                columns=columns,
+            ):
+                batch_rows = batch.num_rows
+                if (
+                    isinstance(batch_rows, bool)
+                    or not isinstance(batch_rows, int)
+                    or batch_rows < 1
+                    or batch_rows > PARQUET_BATCH_ROWS
+                    or decoded_rows + batch_rows > metadata.num_rows
+                ):
+                    raise EpisodeFormatError(
+                        "The LeRobot episode index batches are invalid."
+                    )
+                decoded_rows += batch_rows
+                for row in batch.to_pylist():
+                    episode_index = cls._nonnegative_int(
+                        row.get("episode_index"), "episode index"
+                    )
+                    frame_count = cls._positive_int(
+                        row.get("length"), "episode length"
+                    )
+                    data_chunk = cls._bounded_index(
+                        row.get("data/chunk_index"), "data chunk"
+                    )
+                    data_file = cls._bounded_index(
+                        row.get("data/file_index"), "data file"
+                    )
+                    data_from = cls._nonnegative_int(
+                        row.get("dataset_from_index"), "data start"
+                    )
+                    data_to = cls._positive_int(
+                        row.get("dataset_to_index"), "data end"
+                    )
+                    if data_to - data_from != frame_count:
+                        raise EpisodeFormatError(
+                            "Episode row bounds do not match its frame count."
+                        )
+                    tasks = cls._tasks(row.get("tasks"))
+                    video_chunk: int | None = None
+                    video_file: int | None = None
+                    video_from: float | None = None
+                    video_to: float | None = None
+                    if layout.video_key is not None:
+                        prefix = f"videos/{layout.video_key}"
+                        video_values = [
+                            row.get(f"{prefix}/chunk_index"),
+                            row.get(f"{prefix}/file_index"),
+                            row.get(f"{prefix}/from_timestamp"),
+                            row.get(f"{prefix}/to_timestamp"),
+                        ]
+                        if any(value is not None for value in video_values):
+                            if any(value is None for value in video_values):
+                                raise EpisodeFormatError(
+                                    "Episode video bounds are incomplete."
+                                )
+                            video_chunk = cls._bounded_index(
+                                video_values[0], "video chunk"
+                            )
+                            video_file = cls._bounded_index(
+                                video_values[1], "video file"
+                            )
+                            video_from = cls._nonnegative_float(
+                                video_values[2], "video start"
+                            )
+                            video_to = cls._positive_float(
+                                video_values[3], "video end"
+                            )
+                            if video_to <= video_from:
+                                raise EpisodeFormatError(
+                                    "Episode video timestamps are invalid."
+                                )
+                    duration = (
+                        video_to - video_from
+                        if video_from is not None and video_to is not None
+                        else frame_count / layout.fps
+                    )
+                    records.append(
+                        _EpisodeRecord(
+                            summary=EpisodeSummary(
+                                episode_index=episode_index,
+                                tasks=tasks,
+                                frame_count=frame_count,
+                                duration_seconds=duration,
+                                dataset_from_index=data_from,
+                                dataset_to_index=data_to,
+                                video_from_timestamp=video_from,
+                                video_to_timestamp=video_to,
+                            ),
+                            data_chunk_index=data_chunk,
+                            data_file_index=data_file,
+                            video_chunk_index=video_chunk,
+                            video_file_index=video_file,
+                        )
+                    )
+            if decoded_rows != metadata.num_rows or len(records) != metadata.num_rows:
+                raise EpisodeFormatError(
+                    "The LeRobot episode index batches are invalid."
+                )
+        except EpisodeFormatError:
+            raise
+        except Exception:
+            raise EpisodeFormatError("The LeRobot episode index is malformed.") from None
+        return records, metadata.num_row_groups
 
     @classmethod
     def _validate_episode_index(
@@ -567,6 +680,7 @@ class HFEpisodeBrowser:
         episode: _EpisodeRecord,
         token: str,
     ) -> list[TimelineFrame]:
+        import pyarrow as pa
         import pyarrow.parquet as pq
 
         data_path = self._format_data_path(
@@ -581,13 +695,26 @@ class HFEpisodeBrowser:
             revision=dataset.revision,
             token=token,
         )
-        same_file = [
-            record
-            for record in dataset.episodes
-            if record.data_chunk_index == episode.data_chunk_index
-            and record.data_file_index == episode.data_file_index
-        ]
-        file_from = min(record.summary.dataset_from_index for record in same_file)
+        same_file = sorted(
+            [
+                record
+                for record in dataset.episodes
+                if record.data_chunk_index == episode.data_chunk_index
+                and record.data_file_index == episode.data_file_index
+            ],
+            key=lambda record: record.summary.dataset_from_index,
+        )
+        if not same_file:
+            raise EpisodeFormatError("The episode data file index is inconsistent.")
+        file_from = same_file[0].summary.dataset_from_index
+        expected_from = file_from
+        for record in same_file:
+            if record.summary.dataset_from_index != expected_from:
+                raise EpisodeFormatError(
+                    "Episode bounds within the data file are not contiguous."
+                )
+            expected_from = record.summary.dataset_to_index
+        expected_file_rows = expected_from - file_from
         local_from = episode.summary.dataset_from_index - file_from
         columns = [
             "observation.state",
@@ -598,17 +725,128 @@ class HFEpisodeBrowser:
             "index",
         ]
         try:
-            table = pq.read_table(path, columns=columns)
-            if local_from < 0 or local_from + episode.summary.frame_count > table.num_rows:
+            parquet = pq.ParquetFile(path)
+            metadata = parquet.metadata
+            if (
+                metadata is None
+                or isinstance(metadata.num_rows, bool)
+                or not isinstance(metadata.num_rows, int)
+                or metadata.num_rows != expected_file_rows
+                or metadata.num_rows < 1
+                or metadata.num_rows > dataset.layout.total_frames
+                or metadata.num_row_groups < 1
+                or metadata.num_row_groups > MAX_PARQUET_ROW_GROUPS
+            ):
+                raise EpisodeFormatError(
+                    "The data parquet bounds do not match the episode index."
+                )
+            if (
+                local_from < 0
+                or local_from + episode.summary.frame_count > metadata.num_rows
+            ):
                 raise EpisodeFormatError("Episode bounds exceed its data parquet file.")
-            rows = table.slice(local_from, episode.summary.frame_count).to_pylist()
+
+            vector_width = dataset.layout.state_size + dataset.layout.action_size
+            if vector_width <= 0:
+                raise EpisodeFormatError(
+                    "The episode vector dimensions are invalid."
+                )
+            scan_row_limit = min(
+                MAX_PARQUET_SCAN_ROWS,
+                MAX_PARQUET_SCAN_SCALARS // vector_width,
+            )
+            if scan_row_limit < 1:
+                raise EpisodeFormatError(
+                    "The episode vector dimensions exceed the scan budget."
+                )
+            scalar_limit = max(2, MAX_TIMELINE_SCALARS // vector_width)
+            sample_limit = min(MAX_TIMELINE_SAMPLES, scalar_limit)
+            sample_offsets = self._sample_offsets(
+                episode.summary.frame_count,
+                sample_limit,
+            )
+            requested = [
+                (local_from + offset, offset) for offset in sample_offsets
+            ]
+            requests_by_group: dict[int, tuple[int, list[tuple[int, int]]]] = {}
+            request_index = 0
+            group_from = 0
+            selected_scan_rows = 0
+            for group_index in range(metadata.num_row_groups):
+                group_rows = metadata.row_group(group_index).num_rows
+                if (
+                    isinstance(group_rows, bool)
+                    or not isinstance(group_rows, int)
+                    or group_rows < 0
+                ):
+                    raise EpisodeFormatError("The data parquet row groups are invalid.")
+                group_to = group_from + group_rows
+                group_requests: list[tuple[int, int]] = []
+                while (
+                    request_index < len(requested)
+                    and requested[request_index][0] < group_to
+                ):
+                    file_index, episode_offset = requested[request_index]
+                    if file_index < group_from:
+                        raise EpisodeFormatError(
+                            "The sampled frame bounds are inconsistent."
+                        )
+                    group_requests.append((file_index, episode_offset))
+                    request_index += 1
+                if group_requests:
+                    selected_scan_rows += group_rows
+                    if selected_scan_rows > scan_row_limit:
+                        raise EpisodeFormatError(
+                            "The selected data parquet row groups exceed the scan budget."
+                        )
+                    requests_by_group[group_index] = (group_from, group_requests)
+                group_from = group_to
+            if group_from != metadata.num_rows or request_index != len(requested):
+                raise EpisodeFormatError("The data parquet row groups are inconsistent.")
+
+            sampled_rows: list[tuple[int, dict[str, Any]]] = []
+            for group_index, (group_start, group_requests) in requests_by_group.items():
+                next_request = 0
+                batch_start = group_start
+                for batch in parquet.iter_batches(
+                    batch_size=PARQUET_BATCH_ROWS,
+                    row_groups=[group_index],
+                    columns=columns,
+                    use_threads=False,
+                ):
+                    batch_end = batch_start + batch.num_rows
+                    positions: list[int] = []
+                    offsets: list[int] = []
+                    while (
+                        next_request < len(group_requests)
+                        and group_requests[next_request][0] < batch_end
+                    ):
+                        file_index, episode_offset = group_requests[next_request]
+                        if file_index < batch_start:
+                            raise EpisodeFormatError(
+                                "The sampled frame batch bounds are inconsistent."
+                            )
+                        positions.append(file_index - batch_start)
+                        offsets.append(episode_offset)
+                        next_request += 1
+                    if positions:
+                        selected = batch.take(pa.array(positions, type=pa.int64()))
+                        sampled_rows.extend(zip(offsets, selected.to_pylist()))
+                    batch_start = batch_end
+                    if next_request == len(group_requests):
+                        break
+                if next_request != len(group_requests):
+                    raise EpisodeFormatError(
+                        "The sampled frame rows are unavailable."
+                    )
+            sampled_rows.sort(key=lambda item: item[0])
         except EpisodeFormatError:
             raise
-        except Exception as error:
-            raise EpisodeFormatError("The episode data parquet is malformed.") from error
+        except Exception:
+            raise EpisodeFormatError("The episode data parquet is malformed.") from None
         frames: list[TimelineFrame] = []
         previous_timestamp = -math.inf
-        for offset, row in enumerate(rows):
+        for offset, row in sampled_rows:
             expected_index = episode.summary.dataset_from_index + offset
             if (
                 self._exact_int(row.get("episode_index"))
@@ -639,9 +877,20 @@ class HFEpisodeBrowser:
                     ),
                 )
             )
-        if len(frames) != episode.summary.frame_count:
-            raise EpisodeFormatError("Episode data row count does not match metadata.")
+        if len(frames) != len(sample_offsets):
+            raise EpisodeFormatError("Episode sampled row count does not match metadata.")
         return frames
+
+    @staticmethod
+    def _sample_offsets(frame_count: int, limit: int) -> list[int]:
+        if frame_count <= 0 or limit < 2:
+            raise EpisodeFormatError("Episode sample bounds are invalid.")
+        if frame_count <= limit:
+            return list(range(frame_count))
+        return [
+            sample_index * (frame_count - 1) // (limit - 1)
+            for sample_index in range(limit)
+        ]
 
     @staticmethod
     def parse_range(value: str | None, size: int) -> tuple[int, int] | None:

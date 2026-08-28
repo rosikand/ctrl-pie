@@ -143,6 +143,7 @@ contract, cost guardrails, model packaging, robot loop, and teardown model.
 | [YAM driver interface](docs/yam-driver.md) | Driver contract, telemetry, command bounds, leases, and the real-hardware boundary |
 | [Modal operations](docs/modal-operations.md) | Owned-App naming and verified emergency cleanup with `make modal-panic` |
 | [Mock smoke gate](docs/smoke-test.md) | The complete record → upload → discover → infer → teardown acceptance flow |
+| [V1 final review](FINAL_REVIEW.md) | Exact release-gate evidence, launch commands, known limitations, and the remaining physical Ubuntu/YAM checklist |
 
 Start with [setup](docs/setup.md), keep credentials in the backend-only
 gitignored `.env`, and use the Settings checklist to confirm readiness without

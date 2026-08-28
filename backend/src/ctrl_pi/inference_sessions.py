@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import math
 import re
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ctrl_pi.camera import MockCamera
+from ctrl_pi.compute import TargetKind
 from ctrl_pi.deployments import (
     DeploymentNotFoundError,
     DeploymentRecord,
@@ -29,12 +31,13 @@ from ctrl_pi.drivers.yam import (
     YAMDriver,
 )
 from ctrl_pi.inference_transport import InferenceTransport
-from ctrl_pi.models import Deployment, Recording, Robot
+from ctrl_pi.models import Deployment, InferenceEndpoint, Recording, Robot
 from ctrl_pi.recording import (
     EpisodeResult,
     RecordingConflictError,
     RecordingManager,
     RecordingRuntimeError,
+    merge_episode_results,
 )
 from ctrl_pi.rig import RigLease
 from ctrl_pi.robot_inference import (
@@ -200,11 +203,13 @@ class _LiveSession:
     recording_id: uuid.UUID | None = None
     recording_status: RecordingSessionStatus = "disabled"
     deployment: DeploymentRecord | None = None
+    start_task: asyncio.Task[Any] | None = None
     supervisor_task: asyncio.Task[None] | None = None
     stop_task: asyncio.Task[None] | None = None
 
 
 TransportFactory = Callable[[DeploymentRecord], InferenceTransport]
+CleanupServiceFactory = Callable[[TargetKind], DeploymentService | None]
 
 
 class InferenceSessionManager:
@@ -220,10 +225,39 @@ class InferenceSessionManager:
         recording_manager: RecordingManager,
         transport_factory: TransportFactory,
         session_factory: Callable[[], Session] | None,
+        cleanup_service_factory: CleanupServiceFactory | None = None,
         recording_fps: int = 20,
+        watchdog_interval_seconds: float | None = 1.0,
+        endpoint_health_timeout_seconds: float = 2.0,
+        idle_health_cache_seconds: float = 2.0,
+        now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not 1 <= recording_fps <= 60:
             raise ValueError("recording_fps must be between 1 and 60")
+        if watchdog_interval_seconds is not None and (
+            isinstance(watchdog_interval_seconds, bool)
+            or not isinstance(watchdog_interval_seconds, (int, float))
+            or not math.isfinite(float(watchdog_interval_seconds))
+            or float(watchdog_interval_seconds) <= 0
+        ):
+            raise ValueError("watchdog_interval_seconds must be positive or None")
+        if (
+            isinstance(endpoint_health_timeout_seconds, bool)
+            or not isinstance(endpoint_health_timeout_seconds, (int, float))
+            or not math.isfinite(float(endpoint_health_timeout_seconds))
+            or not 0 < float(endpoint_health_timeout_seconds) <= 30
+        ):
+            raise ValueError(
+                "endpoint_health_timeout_seconds must be between 0 and 30"
+            )
+        if (
+            isinstance(idle_health_cache_seconds, bool)
+            or not isinstance(idle_health_cache_seconds, (int, float))
+            or not math.isfinite(float(idle_health_cache_seconds))
+            or float(idle_health_cache_seconds) < 0
+        ):
+            raise ValueError("idle_health_cache_seconds must be non-negative")
         self.deployment_service = deployment_service
         self.driver = driver
         self.camera = camera
@@ -231,6 +265,10 @@ class InferenceSessionManager:
         self.recording_manager = recording_manager
         self.transport_factory = transport_factory
         self._session_factory = session_factory
+        self._cleanup_service_factory = cleanup_service_factory
+        self._cleanup_services: dict[TargetKind, DeploymentService] = {
+            deployment_service.target.kind: deployment_service
+        }
         self.recording_fps = recording_fps
         self._sessions: dict[uuid.UUID, _LiveSession] = {}
         self._idle_state_cache: dict[
@@ -238,75 +276,82 @@ class InferenceSessionManager:
         ] = {}
         self._lock = asyncio.Lock()
         self._shutting_down = False
+        self._watchdog_interval_seconds = (
+            None
+            if watchdog_interval_seconds is None
+            else float(watchdog_interval_seconds)
+        )
+        self._endpoint_health_timeout_seconds = float(
+            endpoint_health_timeout_seconds
+        )
+        self._idle_health_cache_seconds = float(idle_health_cache_seconds)
+        self._now = now or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic
+        self._watchdog_task: asyncio.Task[None] | None = None
 
     async def startup(self) -> None:
         """Never auto-resume motion; tear down unattended running providers."""
 
         async with self._lock:
+            previous_watchdog = self._watchdog_task
+            self._watchdog_task = None
             self._shutting_down = False
             self._idle_state_cache.clear()
+        if previous_watchdog is not None and not previous_watchdog.done():
+            previous_watchdog.cancel()
+            await asyncio.gather(previous_watchdog, return_exceptions=True)
         if self._session_factory is None:
             return
-        try:
-            with self._session_factory() as db:
-                running_ids = [
-                    record.id
-                    for record in self.deployment_service.list(db)
-                    if record.status == "running"
-                ]
-        except Exception:
-            return
-        for deployment_id in running_ids:
+        cleanup_rows = self._persisted_cleanup_rows(
+            {"deploying", "running", "stopping", "failed"}
+        )
+        for deployment_id, target_kind in cleanup_rows:
             try:
-                with self._session_factory() as db:
-                    await self.deployment_service.stop(db, deployment_id)
+                await self._cleanup_persisted_deployment(
+                    deployment_id,
+                    target_kind,
+                )
             except Exception:
-                # The deployment service leaves an explicit retryable failure;
-                # startup remains available and never starts an arm.
+                # A provider/configuration failure stays explicit and
+                # retryable; startup remains available and never starts an arm.
                 continue
+        if self._watchdog_interval_seconds is not None:
+            async with self._lock:
+                if not self._shutting_down:
+                    self._watchdog_task = asyncio.create_task(
+                        self._watchdog_loop(),
+                        name="ctrl-pi-deployment-lifetime-watchdog",
+                    )
 
     async def shutdown(self) -> None:
         async with self._lock:
             self._shutting_down = True
+            watchdog_task = self._watchdog_task
+            self._watchdog_task = None
             deployment_ids = [
                 deployment_id
                 for deployment_id, runtime in self._sessions.items()
                 if runtime.status in {"starting", "running", "stopping"}
             ]
+        if watchdog_task is not None and not watchdog_task.done():
+            watchdog_task.cancel()
+            await asyncio.gather(watchdog_task, return_exceptions=True)
         for deployment_id in deployment_ids:
             try:
-                await self._ensure_stopped(deployment_id, InferenceStopOptions())
+                await self._expire_deployment(deployment_id)
             except Exception:
                 continue
         if self._session_factory is None:
             return
-        try:
-            owned_active = {
-                state.deployment_id
-                for state in await asyncio.to_thread(
-                    self.deployment_service.target.list_owned
-                )
-                if not state.stopped_verified
-            }
-            with self._session_factory() as db:
-                unattended = [
-                    record.id
-                    for record in self.deployment_service.list(db)
-                    if record.target_kind == self.deployment_service.target.kind
-                    and (
-                        record.status in {"running", "stopping"}
-                        or (
-                            record.status == "failed"
-                            and record.id in owned_active
-                        )
-                    )
-                ]
-        except Exception:
-            return
-        for deployment_id in unattended:
+        for deployment_id, target_kind in self._persisted_cleanup_rows(
+            {"deploying", "running", "stopping", "failed"}
+        ):
             try:
-                with self._session_factory() as db:
-                    await self.deployment_service.stop(db, deployment_id)
+                await self._cleanup_persisted_deployment(
+                    deployment_id,
+                    target_kind,
+                    failed_only_if_active=True,
+                )
             except Exception:
                 continue
 
@@ -319,7 +364,7 @@ class InferenceSessionManager:
         queue_count = 0
         for live in sessions:
             seen: set[int] = set()
-            for task in (live.supervisor_task, live.stop_task):
+            for task in (live.start_task, live.supervisor_task, live.stop_task):
                 if task is not None and not task.done() and id(task) not in seen:
                     seen.add(id(task))
                     task_count += 1
@@ -342,9 +387,17 @@ class InferenceSessionManager:
                 "PostgreSQL session orchestration is not configured."
             )
         record = self.deployment_service.get(db, deployment_id)
+        if record.target_kind != self.deployment_service.target.kind:
+            raise InferenceSessionConflictError(
+                "The deployment belongs to an inactive compute target."
+            )
         if record.status != "running":
             raise InferenceSessionConflictError(
                 "Only a running deployment can start robot inference."
+            )
+        if self._deployment_expired(record):
+            raise InferenceSessionConflictError(
+                "The deployment lifetime has expired."
             )
         if (
             record.checkpoint_revision is None
@@ -396,6 +449,7 @@ class InferenceSessionManager:
                 arm_id=options.arm_id,
                 status="starting",
                 recording_status="starting" if options.record_session else "disabled",
+                start_task=asyncio.current_task(),
             )
             self._sessions[deployment_id] = live
             self._idle_state_cache.pop(deployment_id, None)
@@ -466,6 +520,7 @@ class InferenceSessionManager:
             await loop.start()
             live.endpoint_healthy = True
             live.status = "running"
+            live.start_task = None
             live.supervisor_task = asyncio.create_task(
                 self._supervise(deployment_id),
                 name=f"ctrl-pi-inference-supervisor-{deployment_id}",
@@ -522,7 +577,9 @@ class InferenceSessionManager:
             return InferenceSessionSnapshot(
                 deployment=deployment,
                 session_status=status,
-                endpoint_healthy=deployment.status == "running",
+                # Synchronous database state cannot prove provider health.
+                # read() replaces this with a bounded provider-backed result.
+                endpoint_healthy=False,
                 teardown_verified=deployment.status == "stopped",
                 steps_executed=0,
                 requests_completed=0,
@@ -571,7 +628,13 @@ class InferenceSessionManager:
             ):
                 terminal_supervisor = live.supervisor_task
             cached = self._idle_state_cache.get(deployment_id)
-            if live is None and cached is not None and time.monotonic() - cached[0] < 2:
+            if (
+                live is None
+                and cached is not None
+                and self._monotonic() - cached[0]
+                < self._idle_health_cache_seconds
+                and not self._deployment_expired(cached[1].deployment)
+            ):
                 return cached[1]
         if terminal_supervisor is not None:
             try:
@@ -586,10 +649,35 @@ class InferenceSessionManager:
             with self._session_factory() as db:
                 snapshot = self.state(db, deployment_id)
             if snapshot.session_status == "idle":
+                if self._deployment_expired(snapshot.deployment):
+                    try:
+                        await self._expire_deployment(
+                            deployment_id,
+                            target_kind=snapshot.deployment.target_kind,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                    with self._session_factory() as db:
+                        snapshot = self.state(db, deployment_id)
+                elif snapshot.deployment.status == "running":
+                    service = self._service_for_kind(
+                        snapshot.deployment.target_kind
+                    )
+                    healthy = (
+                        False
+                        if service is None
+                        else await service.endpoint_healthy(
+                            snapshot.deployment,
+                            timeout_seconds=self._endpoint_health_timeout_seconds,
+                        )
+                    )
+                    snapshot = replace(snapshot, endpoint_healthy=healthy)
                 async with self._lock:
                     if self._sessions.get(deployment_id) is None:
                         self._idle_state_cache[deployment_id] = (
-                            time.monotonic(),
+                            self._monotonic(),
                             snapshot,
                         )
             return snapshot
@@ -600,22 +688,281 @@ class InferenceSessionManager:
                 "PostgreSQL could not read inference session state."
             ) from None
 
+    async def _watchdog_loop(self) -> None:
+        interval = self._watchdog_interval_seconds
+        if interval is None:
+            return
+        while True:
+            try:
+                await self._watchdog_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A failed pass never disables the hard backstop. Individual
+                # deployment rows stay retryable on the next pass.
+                pass
+            await asyncio.sleep(interval)
+
+    async def _watchdog_once(self) -> None:
+        if self._session_factory is None:
+            return
+        now = self._utc_now()
+        try:
+            with self._session_factory() as db:
+                deployments = list(
+                    db.scalars(
+                        select(Deployment).where(
+                            Deployment.stopped_at.is_(None),
+                            Deployment.status.in_(("running", "stopping", "failed")),
+                        )
+                    )
+                )
+                deployment_refs = [
+                    (deployment.id, deployment.target_kind)
+                    for deployment in deployments
+                    if deployment.status in {"stopping", "failed"}
+                    or deployment.started_at is None
+                    or self._model_expired(deployment, now)
+                ]
+        except SQLAlchemyError:
+            return
+        for deployment_id, target_kind in deployment_refs:
+            try:
+                await self._expire_deployment(
+                    deployment_id,
+                    target_kind=target_kind,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # DeploymentService persists a retryable failure when provider
+                # teardown cannot yet be verified.
+                continue
+
+    def _service_for_kind(
+        self, target_kind: TargetKind
+    ) -> DeploymentService | None:
+        if target_kind not in {"stub", "modal"}:
+            return None
+        cached = self._cleanup_services.get(target_kind)
+        if cached is not None:
+            return cached
+        factory = self._cleanup_service_factory
+        if factory is None:
+            return None
+        try:
+            service = factory(target_kind)
+        except Exception:
+            return None
+        if service is None or service.target.kind != target_kind:
+            return None
+        self._cleanup_services[target_kind] = service
+        return service
+
+    def _persisted_cleanup_rows(
+        self,
+        statuses: set[str],
+    ) -> list[tuple[uuid.UUID, TargetKind]]:
+        if self._session_factory is None:
+            return []
+        try:
+            with self._session_factory() as db:
+                rows = db.execute(
+                    select(Deployment.id, Deployment.target_kind).where(
+                        Deployment.stopped_at.is_(None),
+                        Deployment.status.in_(tuple(statuses)),
+                    )
+                ).all()
+        except SQLAlchemyError:
+            return []
+        return [
+            (deployment_id, target_kind)
+            for deployment_id, target_kind in rows
+            if target_kind in {"stub", "modal"}
+        ]
+
+    async def _cleanup_persisted_deployment(
+        self,
+        deployment_id: uuid.UUID,
+        target_kind: TargetKind,
+        *,
+        failed_only_if_active: bool = False,
+    ) -> None:
+        if self._session_factory is None:
+            return
+        service = self._service_for_kind(target_kind)
+        if service is None:
+            self._mark_cleanup_target_unavailable(deployment_id)
+            raise InferenceSessionConfigurationError(
+                "The persisted deployment cleanup target is unavailable."
+            )
+        with self._session_factory() as db:
+            record = service.get(db, deployment_id)
+            if failed_only_if_active and record.status == "failed":
+                await service.stop_failed_if_active(db, deployment_id)
+                return
+            await service.stop(
+                db,
+                deployment_id,
+                allow_interrupted_deploy=True,
+            )
+
+    def _mark_cleanup_target_unavailable(
+        self,
+        deployment_id: uuid.UUID,
+    ) -> None:
+        """Make missing/wrong cleanup configuration visible without proof."""
+
+        if self._session_factory is None:
+            return
+        try:
+            with self._session_factory() as db:
+                deployment = db.get(Deployment, deployment_id)
+                if (
+                    deployment is None
+                    or deployment.status == "stopped"
+                    or deployment.endpoint_id is None
+                ):
+                    return
+                endpoint = db.get(InferenceEndpoint, deployment.endpoint_id)
+                if endpoint is None:
+                    return
+                deployment.status = "failed"
+                endpoint.status = "failed"
+                db.commit()
+        except SQLAlchemyError:
+            return
+
+    async def _expire_deployment(
+        self,
+        deployment_id: uuid.UUID,
+        *,
+        target_kind: TargetKind | None = None,
+    ) -> None:
+        if self._session_factory is None:
+            return
+        if target_kind is None:
+            try:
+                with self._session_factory() as db:
+                    target_kind = self.deployment_service.get(
+                        db, deployment_id
+                    ).target_kind
+            except Exception:
+                return
+        service = self._service_for_kind(target_kind)
+        if service is None:
+            self._mark_cleanup_target_unavailable(deployment_id)
+            raise InferenceSessionConfigurationError(
+                "The persisted deployment cleanup target is unavailable."
+            )
+        async with self._lock:
+            live = self._sessions.get(deployment_id)
+            self._idle_state_cache.pop(deployment_id, None)
+        if (
+            live is not None
+            and target_kind != self.deployment_service.target.kind
+        ):
+            raise InferenceSessionConflictError(
+                "A live inference session has a mismatched compute target."
+            )
+        if (
+            live is not None
+            and live.start_task is not None
+            and not live.start_task.done()
+        ):
+            start_task = live.start_task
+            live.status = "stopping"
+            live.endpoint_healthy = False
+            if start_task is not asyncio.current_task():
+                start_task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(start_task), timeout=0.25)
+                except TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                except Exception:
+                    pass
+            # A cancellation-resistant device/provider call may still be
+            # settling, but cancellation remains latched and prevents the
+            # start path from reaching arm writes. Provider teardown must not
+            # wait indefinitely for that local call.
+            stopped_record: DeploymentRecord
+            with self._session_factory() as db:
+                record = service.get(db, deployment_id)
+                if record.status != "stopped":
+                    stopped_record = await service.stop(
+                        db, deployment_id
+                    )
+                else:
+                    stopped_record = record
+            live.deployment = stopped_record
+            live.teardown_verified = stopped_record.status == "stopped"
+            return
+        if live is not None and live.status in {"running", "stopping", "failed"}:
+            await self._ensure_stopped(deployment_id, InferenceStopOptions())
+            return
+        with self._session_factory() as db:
+            await service.stop(db, deployment_id)
+
+    def _deployment_expired(self, deployment: DeploymentRecord) -> bool:
+        started_at = deployment.started_at
+        if started_at is None:
+            return False
+        return self._utc_now() >= started_at + timedelta(
+            seconds=deployment.timeout_seconds
+        )
+
+    @classmethod
+    def _model_expired(cls, deployment: Deployment, now: datetime) -> bool:
+        started_at = deployment.started_at
+        if started_at is None:
+            return False
+        return now >= cls._as_utc(started_at) + timedelta(
+            seconds=deployment.timeout_seconds
+        )
+
+    def _utc_now(self) -> datetime:
+        return self._as_utc(self._now())
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
     async def stop(
         self,
         db: Session,
         deployment_id: uuid.UUID,
         options: InferenceStopOptions | None = None,
     ) -> InferenceSessionSnapshot:
-        self.deployment_service.get(db, deployment_id)
+        record = self.deployment_service.get(db, deployment_id)
+        service = self._service_for_kind(record.target_kind)
+        if service is None:
+            self._mark_cleanup_target_unavailable(deployment_id)
+            raise InferenceSessionConfigurationError(
+                "The persisted deployment cleanup target is unavailable."
+            )
         live = self._sessions.get(deployment_id)
+        if (
+            live is not None
+            and record.target_kind != self.deployment_service.target.kind
+        ):
+            raise InferenceSessionConflictError(
+                "A live inference session has a mismatched compute target."
+            )
         if live is not None and live.status == "starting":
             raise InferenceSessionConflictError(
                 "The inference session is still starting; retry stop shortly."
             )
         if live is None:
-            await self.deployment_service.stop(db, deployment_id)
+            await service.stop(db, deployment_id)
             async with self._lock:
                 self._idle_state_cache.pop(deployment_id, None)
+            db.expire_all()
             return self.state(db, deployment_id)
         if self._session_factory is None:
             live = self._sessions.get(deployment_id)
@@ -623,7 +970,7 @@ class InferenceSessionManager:
                 raise InferenceSessionStorageError(
                     "PostgreSQL session orchestration is not configured."
                 )
-            await self.deployment_service.stop(db, deployment_id)
+            await service.stop(db, deployment_id)
             return self.state(db, deployment_id)
         await self._ensure_stopped(deployment_id, options or InferenceStopOptions())
         db.expire_all()
@@ -775,6 +1122,7 @@ class InferenceSessionManager:
             live.teardown_verified = self._deployment_stopped(deployment_id)
             live.recording_status = "failed" if recording_id else "disabled"
             live.last_error = "The robot inference session could not start safely."
+            live.start_task = None
 
     def _persist_session_start(
         self,
@@ -869,15 +1217,12 @@ class InferenceSessionManager:
                     raise InferenceSessionStorageError(
                         "Inference recording metadata is unavailable."
                     )
-                stored = recording.recording_metadata.get("episodes", [])
-                episodes = list(stored) if isinstance(stored, list) else []
-                episodes.append(self._episode_metadata(result))
-                recording.recording_metadata = {
-                    **recording.recording_metadata,
-                    "episodes": episodes,
-                }
-                recording.episode_count += 1
-                recording.duration_seconds += result.duration_seconds
+                metadata, count, duration, _ = merge_episode_results(
+                    recording.recording_metadata, [result]
+                )
+                recording.recording_metadata = metadata
+                recording.episode_count = count
+                recording.duration_seconds = duration
                 recording.status = "ready"
                 db.commit()
                 episode_count = recording.episode_count
@@ -891,9 +1236,13 @@ class InferenceSessionManager:
                 ) from None
         # Release the manager's completed-episode sentinel only after the DB
         # aggregate is durable.
-        await self.recording_manager.confirm_episode_persisted(
-            str(recording_id), episode_count, "ready"
+        confirmation_task = asyncio.create_task(
+            self.recording_manager.confirm_episode_persisted(
+                str(recording_id), episode_count, "ready"
+            ),
+            name=f"ctrl-pi-inference-episode-confirm-{recording_id}",
         )
+        await self._settle_task(confirmation_task)
 
     def _mark_recording_failed(self, recording_id: uuid.UUID) -> None:
         if self._session_factory is None:
@@ -993,27 +1342,13 @@ class InferenceSessionManager:
         )
 
     @staticmethod
-    def _episode_metadata(result: EpisodeResult) -> dict[str, Any]:
-        return {
-            "index": result.index,
-            "duration_seconds": result.duration_seconds,
-            "sample_count": result.sample_count,
-            "success": result.success,
-            "notes": result.notes,
-            "metadata": result.metadata,
-            "artifact_key": result.artifact_key,
-            "started_at": result.started_at.isoformat(),
-            "ended_at": result.ended_at.isoformat(),
-            "fps": result.fps,
-        }
-
-    @staticmethod
-    async def _settle_task(task: asyncio.Task[None]) -> None:
+    async def _settle_task(task: asyncio.Task[Any]) -> Any:
         while True:
             try:
-                await asyncio.shield(task)
-                return
+                return await asyncio.shield(task)
             except asyncio.CancelledError:
-                if task.done():
+                if task.cancelled():
                     raise
+                if task.done():
+                    return task.result()
                 continue

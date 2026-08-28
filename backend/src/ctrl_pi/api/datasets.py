@@ -121,6 +121,8 @@ class EpisodeDetailRead(BaseModel):
     video_key: str | None
     episode: EpisodeSummaryRead
     frames: list[TimelineFrameRead]
+    sampled_frame_count: int
+    frames_truncated: bool
     video_url: str | None
 
 

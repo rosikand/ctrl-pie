@@ -4,7 +4,9 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   server: {
-    host: "0.0.0.0",
+    // V1 has no authentication. Keep the development console on loopback
+    // unless an operator deliberately overrides Vite's host on a trusted LAN.
+    host: "127.0.0.1",
     port: 5173,
     proxy: {
       "/api": {

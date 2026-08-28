@@ -35,7 +35,7 @@ The browser uses these backend routes:
 | Deploy | `POST /api/inference/deployments` | Resolve identity, create one provider resource, verify health and provider state, return a `running` deployment. |
 | List/detail | `GET /api/inference/deployments` and `GET /api/inference/deployments/{id}` | Read durable control-plane state. |
 | Start motion | `POST /api/inference/deployments/{id}/start` | Validate one connected follower, acquire the rig, verify runtime identity, optionally prepare passive recording, then start the robot loop. |
-| Read state | `GET /api/inference/deployments/{id}/state` | Read deployment/session state and live metrics. |
+| Read state | `GET /api/inference/deployments/{id}/state` | Read deployment/session state and live metrics; idle readiness uses cached provider lifecycle inspection only. |
 | Stream state | `WS /api/inference/deployments/{id}/stream` | Receive server-only state frames every 100 ms until stopped or failed. |
 | Stop | `POST /api/inference/deployments/{id}/stop` | Stop and join robot writes, finalize optional recording, stop compute, and verify teardown. |
 
@@ -130,7 +130,9 @@ Every deployment owns one deterministic App:
 Creation refuses a name collision, and all later inspection/stop operations
 re-check provider ID, exact name, and ownership tag. A deployment persisted as
 `stub` is never stopped through Modal after a configuration change, or vice
-versa.
+versa. Restart and deadline cleanup construct the adapter named by that
+persisted kind. Missing Modal credentials leave a visible retryable failure;
+they never turn cleanup intent into a falsely verified stop.
 
 The resource policy enforces zero warm containers (both minimum and buffer
 counts are zero), exactly one maximum container, idle scaledown no longer than
@@ -213,10 +215,12 @@ If local cleanup fails, provider stop is still attempted. If provider proof
 fails, the session/deployment remains failed and retryable; ctrl-π never
 claims verified teardown based only on intent or a database update.
 
-Startup never resumes robot motion. It reconciles durable rows against the
-configured target, then stops any provider recorded as running because no
-process-local inference loop survived the restart. Shutdown uses the same
-stop ordering. If the normal route or shutdown was interrupted, run the
+Startup never resumes robot motion or calls the runtime web endpoint. It stops
+unattended providers through the adapter named by each row's persisted target
+kind because no process-local inference loop survived the restart. The
+watchdog retries failed cleanup while the app runs, including after switching
+between mock and hardware mode. Shutdown uses the same stop ordering. If the
+normal route or shutdown was interrupted, run the
 ownership-safe procedure in [Modal operator cleanup](modal-operations.md).
 The panic command is a provider cleanup tool only; it does not finalize local
 recordings or revoke Proxy Tokens.

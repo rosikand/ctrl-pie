@@ -178,6 +178,7 @@ class DeploymentRecord:
     checkpoint_revision: str | None
     runtime: str
     compute_size: str
+    timeout_seconds: int
     endpoint_url: str | None
     provider_app_id: str | None
     arm_id: str | None
@@ -212,6 +213,7 @@ class DeploymentService:
         self._poll_interval_seconds = max(poll_interval_seconds, 0.0)
         self._active_stops: set[uuid.UUID] = set()
         self._active_stops_lock = threading.Lock()
+        self._readiness_probes: dict[uuid.UUID, asyncio.Task[bool]] = {}
 
     @property
     def session_factory(self) -> Callable[[], Session] | None:
@@ -278,6 +280,7 @@ class DeploymentService:
             runtime=runtime,
             compute_size=compute_size,
             target_kind=self.target.kind,
+            timeout_seconds=resources.timeout_seconds,
             status="created",
             record_session=False,
         )
@@ -496,8 +499,142 @@ class DeploymentService:
             for deployment, endpoint, arm_id in rows
         ]
 
+    async def endpoint_healthy(
+        self,
+        record: DeploymentRecord,
+        *,
+        timeout_seconds: float = 2.0,
+    ) -> bool:
+        """Return bounded provider lifecycle readiness for an idle deployment.
+
+        Deployment and inference start perform the nonce/runtime identity
+        request. Idle UI polling deliberately stops at provider inspection so
+        it cannot wake or bill a scaled-to-zero runtime container.
+        """
+
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not 0 < float(timeout_seconds) <= 30
+            or record.status != "running"
+            or record.target_kind != self.target.kind
+            or record.provider_app_id is None
+            or record.endpoint_url is None
+        ):
+            return False
+        try:
+            handle = DeploymentHandle(
+                deployment_id=record.id,
+                provider_app_id=record.provider_app_id,
+                app_name=deployment_app_name(record.id),
+                ownership_tag=deployment_ownership_tag(record.id),
+                endpoint_url=record.endpoint_url,
+            )
+            self._validate_handle(handle, record.id)
+        except Exception:
+            return False
+
+        def inspect_provider() -> bool:
+            state = self.target.inspect(handle)
+            self._validate_state(state, handle)
+            return bool(
+                state.running_verified
+                and state.endpoint_url == handle.endpoint_url
+            )
+
+        probe = self._readiness_probes.get(record.id)
+        if probe is None or probe.done():
+            probe = asyncio.create_task(
+                asyncio.to_thread(inspect_provider),
+                name=f"ctrl-pi-provider-readiness-{record.id}",
+            )
+            self._readiness_probes[record.id] = probe
+
+            def clear_probe(completed: asyncio.Task[bool]) -> None:
+                try:
+                    completed.exception()
+                except asyncio.CancelledError:
+                    pass
+                if self._readiness_probes.get(record.id) is completed:
+                    self._readiness_probes.pop(record.id, None)
+
+            probe.add_done_callback(clear_probe)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(probe),
+                timeout=float(timeout_seconds),
+            )
+        except TimeoutError:
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+    async def stop_failed_if_active(
+        self,
+        db: Session,
+        deployment_id: uuid.UUID,
+    ) -> DeploymentRecord:
+        """Retry a failed cleanup only when its owned resource remains active."""
+
+        deployment, endpoint = self._load_pair(db, deployment_id, lock=False)
+        if deployment.target_kind != self.target.kind:
+            raise DeploymentConfigurationError(
+                "The deployment belongs to a different compute target."
+            )
+        if deployment.status != "failed":
+            raise DeploymentConflictError(
+                "Only a failed deployment can use retry cleanup inspection."
+            )
+        try:
+            handle = await self._resolve_handle(deployment_id, endpoint)
+            state: TargetState | None = None
+            if handle is None:
+                confirmed, state = await self._confirm_owned_absence(deployment_id)
+                if not confirmed:
+                    raise DeploymentProviderError(
+                        "The compute target could not verify complete teardown."
+                    )
+                if state is None:
+                    return self._record(
+                        deployment,
+                        endpoint,
+                        arm_id=self._arm_id(db, deployment),
+                    )
+                self._validate_state_identity(state, deployment_id)
+                handle = state.handle()
+            if state is None:
+                state = await asyncio.to_thread(self.target.inspect, handle)
+            self._validate_state(state, handle)
+            if state.stopped_verified:
+                return self._record(
+                    deployment,
+                    endpoint,
+                    arm_id=self._arm_id(db, deployment),
+                )
+        except ComputeConfigurationError:
+            raise DeploymentConfigurationError(
+                "The compute target is not configured."
+            ) from None
+        except DeploymentStorageError:
+            raise
+        except (ComputeTargetError, DeploymentProviderError, ValueError):
+            raise DeploymentProviderError(
+                "The compute target could not verify complete teardown."
+            ) from None
+        except Exception:
+            raise DeploymentProviderError(
+                "The compute target could not verify complete teardown."
+            ) from None
+        return await self.stop(db, deployment_id)
+
     async def stop(
-        self, db: Session, deployment_id: uuid.UUID
+        self,
+        db: Session,
+        deployment_id: uuid.UUID,
+        *,
+        allow_interrupted_deploy: bool = False,
     ) -> DeploymentRecord:
         with self._active_stops_lock:
             if deployment_id in self._active_stops:
@@ -506,13 +643,23 @@ class DeploymentService:
                 )
             self._active_stops.add(deployment_id)
         try:
-            return await self._run_to_terminal(self._stop(db, deployment_id))
+            return await self._run_to_terminal(
+                self._stop(
+                    db,
+                    deployment_id,
+                    allow_interrupted_deploy=allow_interrupted_deploy,
+                )
+            )
         finally:
             with self._active_stops_lock:
                 self._active_stops.discard(deployment_id)
 
     async def _stop(
-        self, db: Session, deployment_id: uuid.UUID
+        self,
+        db: Session,
+        deployment_id: uuid.UUID,
+        *,
+        allow_interrupted_deploy: bool = False,
     ) -> DeploymentRecord:
         deployment, endpoint = self._load_pair(db, deployment_id, lock=True)
         if deployment.target_kind != self.target.kind:
@@ -525,7 +672,11 @@ class DeploymentService:
                 endpoint,
                 arm_id=self._arm_id(db, deployment),
             )
-        if deployment.status not in {"running", "failed", "stopping"}:
+        if deployment.status == "deploying" and not allow_interrupted_deploy:
+            raise DeploymentConflictError(
+                "The deployment cannot be stopped from its current state."
+            )
+        if deployment.status not in {"deploying", "running", "failed", "stopping"}:
             raise DeploymentConflictError(
                 "The deployment cannot be stopped from its current state."
             )
@@ -1012,6 +1163,7 @@ class DeploymentService:
             checkpoint_revision=deployment.checkpoint_revision,
             runtime=deployment.runtime,
             compute_size=deployment.compute_size,
+            timeout_seconds=deployment.timeout_seconds,
             endpoint_url=endpoint.endpoint_url,
             provider_app_id=endpoint.provider_app_id,
             arm_id=arm_id,

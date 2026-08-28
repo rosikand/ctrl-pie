@@ -12,17 +12,33 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ctrl_pi.api.camera import mjpeg_chunks
+from ctrl_pi.api.recordings import (
+    EpisodeStop,
+    _reconcile_episode_manifests,
+    reconcile_recordings_startup,
+    stop_episode as stop_episode_api,
+)
 from ctrl_pi.camera import MockCamera
 from ctrl_pi.config import AppConfig, get_config
 from ctrl_pi.db import Base, get_db
 from ctrl_pi.drivers.mock_yam import MockYAMDriver
 from ctrl_pi.main import create_app
 from ctrl_pi.models import AppSetting, Recording, Robot
-from ctrl_pi.recording import RecordingConflictError, RecordingManager
+from ctrl_pi.recording import (
+    EPISODE_MANIFEST_FILENAME,
+    MAX_EPISODE_MANIFEST_BYTES,
+    FFmpegVideoWriter,
+    RecordingConflictError,
+    RecordingManager,
+    RecordingRuntimeError,
+    episode_result_metadata,
+    load_episode_manifest,
+)
 
 
 class _FailingActionDriver(MockYAMDriver):
@@ -36,6 +52,27 @@ class _FailingActionDriver(MockYAMDriver):
         if self.action_calls >= self.fail_on_call:
             raise RuntimeError("mock action failure")
         return super().apply_action(arm_id, action)
+
+
+class _FakeVideoWriter:
+    def __init__(self, output_path: Path, width: int, height: int, fps: int) -> None:
+        del width, height, fps
+        self.output_path = output_path
+        output_path.write_bytes(b"")
+        self.closed = False
+
+    def write(self, frame) -> None:
+        assert not self.closed and frame.rgb
+        with self.output_path.open("ab") as output:
+            output.write(b"frame")
+
+    def close(self) -> None:
+        self.closed = True
+        if not self.output_path.read_bytes():
+            raise RecordingRuntimeError("test video is empty")
+
+    def terminate(self) -> None:
+        self.closed = True
 
 
 @pytest.fixture
@@ -545,3 +582,484 @@ def test_state_reconciles_stale_active_status_after_process_restart(recording_ap
         refreshed = db.get(Recording, uuid.UUID(recording_id))
         assert refreshed is not None
         assert refreshed.status == "draft"
+
+
+def _commit_failing_database(engine, secret: str):
+    def override_db() -> Iterator[Session]:
+        with Session(engine, expire_on_commit=False) as session:
+            def fail_commit() -> None:
+                raise SQLAlchemyError(secret)
+
+            session.commit = fail_commit  # type: ignore[method-assign]
+            yield session
+
+    return override_db
+
+
+def test_teleop_commit_failure_releases_every_process_local_resource(
+    recording_app,
+) -> None:
+    app, engine, manager, _ = recording_app
+    secret = "postgresql://private-host/teleop"
+    with TestClient(app) as client:
+        recording_id = _create_recording(client)["id"]
+        app.dependency_overrides[get_db] = _commit_failing_database(engine, secret)
+        response = client.post(f"/api/recordings/{recording_id}/teleop/start")
+
+    assert response.status_code == 503
+    assert secret not in response.text
+    assert asyncio.run(manager.active_resource_counts()) == (0, 0)
+    assert manager.rig_lease.current() is None
+
+
+def test_episode_start_commit_failure_stops_writer_teleop_and_cleans_partials(
+    recording_app,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, engine, manager, staging = recording_app
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    secret = "/private/database/episode-start"
+    with TestClient(app) as client:
+        recording_id = _create_recording(client)["id"]
+        assert client.post(f"/api/recordings/{recording_id}/teleop/start").status_code == 200
+        app.dependency_overrides[get_db] = _commit_failing_database(engine, secret)
+        response = client.post(
+            f"/api/recordings/{recording_id}/episodes/start", json={}
+        )
+
+    assert response.status_code == 503
+    assert secret not in response.text
+    assert asyncio.run(manager.active_resource_counts()) == (0, 0)
+    assert manager.rig_lease.current() is None
+    assert not (staging / str(recording_id) / "episode_000000").exists()
+
+
+def test_finalized_manifest_recovers_failed_db_commit_exactly_once_after_restart(
+    recording_app,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, engine, manager, staging = recording_app
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    secret = "postgresql://private-host/finalize"
+    with TestClient(app) as client:
+        recording_id = _create_recording(client)["id"]
+        assert client.post(f"/api/recordings/{recording_id}/teleop/start").status_code == 200
+        assert client.post(
+            f"/api/recordings/{recording_id}/episodes/start", json={}
+        ).status_code == 200
+        app.dependency_overrides[get_db] = _commit_failing_database(engine, secret)
+        response = client.post(
+            f"/api/recordings/{recording_id}/episodes/stop", json={}
+        )
+
+    assert response.status_code == 503
+    assert secret not in response.text
+    assert asyncio.run(manager.active_resource_counts()) == (0, 0)
+    assert manager.rig_lease.current() is None
+    episode_directory = staging / str(recording_id) / "episode_000000"
+    manifest = episode_directory / EPISODE_MANIFEST_FILENAME
+    assert manifest.is_file()
+    assert 0 < manifest.stat().st_size <= MAX_EPISODE_MANIFEST_BYTES
+    recovered = load_episode_manifest(
+        episode_directory, expected_recording_id=str(recording_id)
+    )
+    assert recovered.index == 0 and recovered.sample_count >= 1
+
+    restarted = RecordingManager(
+        MockYAMDriver(), MockCamera(width=160, height=120), staging
+    )
+    def factory() -> Session:
+        return Session(engine, expire_on_commit=False)
+
+    asyncio.run(restarted.startup())
+    asyncio.run(reconcile_recordings_startup(factory, restarted))
+    asyncio.run(reconcile_recordings_startup(factory, restarted))
+
+    with Session(engine) as db:
+        stored = db.get(Recording, uuid.UUID(str(recording_id)))
+        assert stored is not None
+        assert stored.status == "ready"
+        assert stored.episode_count == 1
+        assert stored.duration_seconds == pytest.approx(recovered.duration_seconds)
+        assert len(stored.recording_metadata["episodes"]) == 1
+        assert stored.recording_metadata["episodes"][0]["artifact_key"] == (
+            f"{recording_id}/episode_000000"
+        )
+
+
+@pytest.mark.asyncio
+async def test_rename_failure_removes_mixed_final_and_partial_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    manager = RecordingManager(
+        MockYAMDriver(), MockCamera(width=64, height=48), tmp_path / "staging"
+    )
+    await manager.startup()
+    await manager.start_teleop(
+        "session", "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.start_episode("session", fps=10, metadata={})
+    original_replace = Path.replace
+
+    def fail_second_rename(path: Path, target: Path):
+        if path.name == "samples.partial.jsonl":
+            raise OSError("/private/staging/should-not-leak")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_second_rename)
+    with pytest.raises(RecordingRuntimeError) as raised:
+        await manager.stop_episode("session", success=True, notes=None)
+
+    assert "/private/staging" not in str(raised.value)
+    assert not (tmp_path / "staging" / "session" / "episode_000000").exists()
+    await manager.compensate_persistence_failure("session")
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_restart_removes_partial_and_mixed_orphans_but_keeps_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    staging = tmp_path / "staging"
+    manager = RecordingManager(
+        MockYAMDriver(), MockCamera(width=64, height=48), staging
+    )
+    await manager.startup()
+    await manager.start_teleop(
+        "valid", "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.start_episode("valid", fps=10, metadata={})
+    _, result = await manager.stop_episode("valid", success=True, notes=None)
+    await manager.confirm_episode_persisted("valid", 1, "teleop")
+    await manager.stop_teleop("valid")
+
+    partial = staging / "partial" / "episode_000000"
+    partial.mkdir(parents=True)
+    (partial / "video.partial.mp4").write_bytes(b"partial")
+    (partial / "samples.partial.jsonl").write_text("{}\n")
+    mixed = staging / "mixed" / "episode_000000"
+    mixed.mkdir(parents=True)
+    (mixed / "video.mp4").write_bytes(b"final")
+    (mixed / "samples.partial.jsonl").write_text("{}\n")
+
+    restarted = RecordingManager(
+        MockYAMDriver(), MockCamera(width=64, height=48), staging
+    )
+    await restarted.startup()
+
+    valid = staging / result.artifact_key
+    assert (valid / EPISODE_MANIFEST_FILENAME).is_file()
+    assert (valid / "video.mp4").is_file()
+    assert (valid / "samples.jsonl").is_file()
+    assert not partial.exists()
+    assert not mixed.exists()
+
+
+@pytest.mark.asyncio
+async def test_episode_directory_fsyncs_cover_creation_and_manifest_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    staging = tmp_path / "staging"
+    manager = RecordingManager(
+        MockYAMDriver(), MockCamera(width=64, height=48), staging
+    )
+    events: list[str] = []
+    original_replace = Path.replace
+
+    def relative(path: Path) -> str:
+        return str(path.relative_to(staging))
+
+    def tracked_directory_fsync(path: Path) -> None:
+        events.append(f"fsync-dir:{relative(path)}")
+
+    def tracked_file_fsync(path: Path) -> None:
+        events.append(f"fsync-file:{relative(path)}")
+
+    def tracked_replace(source: Path, target: Path) -> Path:
+        events.append(f"replace:{relative(source)}->{relative(target)}")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(manager, "_fsync_directory", tracked_directory_fsync)
+    monkeypatch.setattr(manager, "_fsync_file", tracked_file_fsync)
+    monkeypatch.setattr(Path, "replace", tracked_replace)
+
+    await manager.start_teleop(
+        "session", "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.start_episode("session", fps=10, metadata={})
+    assert events == ["fsync-dir:.", "fsync-dir:session"]
+
+    events.clear()
+    await manager.stop_episode("session", success=True, notes=None)
+    episode = "session/episode_000000"
+    assert events == [
+        f"fsync-file:{episode}/video.partial.mp4",
+        f"replace:{episode}/video.partial.mp4->{episode}/video.mp4",
+        f"replace:{episode}/samples.partial.jsonl->{episode}/samples.jsonl",
+        f"fsync-dir:{episode}",
+        f"replace:{episode}/.episode.json.partial->{episode}/episode.json",
+        f"fsync-dir:{episode}",
+        "fsync-dir:session",
+        "fsync-dir:.",
+    ]
+
+    await manager.confirm_episode_persisted("session", 1, "teleop")
+    await manager.stop_teleop("session")
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_fresh_database_preserves_manifest_and_unrelated_shared_root_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    staging = tmp_path / "staging"
+    manager = RecordingManager(
+        MockYAMDriver(), MockCamera(width=64, height=48), staging
+    )
+    await manager.startup()
+    await manager.start_teleop(
+        "preserved", "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.start_episode("preserved", fps=10, metadata={})
+    _, result = await manager.stop_episode("preserved", success=True, notes=None)
+    await manager.confirm_episode_persisted("preserved", 1, "teleop")
+    await manager.stop_teleop("preserved")
+    await manager.shutdown()
+
+    unrelated_file = staging / "shared-note.txt"
+    unrelated_file.write_text("do not delete")
+    coincidental_directory = staging / "shared" / "episode_000000"
+    coincidental_directory.mkdir(parents=True)
+    (coincidental_directory / "notes.txt").write_text("not ctrl-pi data")
+    incomplete = staging / "incomplete" / "episode_000000"
+    incomplete.mkdir(parents=True)
+    (incomplete / "video.partial.mp4").write_bytes(b"partial")
+
+    fresh_engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(fresh_engine)
+
+    def fresh_factory() -> Session:
+        return Session(fresh_engine, expire_on_commit=False)
+
+    restarted = RecordingManager(
+        MockYAMDriver(), MockCamera(width=64, height=48), staging
+    )
+    await restarted.startup()
+    await reconcile_recordings_startup(fresh_factory, restarted)
+
+    finalized = staging / result.artifact_key
+    assert (finalized / EPISODE_MANIFEST_FILENAME).is_file()
+    assert (finalized / "video.mp4").is_file()
+    assert (finalized / "samples.jsonl").is_file()
+    assert unrelated_file.read_text() == "do not delete"
+    assert (coincidental_directory / "notes.txt").read_text() == "not ctrl-pi data"
+    assert not incomplete.exists()
+
+
+def test_ffmpeg_failure_discards_stderr_and_exception_causes() -> None:
+    secret = b"/private/staging/token=hf_secret"
+
+    class FakeInput:
+        def close(self) -> None:
+            raise OSError(secret.decode())
+
+    class FakeStderr:
+        def read(self) -> bytes:
+            return secret
+
+        def close(self) -> None:
+            return None
+
+    class FakeProcess:
+        stdin = FakeInput()
+        stderr = FakeStderr()
+
+        def wait(self, timeout: int) -> int:
+            del timeout
+            return 1
+
+    writer = object.__new__(FFmpegVideoWriter)
+    writer.output_path = Path("/private/staging/video.partial.mp4")
+    writer.width = 1
+    writer.height = 1
+    writer._closed = False
+    writer._process = FakeProcess()
+
+    with pytest.raises(RecordingRuntimeError) as raised:
+        writer.close()
+
+    assert secret.decode() not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reconciliation_keeps_filesystem_ownership_until_worker_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    manager = RecordingManager(
+        MockYAMDriver(), MockCamera(width=64, height=48), tmp_path / "staging"
+    )
+    await manager.startup()
+    await manager.start_teleop(
+        "session", "yam-leader", "yam-follower", 0, "draft"
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original = manager._reconcile_recording_directory
+
+    def blocked_reconcile(*args):
+        entered.set()
+        assert release.wait(timeout=3)
+        return original(*args)
+
+    monkeypatch.setattr(manager, "_reconcile_recording_directory", blocked_reconcile)
+    reconciliation = asyncio.create_task(
+        manager.reconcile_recording_artifacts("session", [])
+    )
+    assert await asyncio.to_thread(entered.wait, 1)
+    reconciliation.cancel()
+    await asyncio.sleep(0)
+
+    assert reconciliation.done() is False
+    with pytest.raises(RecordingConflictError, match="being reconciled"):
+        await manager.start_episode("session", fps=10, metadata={})
+
+    release.set()
+    assert await reconciliation == []
+    await manager.start_episode("session", fps=10, metadata={})
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_episode_db_commit_settles_runtime_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    driver = MockYAMDriver()
+    manager = RecordingManager(
+        driver, MockCamera(width=64, height=48), tmp_path / "staging"
+    )
+    with Session(engine, expire_on_commit=False) as db:
+        leader = Robot(driver_id="yam-leader", name="YAM Leader", role="leader")
+        follower = Robot(
+            driver_id="yam-follower", name="YAM Follower", role="follower"
+        )
+        db.add_all((leader, follower))
+        db.flush()
+        recording = Recording(
+            name="Cancellation safe",
+            task="Finalize once",
+            status="draft",
+            leader_robot_id=leader.id,
+            follower_robot_id=follower.id,
+            episode_count=0,
+            duration_seconds=0,
+            recording_metadata={"episodes": []},
+        )
+        db.add(recording)
+        db.commit()
+        recording_id = recording.id
+
+        await manager.startup()
+        await manager.start_teleop(
+            str(recording_id), "yam-leader", "yam-follower", 0, "draft"
+        )
+        await manager.start_episode(str(recording_id), fps=10, metadata={})
+        recording.status = "recording"
+        db.commit()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_confirm = manager.confirm_episode_persisted
+
+        async def blocked_confirm(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original_confirm(*args, **kwargs)
+
+        monkeypatch.setattr(manager, "confirm_episode_persisted", blocked_confirm)
+        request = asyncio.create_task(
+            stop_episode_api(
+                recording_id,
+                EpisodeStop(),
+                db=db,
+                manager=manager,
+            )
+        )
+        await entered.wait()
+        request.cancel()
+        await asyncio.sleep(0)
+        assert request.done() is False
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+        db.expire_all()
+        stored = db.get(Recording, recording_id)
+        assert stored is not None and stored.episode_count == 1
+        state = await manager.state(
+            str(recording_id), "yam-leader", "yam-follower", 1, stored.status
+        )
+        assert state.episode_active is False
+        assert state.episode_count == 1
+
+    await manager.stop_teleop(str(recording_id))
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_noop_manifest_reconciliation_releases_persisted_finalizer_sentinel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    manager = RecordingManager(
+        MockYAMDriver(), MockCamera(width=64, height=48), tmp_path / "staging"
+    )
+    recording_id = uuid.uuid4()
+    await manager.startup()
+    await manager.start_teleop(
+        str(recording_id), "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.start_episode(str(recording_id), fps=10, metadata={})
+    _, result = await manager.stop_episode(
+        str(recording_id), success=True, notes=None
+    )
+
+    with Session(engine, expire_on_commit=False) as db:
+        recording = Recording(
+            id=recording_id,
+            name="Already persisted",
+            task="Reconcile sentinel",
+            status="teleop",
+            episode_count=1,
+            duration_seconds=result.duration_seconds,
+            recording_metadata={"episodes": [episode_result_metadata(result)]},
+        )
+        db.add(recording)
+        db.commit()
+
+        assert await _reconcile_episode_manifests(db, recording, manager) is False
+
+    state = await manager.state(
+        str(recording_id), "yam-leader", "yam-follower", 1, "teleop"
+    )
+    assert state.episode_active is False
+    assert state.episode_count == 1
+    await manager.stop_teleop(str(recording_id))
+    await manager.shutdown()

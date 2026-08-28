@@ -388,3 +388,43 @@ open issues. Do not expand scope.
   devices; physical safety, directions, offsets, units, model fidelity, bus
   behavior, and emergency-stop operation remain mandatory validations on the
   target Ubuntu/YAM box.
+- 2026-08-28 — A deployment snapshots the configured 1–30 minute lifetime in
+  PostgreSQL when it is created. An in-process watchdog uses that immutable
+  value to stop the robot loop before verified provider teardown, including
+  when a deployment is idle; retryable teardown failures remain under
+  reconciliation. Idle readiness is a short-lived cache of bounded,
+  identity-checked provider lifecycle inspection and never calls the GPU web
+  endpoint; deploy and explicit session start retain nonce/runtime identity
+  health checks, while restart teardown never wakes the runtime endpoint.
+  Cleanup is selected from each row's persisted target kind,
+  including after a mock/hardware mode switch, and an unavailable cleanup
+  target remains a loud retryable failure rather than false teardown proof.
+- 2026-08-28 — Settings readiness is mode-aware: mock mode requires only a
+  healthy PostgreSQL connection and mock arms, while hardware mode also
+  requires exact token-authenticated Hugging Face namespace ownership,
+  complete Modal API/profile and proxy credential pairs, and connected real
+  arms. Modal readiness validates local credential configuration without
+  claiming a provider connection, and public status exposes only sanitized
+  text and booleans.
+- 2026-08-28 — Episode detail responses are bounded to 2,000 deterministic
+  timeline samples and one million state/action scalar values, with the first
+  and last frame included. Additive sample-count/truncation metadata keeps the
+  UI truthful. Parquet file/row-group bounds are validated, and selected row
+  groups are rejected before decoding if they cumulatively exceed one million
+  rows or 16 million state/action scalar slots; accepted groups are scanned in
+  1,024-row batches rather than materializing an unbounded frame table.
+- 2026-08-28 — A finalized ordinary or inference episode publishes a bounded,
+  fsynced per-episode manifest atomically after both raw artifacts are durable.
+  Startup reconciles those manifests idempotently into PostgreSQL and removes
+  incomplete staging. Raw recording staging is deleted only after the Hub
+  revision is verified and the `uploaded` database transition commits; it is
+  retained on transfer failure, cancellation, or uncertain persistence. A
+  later startup removes retained staging only when it observes an already
+  durable `uploaded` row. If a staging root is unknown to the connected
+  database, startup removes only recognizable incomplete or invalid ctrl-π
+  episode remnants; valid manifests and unrelated shared-root entries are
+  preserved so a fresh or wrong database cannot destroy finalized raw data.
+- 2026-08-28 — ctrl-π does not infer a license grant for user-recorded data.
+  Generated Hugging Face dataset cards leave the license field unset; making a
+  repository public remains an explicit exposure choice, and selecting a data
+  license remains the operator's responsibility.

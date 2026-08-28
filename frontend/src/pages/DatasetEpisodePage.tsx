@@ -367,7 +367,11 @@ function EpisodePlayer({ detail }: { detail: DatasetEpisodeDetail }) {
             {detail.video_key && <span className="truncate font-mono text-[10px] text-slate-400" title={detail.video_key}>{detail.video_key}</span>}
           </div>
           <div className="flex items-center gap-3 text-[11px] text-slate-400">
-            <span>{countFormatter.format(episode.frame_count)} frames</span>
+            <span>
+              {detail.frames_truncated
+                ? `${countFormatter.format(detail.sampled_frame_count)} sampled / ${countFormatter.format(episode.frame_count)} frames`
+                : `${countFormatter.format(episode.frame_count)} frames`}
+            </span>
             <span>{formatDuration(episode.duration_seconds)}</span>
           </div>
         </div>
@@ -471,6 +475,11 @@ function EpisodePlayer({ detail }: { detail: DatasetEpisodeDetail }) {
               <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
               Episode-relative timeline
             </span>
+            {detail.frames_truncated && (
+              <span title="The backend includes the first and last frame and evenly samples the frames between them.">
+                Values sampled: {countFormatter.format(detail.sampled_frame_count)} of {countFormatter.format(episode.frame_count)}
+              </span>
+            )}
             {episode.video_from_timestamp !== null && episode.video_to_timestamp !== null && (
               <span title="Playback is constrained to this episode's segment in the packed video file.">
                 Media segment {formatDuration(episode.video_from_timestamp)}–{formatDuration(episode.video_to_timestamp)}
@@ -484,7 +493,9 @@ function EpisodePlayer({ detail }: { detail: DatasetEpisodeDetail }) {
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="text-sm font-semibold text-slate-900">Synchronized values</h2>
-            <p className="mt-1 text-xs text-slate-400">Nearest sample to the selected episode time.</p>
+            <p className="mt-1 text-xs text-slate-400">
+              Nearest {detail.frames_truncated ? "returned sampled frame" : "frame"} to the selected episode time.
+            </p>
           </div>
           {currentFrame && (
             <span className="rounded-full bg-white px-2.5 py-1 font-mono text-[10px] text-slate-500 ring-1 ring-slate-200">

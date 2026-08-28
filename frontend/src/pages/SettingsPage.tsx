@@ -97,19 +97,19 @@ function InferenceCredentials({ status }: { status: SettingsStatus }) {
       label: "Hugging Face model access",
       variables: "HF_TOKEN + HF_NAMESPACE",
       ready: readiness.hf_configured,
-      detail: "Resolves configured-namespace models to an exact revision before deployment.",
+      detail: "The bounded whoami check must identify the exact configured user or organization namespace.",
     },
     {
       label: "Modal API credentials",
       variables: "MODAL_TOKEN_ID + MODAL_TOKEN_SECRET",
       ready: readiness.modal_configured,
-      detail: "Creates, inspects, and tears down the owned Modal application.",
+      detail: "Requires one complete environment pair or the selected complete Modal profile; this is not a live API call.",
     },
     {
       label: "Modal proxy tokens",
       variables: "MODAL_PROXY_TOKEN_ID + MODAL_PROXY_TOKEN_SECRET",
       ready: readiness.modal_proxy_configured,
-      detail: "Authenticates backend-only health and inference traffic to the protected endpoint.",
+      detail: "Requires a complete, valid wk-/ws- pair for backend-only endpoint traffic.",
     },
   ];
   return (
@@ -328,6 +328,11 @@ export function SettingsPage({
               {status.mode} mode
             </span>
           </div>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            {status.mode === "mock"
+              ? "PostgreSQL and mock arms are required; Hugging Face and Modal remain optional until you use their cloud workflows."
+              : "Hardware mode requires PostgreSQL, verified Hugging Face namespace access, Modal API and proxy credentials, and connected arms."}
+          </p>
           <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {status.services.map((service) => (
               <ConnectionCard key={service.id} service={service} />
