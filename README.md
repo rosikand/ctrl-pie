@@ -45,7 +45,7 @@ PostgreSQL 14+ database reachable from the container.
 
 ```bash
 git clone https://github.com/rosikand/ctrl-pie.git
-cd ctrl-pi
+cd ctrl-pie
 cp .env.example .env
 $EDITOR .env
 docker compose up --build -d --wait
@@ -69,7 +69,7 @@ that avoids pulling CUDA wheels onto the control-plane machine.
 
 ```bash
 git clone https://github.com/rosikand/ctrl-pie.git
-cd ctrl-pi
+cd ctrl-pie
 
 python3.11 -m venv .venv
 . .venv/bin/activate
