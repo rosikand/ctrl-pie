@@ -605,10 +605,10 @@ function EmptyArms({ loading, error, refresh }: { loading: boolean; error: strin
           {error ? <WifiOff className="h-5 w-5" /> : <Bot className="h-5 w-5" strokeWidth={1.7} />}
         </div>
         <p className="mt-4 text-sm font-semibold text-slate-800">
-          {loading ? "Loading mock arms…" : error ? "Arms API unavailable" : "No arms found"}
+          {loading ? "Loading arms…" : error ? "Arms API unavailable" : "No arms found"}
         </p>
         <p className="mx-auto mt-1 max-w-sm text-sm leading-6 text-slate-400">
-          {error ?? "Start MockYAMDriver to expose a leader and follower arm."}
+          {error ?? "No arms are exposed by the configured driver."}
         </p>
         {!loading && (
           <button
@@ -681,7 +681,7 @@ export function ArmsPage() {
             <div>
               <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Active arm</p>
               <p className="mt-1 text-xs text-slate-500">
-                {arms.length} mock arm{arms.length === 1 ? "" : "s"} available
+                {arms.length} arm{arms.length === 1 ? "" : "s"} available
               </p>
             </div>
             <ArmSelector arms={arms} selectedId={arm.id} onChange={setSelectedId} />
