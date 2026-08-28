@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Cloud,
   Database,
+  KeyRound,
   RefreshCw,
   Save,
   Server,
@@ -84,6 +85,62 @@ function Checklist({ status }: { status: SettingsStatus }) {
           );
         })}
       </ul>
+    </section>
+  );
+}
+
+function InferenceCredentials({ status }: { status: SettingsStatus }) {
+  const readiness = status.inference;
+  if (!readiness) return null;
+  const items = [
+    {
+      label: "Hugging Face model access",
+      variables: "HF_TOKEN + HF_NAMESPACE",
+      ready: readiness.hf_configured,
+      detail: "Resolves configured-namespace models to an exact revision before deployment.",
+    },
+    {
+      label: "Modal API credentials",
+      variables: "MODAL_TOKEN_ID + MODAL_TOKEN_SECRET",
+      ready: readiness.modal_configured,
+      detail: "Creates, inspects, and tears down the owned Modal application.",
+    },
+    {
+      label: "Modal proxy tokens",
+      variables: "MODAL_PROXY_TOKEN_ID + MODAL_PROXY_TOKEN_SECRET",
+      ready: readiness.modal_proxy_configured,
+      detail: "Authenticates backend-only health and inference traffic to the protected endpoint.",
+    },
+  ];
+  return (
+    <section className="mt-6 rounded-xl border border-slate-200 bg-white shadow-panel">
+      <div className="border-b border-slate-100 px-5 py-4 sm:px-6">
+        <div className="flex items-center gap-2">
+          <KeyRound className="h-4 w-4 text-slate-400" />
+          <h2 className="text-sm font-semibold text-slate-900">Inference credential readiness</h2>
+        </div>
+        <p className="mt-1 text-xs leading-5 text-slate-500">
+          These checks expose only pair readiness. Credential values remain in the backend environment.
+        </p>
+      </div>
+      <div className="grid gap-px bg-slate-100 lg:grid-cols-3">
+        {items.map((item) => (
+          <article key={item.label} className="bg-white px-5 py-4 sm:px-6">
+            <div className="flex items-start justify-between gap-3">
+              <h3 className="text-xs font-semibold text-slate-800">{item.label}</h3>
+              <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold ${item.ready ? "bg-emerald-50 text-emerald-700" : readiness.mock_mode ? "bg-blue-50 text-blue-700" : "bg-amber-50 text-amber-700"}`}>
+                {item.ready ? "Ready" : readiness.mock_mode ? "Optional in mock" : "Missing"}
+              </span>
+            </div>
+            <p className="mt-2 text-[11px] leading-5 text-slate-500">{item.detail}</p>
+            {!item.ready && (
+              <p className="mt-2 font-mono text-[10px] leading-4 text-slate-400">
+                Set {item.variables} in <code>.env</code>.
+              </p>
+            )}
+          </article>
+        ))}
+      </div>
     </section>
   );
 }
@@ -276,6 +333,7 @@ export function SettingsPage({
               <ConnectionCard key={service.id} service={service} />
             ))}
           </div>
+          <InferenceCredentials status={status} />
           <div className="mt-6 grid gap-6 xl:grid-cols-2">
             <Checklist status={status} />
             <PreferencesForm />
@@ -289,4 +347,3 @@ export function SettingsPage({
     </div>
   );
 }
-

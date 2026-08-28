@@ -5,6 +5,14 @@ import type {
 } from "../types/datasetEpisodes";
 import type { DatasetsResponse } from "../types/datasets";
 import type {
+  CreateInferenceDeploymentRequest,
+  DeploymentRead,
+  InferenceDeploymentsResponse,
+  InferenceStateRead,
+  StartInferenceSessionRequest,
+  StopInferenceDeploymentRequest,
+} from "../types/inference";
+import type {
   CreateRecordingRequest,
   Recording,
   RecordingsResponse,
@@ -32,6 +40,12 @@ export type SettingsStatus = {
   mode: "mock" | "hardware";
   setup_complete: boolean;
   services: ServiceStatus[];
+  inference: {
+    mock_mode: boolean;
+    hf_configured: boolean;
+    modal_configured: boolean;
+    modal_proxy_configured: boolean;
+  };
 };
 
 export type PublicSettings = {
@@ -206,19 +220,20 @@ export function stopEpisode(
 export function uploadRecording(
   recordingId: string,
   payload: UploadRecordingRequest,
+  signal?: AbortSignal,
 ): Promise<UploadRecordingResponse> {
   return request<UploadRecordingResponse>(
     `/api/recordings/${encodeURIComponent(recordingId)}/upload`,
-    { method: "POST", body: JSON.stringify(payload) },
+    { method: "POST", body: JSON.stringify(payload), signal },
   );
 }
 
-export function fetchSettingsStatus(): Promise<SettingsStatus> {
-  return request<SettingsStatus>("/api/settings/status");
+export function fetchSettingsStatus(signal?: AbortSignal): Promise<SettingsStatus> {
+  return request<SettingsStatus>("/api/settings/status", { signal });
 }
 
-export function fetchPublicSettings(): Promise<PublicSettings> {
-  return request<PublicSettings>("/api/settings");
+export function fetchPublicSettings(signal?: AbortSignal): Promise<PublicSettings> {
+  return request<PublicSettings>("/api/settings", { signal });
 }
 
 export function savePublicSettings(
@@ -228,4 +243,66 @@ export function savePublicSettings(
     method: "PATCH",
     body: JSON.stringify(settings),
   });
+}
+
+export function fetchInferenceDeployments(
+  signal?: AbortSignal,
+): Promise<InferenceDeploymentsResponse> {
+  return request<InferenceDeploymentsResponse>("/api/inference/deployments", {
+    signal,
+    cache: "no-store",
+  });
+}
+
+export function fetchInferenceDeployment(
+  deploymentId: string,
+  signal?: AbortSignal,
+): Promise<DeploymentRead> {
+  return request<DeploymentRead>(
+    `/api/inference/deployments/${encodeURIComponent(deploymentId)}`,
+    { signal, cache: "no-store" },
+  );
+}
+
+export function createInferenceDeployment(
+  payload: CreateInferenceDeploymentRequest,
+  signal?: AbortSignal,
+): Promise<DeploymentRead> {
+  return request<DeploymentRead>("/api/inference/deployments", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function fetchInferenceState(
+  deploymentId: string,
+  signal?: AbortSignal,
+): Promise<InferenceStateRead> {
+  return request<InferenceStateRead>(
+    `/api/inference/deployments/${encodeURIComponent(deploymentId)}/state`,
+    { signal, cache: "no-store" },
+  );
+}
+
+export function startInferenceSession(
+  deploymentId: string,
+  payload: StartInferenceSessionRequest,
+  signal?: AbortSignal,
+): Promise<InferenceStateRead> {
+  return request<InferenceStateRead>(
+    `/api/inference/deployments/${encodeURIComponent(deploymentId)}/start`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
+}
+
+export function stopInferenceDeployment(
+  deploymentId: string,
+  payload: StopInferenceDeploymentRequest = {},
+  signal?: AbortSignal,
+): Promise<InferenceStateRead> {
+  return request<InferenceStateRead>(
+    `/api/inference/deployments/${encodeURIComponent(deploymentId)}/stop`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
 }

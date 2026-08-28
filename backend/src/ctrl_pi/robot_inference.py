@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -46,6 +46,10 @@ class RobotInferenceConflictError(RobotInferenceError):
 
 
 class RobotInferenceConfigurationError(RobotInferenceError):
+    pass
+
+
+class RobotInferencePreparationError(RobotInferenceError):
     pass
 
 
@@ -101,6 +105,12 @@ class RobotInferenceLoop:
         max_joint_step_radians: float = 0.35,
         max_gripper_step: float = 0.20,
         allow_opaque_mock_actions: bool = False,
+        max_steps: int | None = None,
+        action_observer: Callable[
+            [ArmTelemetry, ArmAction, ArmTelemetry], Awaitable[None]
+        ]
+        | None = None,
+        start_hook: Callable[[], Awaitable[None]] | None = None,
         nonce_factory: Callable[[], str] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] | None = None,
@@ -178,6 +188,21 @@ class RobotInferenceLoop:
             raise RobotInferenceConfigurationError(
                 "opaque action projection is available only with MockYAMDriver"
             )
+        if (
+            max_steps is not None
+            and (
+                isinstance(max_steps, bool)
+                or not isinstance(max_steps, int)
+                or not 1 <= max_steps <= 1_000_000
+            )
+        ):
+            raise RobotInferenceConfigurationError(
+                "max_steps must be between 1 and 1000000"
+            )
+        if action_observer is not None and not callable(action_observer):
+            raise RobotInferenceConfigurationError("action_observer must be callable")
+        if start_hook is not None and not callable(start_hook):
+            raise RobotInferenceConfigurationError("start_hook must be callable")
 
         self.driver = driver
         self.camera = camera
@@ -195,6 +220,9 @@ class RobotInferenceLoop:
         self.max_joint_step_radians = float(max_joint_step_radians)
         self.max_gripper_step = float(max_gripper_step)
         self.allow_opaque_mock_actions = allow_opaque_mock_actions
+        self.max_steps = max_steps
+        self.action_observer = action_observer
+        self.start_hook = start_hook
         self._nonce_factory = nonce_factory or (lambda: secrets.token_urlsafe(24))
         self._monotonic = monotonic
         self._now = now or (lambda: datetime.now(UTC))
@@ -302,6 +330,23 @@ class RobotInferenceLoop:
                         self._safe_release_lease(lease_token)
 
             assert descriptor is not None
+            if self.start_hook is not None:
+                try:
+                    await self.start_hook()
+                except asyncio.CancelledError:
+                    try:
+                        await self._safe_close_transport()
+                    finally:
+                        self._safe_release_lease(lease_token)
+                    raise
+                except Exception:
+                    try:
+                        await self._safe_close_transport()
+                    finally:
+                        self._safe_release_lease(lease_token)
+                    raise RobotInferencePreparationError(
+                        "The inference session could not be prepared safely."
+                    ) from None
             with self._state_lock:
                 self._descriptor = descriptor
                 self._lease_token = lease_token
@@ -337,6 +382,18 @@ class RobotInferenceLoop:
                 self._stop_event.set()
         if task is not None:
             await self._await_terminal(task)
+
+    async def wait(self) -> RobotInferenceSnapshot:
+        """Wait for this single-use loop to reach its terminal state."""
+
+        async with self._lifecycle_lock:
+            task = self._task
+            if task is None:
+                if not self._started_once:
+                    raise RobotInferenceConflictError("Inference has not started.")
+                return self.snapshot()
+        await self._await_terminal(task)
+        return self.snapshot()
 
     async def wait_for_steps(
         self,
@@ -482,7 +539,7 @@ class RobotInferenceLoop:
                             with self._state_lock:
                                 self._dropped_chunks += 1
                         else:
-                            self.driver.apply_action(self.arm_id, action)
+                            applied = self.driver.apply_action(self.arm_id, action)
                             with self._state_lock:
                                 self._steps_executed += 1
                                 elapsed = max(
@@ -490,6 +547,14 @@ class RobotInferenceLoop:
                                     1e-9,
                                 )
                                 self._frequency_hz = self._steps_executed / elapsed
+                                reached_step_limit = (
+                                    self.max_steps is not None
+                                    and self._steps_executed >= self.max_steps
+                                )
+                            if self.action_observer is not None:
+                                await self.action_observer(current, action, applied)
+                            if reached_step_limit:
+                                stop_event.set()
 
                 if (
                     not stop_event.is_set()

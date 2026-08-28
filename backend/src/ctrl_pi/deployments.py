@@ -32,7 +32,7 @@ from ctrl_pi.compute import (
     deployment_ownership_tag,
     validate_owned_handle,
 )
-from ctrl_pi.models import Deployment, InferenceEndpoint
+from ctrl_pi.models import Deployment, InferenceEndpoint, Robot
 
 DeploymentStatus = Literal[
     "created", "deploying", "running", "stopping", "stopped", "failed"
@@ -180,6 +180,9 @@ class DeploymentRecord:
     compute_size: str
     endpoint_url: str | None
     provider_app_id: str | None
+    arm_id: str | None
+    record_session: bool
+    recording_id: uuid.UUID | None
     started_at: datetime | None
     stopped_at: datetime | None
     created_at: datetime
@@ -209,6 +212,10 @@ class DeploymentService:
         self._poll_interval_seconds = max(poll_interval_seconds, 0.0)
         self._active_stops: set[uuid.UUID] = set()
         self._active_stops_lock = threading.Lock()
+
+    @property
+    def session_factory(self) -> Callable[[], Session] | None:
+        return self._session_factory
 
     async def deploy(
         self,
@@ -409,6 +416,20 @@ class DeploymentService:
             raise DeploymentConfigurationError(
                 "The deployment resource policy is invalid."
             ) from None
+        # Mock mode is a deliberately credential/network-free acceptance path.
+        # It may serve or emulate any runtime, but it must be given an immutable
+        # identity up front rather than consulting mutable Hub state.
+        from ctrl_pi.compute_stub import StubComputeTarget
+
+        if isinstance(self.target, StubComputeTarget):
+            if (
+                not isinstance(checkpoint_revision, str)
+                or re.fullmatch(r"[0-9a-fA-F]{40}", checkpoint_revision) is None
+            ):
+                raise DeploymentConfigurationError(
+                    "Mock inference requires an exact 40-character model SHA."
+                )
+            return model_repo, checkpoint_revision.casefold(), resources
         if runtime == "stub":
             return model_repo, checkpoint_revision, resources
 
@@ -453,7 +474,27 @@ class DeploymentService:
 
     def get(self, db: Session, deployment_id: uuid.UUID) -> DeploymentRecord:
         deployment, endpoint = self._load_pair(db, deployment_id, lock=False)
-        return self._record(deployment, endpoint)
+        return self._record(deployment, endpoint, arm_id=self._arm_id(db, deployment))
+
+    def list(self, db: Session) -> list[DeploymentRecord]:
+        try:
+            rows = db.execute(
+                select(Deployment, InferenceEndpoint, Robot.driver_id)
+                .join(
+                    InferenceEndpoint,
+                    InferenceEndpoint.id == Deployment.endpoint_id,
+                )
+                .outerjoin(Robot, Robot.id == Deployment.robot_id)
+                .order_by(Deployment.created_at.desc(), Deployment.id.desc())
+            ).all()
+        except SQLAlchemyError:
+            raise DeploymentStorageError(
+                "PostgreSQL could not list deployment lifecycle state."
+            ) from None
+        return [
+            self._record(deployment, endpoint, arm_id=arm_id)
+            for deployment, endpoint, arm_id in rows
+        ]
 
     async def stop(
         self, db: Session, deployment_id: uuid.UUID
@@ -479,7 +520,11 @@ class DeploymentService:
                 "The deployment belongs to a different compute target."
             )
         if deployment.status == "stopped":
-            return self._record(deployment, endpoint)
+            return self._record(
+                deployment,
+                endpoint,
+                arm_id=self._arm_id(db, deployment),
+            )
         if deployment.status not in {"running", "failed", "stopping"}:
             raise DeploymentConflictError(
                 "The deployment cannot be stopped from its current state."
@@ -950,6 +995,8 @@ class DeploymentService:
         self,
         deployment: Deployment,
         endpoint: InferenceEndpoint,
+        *,
+        arm_id: str | None,
     ) -> DeploymentRecord:
         if deployment.status != endpoint.status:
             raise DeploymentStorageError(
@@ -967,11 +1014,27 @@ class DeploymentService:
             compute_size=deployment.compute_size,
             endpoint_url=endpoint.endpoint_url,
             provider_app_id=endpoint.provider_app_id,
+            arm_id=arm_id,
+            record_session=deployment.record_session,
+            recording_id=deployment.recording_id,
             started_at=self._as_utc(deployment.started_at),
             stopped_at=self._as_utc(deployment.stopped_at),
             created_at=self._as_utc(deployment.created_at),
             updated_at=self._as_utc(deployment.updated_at),
         )
+
+    @staticmethod
+    def _arm_id(db: Session, deployment: Deployment) -> str | None:
+        if deployment.robot_id is None:
+            return None
+        try:
+            return db.scalar(
+                select(Robot.driver_id).where(Robot.id == deployment.robot_id)
+            )
+        except SQLAlchemyError:
+            raise DeploymentStorageError(
+                "PostgreSQL could not read the deployment robot identity."
+            ) from None
 
     @staticmethod
     def _as_utc(value: datetime | None) -> datetime | None:

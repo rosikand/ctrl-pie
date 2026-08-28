@@ -30,7 +30,13 @@ def test_missing_configuration_is_reported_without_exposing_secrets() -> None:
     assert status.mode == "mock"
     assert status.setup_complete is False
     assert {service.status for service in status.services} >= {"missing", "connected"}
-    assert set(payload) == {"mode", "setup_complete", "services"}
+    assert set(payload) == {"mode", "setup_complete", "services", "inference"}
+    assert payload["inference"] == {
+        "mock_mode": True,
+        "hf_configured": False,
+        "modal_configured": False,
+        "modal_proxy_configured": False,
+    }
     assert all(set(service) == {"id", "label", "status", "detail", "required"} for service in payload["services"])
 
 

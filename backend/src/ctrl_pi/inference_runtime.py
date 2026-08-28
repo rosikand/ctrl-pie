@@ -23,6 +23,8 @@ from pydantic import (
 )
 
 RuntimeKind = Literal["stub", "lerobot", "openpi"]
+MOCK_MODEL_REPO = "ctrl-pi/mock-policy"
+MOCK_MODEL_REVISION = "0" * 40
 RuntimeFeatureKind = Literal["state", "environment", "visual", "language", "action"]
 
 MAX_INPUT_FEATURES = 32

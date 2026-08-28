@@ -15,6 +15,7 @@ import { fetchSettingsStatus, type SettingsStatus } from "./lib/api";
 import { ArmsPage } from "./pages/ArmsPage";
 import { DatasetEpisodePage } from "./pages/DatasetEpisodePage";
 import { DatasetsPage } from "./pages/DatasetsPage";
+import { InferencePage } from "./pages/InferencePage";
 import { RecordPage } from "./pages/RecordPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TrainingPage } from "./pages/TrainingPage";
@@ -33,18 +34,6 @@ const primaryNavigation: NavigationItem[] = [
   { label: "Training", path: "/training", icon: BrainCircuit },
   { label: "Inference", path: "/inference", icon: RadioTower },
 ];
-
-const pageContent: Record<
-  string,
-  { eyebrow: string; title: string; description: string; icon: LucideIcon }
-> = {
-  inference: {
-    eyebrow: "Deployment",
-    title: "Inference",
-    description: "Deploy policies to Modal and execute action chunks on connected arms.",
-    icon: RadioTower,
-  },
-};
 
 function ShellNavLink({ item }: { item: NavigationItem }) {
   const Icon = item.icon;
@@ -121,8 +110,8 @@ function AppShell() {
             Settings
           </NavLink>
           <div className="mt-3 flex items-center gap-2 px-3 text-xs text-slate-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-            Mock mode
+            <span className={`h-1.5 w-1.5 rounded-full ${settingsStatus?.mode === "mock" ? "bg-blue-500" : settingsStatus ? "bg-emerald-500" : "bg-slate-300"}`} />
+            {settingsStatus ? `${settingsStatus.mode === "mock" ? "Mock" : "Hardware"} mode` : "Checking mode"}
           </div>
         </div>
       </aside>
@@ -164,9 +153,7 @@ function AppShell() {
           <Route path="/datasets" element={<DatasetsPage />} />
           <Route path="/datasets/:repoName" element={<DatasetEpisodePage />} />
           <Route path="/training" element={<TrainingPage />} />
-          {Object.entries(pageContent).map(([key, content]) => (
-            <Route key={key} path={`/${key}`} element={<PlaceholderPage {...content} />} />
-          ))}
+          <Route path="/inference" element={<InferencePage />} />
           <Route
             path="/settings"
             element={
@@ -181,48 +168,6 @@ function AppShell() {
           <Route path="*" element={<Navigate to="/arms" replace />} />
         </Routes>
       </main>
-    </div>
-  );
-}
-
-function PlaceholderPage({
-  eyebrow,
-  title,
-  description,
-  icon: Icon,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  icon: LucideIcon;
-}) {
-  return (
-    <div className="mx-auto max-w-7xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
-      <header className="flex items-start justify-between gap-6">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-600">{eyebrow}</p>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">{title}</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">{description}</p>
-        </div>
-        <div className="hidden items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-500 shadow-sm sm:flex">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-          Mock mode
-        </div>
-      </header>
-
-      <section className="mt-8 min-h-[360px] rounded-xl border border-slate-200 bg-white shadow-panel">
-        <div className="grid min-h-[360px] place-items-center px-6 text-center">
-          <div>
-            <div className="mx-auto grid h-11 w-11 place-items-center rounded-xl bg-slate-100 text-slate-500">
-              <Icon className="h-5 w-5" strokeWidth={1.7} />
-            </div>
-            <p className="mt-4 text-sm font-medium text-slate-800">Ready for setup</p>
-            <p className="mx-auto mt-1 max-w-sm text-sm leading-6 text-slate-400">
-              This workspace will appear here as its service is configured.
-            </p>
-          </div>
-        </div>
-      </section>
     </div>
   );
 }

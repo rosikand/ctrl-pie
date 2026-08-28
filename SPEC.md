@@ -360,3 +360,14 @@ open issues. Do not expand scope.
   lease, verifies both runtime responses against the persisted deployment
   identity, permits one in-flight request, and ages every queued action before
   writing to the arm.
+- 2026-08-28 — Provider deployment and robot motion are separate M11
+  lifecycle gates: deployment first verifies the exact runtime/model/SHA,
+  then an explicit start selects one connected follower and acquires the rig.
+  Optional inference recording is a passive `RecordingManager` path opened
+  under that same verified inference lease before the first action; it never
+  starts teleoperation or acquires a competing lease. Stop joins local arm
+  writes and finalizes the episode before verified provider teardown, while a
+  restart never resumes motion and instead tears down unattended compute.
+  Mock mode uses the immutable built-in identity
+  `ctrl-pi/mock-policy@0000000000000000000000000000000000000000`, so all
+  runtime selections remain deterministic and make no Hub or Modal calls.

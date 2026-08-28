@@ -184,6 +184,8 @@ class _RecordingRuntime:
     latest_action: ArmAction | None = None
     last_error: str | None = None
     rig_token: RigLeaseToken | None = None
+    inference_active: bool = False
+    inference_owner_id: str | None = None
 
 
 class RecordingManager:
@@ -230,7 +232,12 @@ class RecordingManager:
                     status=stable_status,
                 )
                 self._runtimes[recording_id] = runtime
-            elif runtime.episode is None and not self._task_active(runtime.teleop_task):
+            elif (
+                runtime.episode is None
+                and runtime.finalizing_episode is None
+                and not self._task_active(runtime.teleop_task)
+                and not runtime.inference_active
+            ):
                 runtime.leader_robot_id = leader_robot_id
                 runtime.follower_robot_id = follower_robot_id
                 runtime.episode_count = episode_count
@@ -284,6 +291,8 @@ class RecordingManager:
                 )
             if self._task_active(runtime.teleop_task):
                 raise RecordingConflictError("teleoperation is already active")
+            if runtime.inference_active:
+                raise RecordingConflictError("inference recording is already active")
             if any(
                 other.recording_id != recording_id and self._task_active(other.teleop_task)
                 for other in self._runtimes.values()
@@ -403,6 +412,174 @@ class RecordingManager:
             runtime.status = "recording"
             return self._snapshot(runtime)
 
+    async def start_inference_episode(
+        self,
+        recording_id: str,
+        follower_robot_id: str,
+        episode_count: int,
+        status: str,
+        fps: int,
+        metadata: dict[str, Any],
+        *,
+        inference_owner_id: str,
+    ) -> RecordingStateSnapshot:
+        """Start passive capture while a RobotInferenceLoop owns the rig.
+
+        This path never acquires or drives the rig. It verifies the existing
+        inference lease and records only actions already applied by the loop.
+        """
+
+        if not 1 <= fps <= 60:
+            raise RecordingConflictError("recording fps must be between 1 and 60")
+        runtime = await self.ensure_session(
+            recording_id,
+            follower_robot_id,
+            follower_robot_id,
+            episode_count,
+            status,
+        )
+        async with self._lock:
+            if self._shutting_down:
+                raise RecordingConflictError("recording service is shutting down")
+            if self._task_active(runtime.teleop_task):
+                raise RecordingConflictError("teleoperation is already active")
+            if runtime.inference_active or runtime.episode is not None:
+                raise RecordingConflictError("an episode is already recording")
+            if runtime.finalizing_episode is not None:
+                raise RecordingConflictError("the previous episode is still finalizing")
+            lease = self.rig_lease.current()
+            if (
+                lease is None
+                or lease.owner != "inference"
+                or lease.owner_id != inference_owner_id
+            ):
+                raise RecordingConflictError(
+                    "the inference session does not own the arm rig"
+                )
+            follower = self.driver.get_arm(follower_robot_id)
+            if not follower.connected or follower.role != "follower":
+                raise RecordingConflictError(
+                    "inference recording requires a connected follower arm"
+                )
+
+            episode = self._open_episode(runtime, fps, metadata)
+            try:
+                no_op = ArmAction.from_telemetry(follower)
+                runtime.latest_leader = follower
+                runtime.latest_follower = follower
+                runtime.latest_action = no_op
+            except Exception:
+                self._abort_episode(episode)
+                self._remove_failed_episode_files(episode)
+                raise
+            runtime.episode = episode
+            runtime.inference_active = True
+            runtime.inference_owner_id = inference_owner_id
+            runtime.status = "recording"
+            runtime.last_error = None
+            return self._snapshot(runtime)
+
+    async def capture_inference_action(
+        self,
+        recording_id: str,
+        observation: ArmTelemetry,
+        action: ArmAction,
+        applied: ArmTelemetry,
+    ) -> None:
+        """Record one applied policy action when the configured FPS is due."""
+
+        async with self._lock:
+            runtime = self._require_runtime(recording_id)
+            episode = runtime.episode
+            if not runtime.inference_active or episode is None:
+                raise RecordingRuntimeError("inference recording is not active")
+            lease = self.rig_lease.current()
+            if (
+                lease is None
+                or lease.owner != "inference"
+                or lease.owner_id != runtime.inference_owner_id
+            ):
+                raise RecordingRuntimeError("inference no longer owns the arm rig")
+            if observation.id != runtime.follower_robot_id or applied.id != observation.id:
+                raise RecordingRuntimeError("inference arm identity changed while recording")
+            runtime.latest_leader = observation
+            runtime.latest_action = action
+            runtime.latest_follower = applied
+            if time.monotonic() >= episode.next_sample_monotonic:
+                self._capture_sample(runtime, episode)
+
+    async def stop_inference_episode(
+        self,
+        recording_id: str,
+        success: bool,
+        notes: str | None,
+    ) -> tuple[RecordingStateSnapshot, EpisodeResult]:
+        async with self._lock:
+            runtime = self._require_runtime(recording_id)
+            episode = runtime.episode
+            if episode is None or not runtime.inference_active:
+                if runtime.finalizing_episode is not None:
+                    raise RecordingConflictError("the episode is already finalizing")
+                raise RecordingConflictError("no inference episode is recording")
+            runtime.episode = None
+            runtime.inference_active = False
+            runtime.inference_owner_id = None
+            runtime.finalizing_episode = episode
+            # The public recording lifecycle has no transient `finalizing`
+            # literal; the inference-session snapshot reports that finer
+            # process-local phase while Recording remains `recording`.
+            runtime.status = "recording"
+            finalize_task = asyncio.create_task(
+                asyncio.to_thread(self._finalize_episode, episode, success, notes),
+                name=f"ctrl-pi-inference-finalize-{recording_id}-{episode.index}",
+            )
+            runtime.finalize_task = finalize_task
+
+        try:
+            result = await self._settle_task(finalize_task)
+        except Exception as error:
+            await asyncio.to_thread(self._abort_episode, episode)
+            self._remove_failed_episode_files(episode)
+            async with self._lock:
+                runtime.status = "failed"
+                runtime.last_error = str(error)
+                if runtime.finalize_task is finalize_task:
+                    runtime.finalize_task = None
+                    runtime.finalizing_episode = None
+            raise
+
+        async with self._lock:
+            if runtime.finalize_task is finalize_task:
+                runtime.finalize_task = None
+            runtime.status = "ready"
+            runtime.last_error = None
+            snapshot = self._snapshot(runtime)
+            return (
+                RecordingStateSnapshot(
+                    **{
+                        **snapshot.__dict__,
+                        "episode_active": False,
+                        "current_episode_index": None,
+                        "episode_duration_seconds": 0.0,
+                        "episode_count": runtime.episode_count + 1,
+                    }
+                ),
+                result,
+            )
+
+    async def abort_inference_episode(self, recording_id: str) -> None:
+        async with self._lock:
+            runtime = self._require_runtime(recording_id)
+            episode = runtime.episode
+            runtime.episode = None
+            runtime.inference_active = False
+            runtime.inference_owner_id = None
+            runtime.status = "failed"
+            runtime.last_error = "the inference recording stopped before finalization"
+        if episode is not None:
+            await asyncio.to_thread(self._abort_episode, episode)
+            self._remove_failed_episode_files(episode)
+
     async def stop_episode(
         self,
         recording_id: str,
@@ -521,6 +698,8 @@ class RecordingManager:
             for runtime in self._runtimes.values():
                 runtime.teleop_task = None
                 runtime.episode = None
+                runtime.inference_active = False
+                runtime.inference_owner_id = None
             rig_tokens = [
                 runtime.rig_token
                 for runtime in self._runtimes.values()
@@ -681,6 +860,50 @@ class RecordingManager:
         while (self.staging_dir / runtime.recording_id / f"episode_{index:06d}").exists():
             index += 1
         return index
+
+    def _open_episode(
+        self,
+        runtime: _RecordingRuntime,
+        fps: int,
+        metadata: dict[str, Any],
+    ) -> _ActiveEpisode:
+        episode_index = self._available_episode_index(runtime)
+        episode_dir = (
+            self.staging_dir / runtime.recording_id / f"episode_{episode_index:06d}"
+        )
+        episode_dir.mkdir(parents=True, exist_ok=False)
+        partial_video = episode_dir / "video.partial.mp4"
+        partial_samples = episode_dir / "samples.partial.jsonl"
+        samples_file = partial_samples.open("x", encoding="utf-8")
+        try:
+            writer = FFmpegVideoWriter(
+                partial_video,
+                width=self.camera.width,
+                height=self.camera.height,
+                fps=fps,
+            )
+        except Exception:
+            samples_file.close()
+            partial_samples.unlink(missing_ok=True)
+            try:
+                episode_dir.rmdir()
+            except OSError:
+                pass
+            raise
+        now = time.monotonic()
+        return _ActiveEpisode(
+            index=episode_index,
+            directory=episode_dir,
+            fps=fps,
+            metadata=metadata,
+            started_at=datetime.now(UTC),
+            started_monotonic=now,
+            writer=writer,
+            samples_file=samples_file,
+            partial_video_path=partial_video,
+            partial_samples_path=partial_samples,
+            next_sample_monotonic=now,
+        )
 
     @staticmethod
     def _task_active(task: asyncio.Task[None] | None) -> bool:

@@ -25,10 +25,18 @@ class ServiceStatus(BaseModel):
     required: bool = True
 
 
+class InferenceReadiness(BaseModel):
+    mock_mode: bool
+    hf_configured: bool
+    modal_configured: bool
+    modal_proxy_configured: bool
+
+
 class SettingsStatus(BaseModel):
     mode: Literal["mock", "hardware"]
     setup_complete: bool
     services: list[ServiceStatus]
+    inference: InferenceReadiness
 
 
 class PublicSettings(BaseModel):
@@ -165,10 +173,45 @@ def get_connection_status(config: AppConfig | None = None) -> SettingsStatus:
         ),
     ]
     ready = {"connected", "configured"}
+    hf_configured = bool(
+        (config.hf_namespace or "").strip()
+        and config.hf_token is not None
+        and config.hf_token.get_secret_value().strip()
+    )
+    modal_configured = bool(
+        (
+            config.modal_token_id is not None
+            and config.modal_token_id.get_secret_value().strip()
+            and config.modal_token_secret is not None
+            and config.modal_token_secret.get_secret_value().strip()
+        )
+        or (Path.home() / ".modal.toml").exists()
+    )
+    proxy_id = (
+        ""
+        if config.modal_proxy_token_id is None
+        else config.modal_proxy_token_id.get_secret_value().strip()
+    )
+    proxy_secret = (
+        ""
+        if config.modal_proxy_token_secret is None
+        else config.modal_proxy_token_secret.get_secret_value().strip()
+    )
     return SettingsStatus(
         mode="mock" if config.mock_mode else "hardware",
         setup_complete=all(item.status in ready for item in services if item.required),
         services=services,
+        inference=InferenceReadiness(
+            mock_mode=config.mock_mode,
+            hf_configured=hf_configured,
+            modal_configured=modal_configured,
+            modal_proxy_configured=(
+                proxy_id.startswith("wk-")
+                and len(proxy_id) > 3
+                and proxy_secret.startswith("ws-")
+                and len(proxy_secret) > 3
+            ),
+        ),
     )
 
 
