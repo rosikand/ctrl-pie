@@ -1,13 +1,13 @@
 export type ArmRole = "leader" | "follower";
 
-export type CanState = "active" | "warning" | "error" | "offline" | string;
+export type CanState = "active" | "warning" | "bus_off" | "disconnected";
 
 export type JointTelemetry = {
   name: string;
   position_radians: number;
   velocity_radians_per_second: number;
-  effort_newton_meters: number;
-  temperature_celsius: number;
+  effort_newton_meters: number | null;
+  temperature_celsius: number | null;
 };
 
 export type EndEffectorPose = {
@@ -22,7 +22,7 @@ export type EndEffectorPose = {
 export type GripperTelemetry = {
   position: number;
   velocity: number;
-  force_newtons: number;
+  force_newtons: number | null;
   is_closed: boolean;
 };
 
@@ -30,8 +30,8 @@ export type CanTelemetry = {
   interface: string;
   state: CanState;
   bitrate: number;
-  tx_error_count: number;
-  rx_error_count: number;
+  tx_error_count: number | null;
+  rx_error_count: number | null;
 };
 
 export type ControlLoopTelemetry = {

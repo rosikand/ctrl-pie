@@ -20,8 +20,8 @@ ephemeral. There is no hosted ctrl-π service.
 
 - **Arms** — watch connection and CAN health, joints, end-effector pose,
   gripper state, and loop diagnostics; issue bounded manual jog commands.
-- **Record / Teleop** — pair leader and follower arms, watch the mock or real
-  camera boundary, teleoperate, record episodes, and publish LeRobot v3
+- **Record / Teleop** — pair leader and follower arms, watch the V1 synthetic
+  camera feed, teleoperate, record episodes, and publish LeRobot v3
   datasets to your Hugging Face namespace.
 - **Datasets** — discover namespace-scoped LeRobot repositories and inspect
   cards, revisions, episodes, synchronized state/action values, and proxied
@@ -114,10 +114,15 @@ The boundaries are deliberately explicit:
   `Modal: H100`.
 - OpenPI can be selected for deterministic mock emulation, but a real OpenPI
   runtime is unavailable in V1 and fails clearly before provider deployment.
-- The application currently selects `MockYAMDriver`. Real YAM driver
-  selection, protocol configuration, and hardware validation are the
-  Milestone 14 integration point; setting `CTRL_PI_MOCK_MODE=false` does not
-  silently enable hardware.
+- `CTRL_PI_MOCK_MODE=false` selects the fail-closed real YAM adapter for a
+  standard SocketCAN follower with a crank 4310 gripper and a calibrated
+  GELLO serial leader. Missing configuration or hardware remains visibly
+  disconnected and never falls back to `MockYAMDriver`.
+- The real adapter is covered with fake-vendor mapping, lifecycle, fault, and
+  concurrency tests, but this cloud workspace has no physical YAM rig. Motor
+  directions/offsets, wrist mapping, gravity compensation, bus permissions,
+  limits, emergency stop, and disconnect recovery must still be validated on
+  the target Ubuntu/YAM box before motion.
 - Training stays on compute you operate through LeRobot, OpenPI, or custom
   scripts. The Trainer API records progress and artifacts only.
 

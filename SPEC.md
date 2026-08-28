@@ -377,3 +377,14 @@ open issues. Do not expand scope.
   external user-owned services. The Ubuntu host configures SocketCAN; Docker
   receives only explicitly selected USB devices or an explicit host-network
   opt-in, never privileged access.
+- 2026-08-28 — Hardware mode selects a fail-closed real driver for the
+  standard SocketCAN YAM follower, GELLO serial leader, and `crank_4310`
+  gripper using the exact compatible `0.1.1` YAM plugin releases. The pinned
+  linear-gripper path is incompatible with LeRobot 0.4.4, so V1 rejects it
+  before device access. ctrl-π keeps its normalized gripper contract
+  (`0=closed`, `1=open`) by inverting the crank plugin's vendor boundary,
+  maps every rotary joint explicitly by name, and derives pose from the
+  configured MuJoCo model. Cloud tests cover the adapter with fake vendor
+  devices; physical safety, directions, offsets, units, model fidelity, bus
+  behavior, and emergency-stop operation remain mandatory validations on the
+  target Ubuntu/YAM box.

@@ -44,6 +44,28 @@ function signed(value: number, digits = 2): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
 }
 
+function optionalSigned(
+  value: number | null,
+  digits: number,
+  suffix: string,
+): string {
+  return value === null ? "—" : `${signed(value, digits)}${suffix}`;
+}
+
+function optionalFixed(
+  value: number | null,
+  digits: number,
+  suffix: string,
+): string {
+  return value === null ? "—" : `${value.toFixed(digits)}${suffix}`;
+}
+
+function busRate(bitrate: number): string {
+  return bitrate >= 1_000_000
+    ? `${(bitrate / 1_000_000).toFixed(0)} Mbps`
+    : `${(bitrate / 1_000).toFixed(1)} kbps`;
+}
+
 function telemetryTime(timestamp: string): string {
   const parsed = new Date(timestamp);
   return Number.isNaN(parsed.valueOf())
@@ -125,7 +147,7 @@ function ArmSelector({
 }
 
 function StatusStrip({ arm }: { arm: ArmTelemetry }) {
-  const canHealthy = arm.can.state === "active";
+  const busHealthy = arm.can.state === "active";
   const items = [
     {
       label: "Connection",
@@ -135,10 +157,10 @@ function StatusStrip({ arm }: { arm: ArmTelemetry }) {
       icon: Wifi,
     },
     {
-      label: "CAN bus",
+      label: "Device bus",
       value: arm.can.state,
-      detail: `${arm.can.interface} · ${(arm.can.bitrate / 1_000_000).toFixed(0)} Mbps`,
-      ready: canHealthy,
+      detail: `${arm.can.interface} · ${busRate(arm.can.bitrate)}`,
+      ready: busHealthy,
       icon: Network,
     },
     {
@@ -230,13 +252,12 @@ function JointState({ arm }: { arm: ArmTelemetry }) {
                   <span className="ml-1 text-[10px] text-slate-400">rad/s</span>
                 </td>
                 <td className="px-4 py-3">
-                  {signed(joint.effort_newton_meters)}
-                  <span className="ml-1 text-[10px] text-slate-400">Nm</span>
+                  {optionalSigned(joint.effort_newton_meters, 2, " Nm")}
                 </td>
                 <td className="px-4 py-3 text-right sm:pr-6">
                   <span className="inline-flex items-center gap-1">
                     <Thermometer className="h-3 w-3 text-slate-300" />
-                    {joint.temperature_celsius.toFixed(1)}°C
+                    {optionalFixed(joint.temperature_celsius, 1, "°C")}
                   </span>
                 </td>
               </tr>
@@ -306,7 +327,7 @@ function GripperCard({ arm }: { arm: ArmTelemetry }) {
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Force</p>
           <p className="mt-1 font-mono text-xs font-semibold text-slate-700">
-            {arm.gripper.force_newtons.toFixed(2)} N
+            {optionalFixed(arm.gripper.force_newtons, 2, " N")}
           </p>
         </div>
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
@@ -324,7 +345,10 @@ function Diagnostics({ arm }: { arm: ArmTelemetry }) {
   const loop = arm.control_loop;
   const targetDelta = Math.abs(loop.frequency_hz - loop.target_frequency_hz);
   const onTarget = targetDelta <= loop.target_frequency_hz * 0.05;
-  const errors = arm.can.tx_error_count + arm.can.rx_error_count;
+  const txErrors = arm.can.tx_error_count;
+  const rxErrors = arm.can.rx_error_count;
+  const errors =
+    txErrors === null || rxErrors === null ? null : txErrors + rxErrors;
   const stats = [
     {
       label: "Loop frequency",
@@ -348,11 +372,13 @@ function Diagnostics({ arm }: { arm: ArmTelemetry }) {
       healthy: loop.dropped_cycles === 0,
     },
     {
-      label: "CAN errors",
-      value: errors.toLocaleString(),
-      detail: `${arm.can.tx_error_count} TX · ${arm.can.rx_error_count} RX`,
+      label: "Bus errors",
+      value: errors === null ? "—" : errors.toLocaleString(),
+      detail: errors !== null
+        ? `${txErrors} TX · ${rxErrors} RX`
+        : "Counters unavailable from driver",
       icon: Zap,
-      healthy: errors === 0,
+      healthy: errors === null ? null : errors === 0,
     },
   ];
 
@@ -360,7 +386,7 @@ function Diagnostics({ arm }: { arm: ArmTelemetry }) {
     <section className="rounded-xl border border-slate-200 bg-white shadow-panel">
       <div className="border-b border-slate-100 px-5 py-4 sm:px-6">
         <h2 className="text-sm font-semibold text-slate-900">Loop diagnostics</h2>
-        <p className="mt-1 text-xs text-slate-400">Driver timing and CAN health</p>
+        <p className="mt-1 text-xs text-slate-400">Driver timing and bus health</p>
       </div>
       <div className="grid divide-y divide-slate-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4">
         {stats.map((stat) => {
@@ -369,7 +395,14 @@ function Diagnostics({ arm }: { arm: ArmTelemetry }) {
             <div key={stat.label} className="px-5 py-4 sm:px-6">
               <div className="flex items-center justify-between">
                 <Icon className="h-4 w-4 text-slate-400" strokeWidth={1.8} />
-                {stat.healthy ? (
+                {stat.healthy === null ? (
+                  <span
+                    aria-label="Unavailable"
+                    className="font-mono text-xs text-slate-300"
+                  >
+                    —
+                  </span>
+                ) : stat.healthy ? (
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
                 ) : (
                   <AlertCircle className="h-3.5 w-3.5 text-amber-500" />

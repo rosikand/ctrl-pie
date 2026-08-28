@@ -29,6 +29,12 @@ class AppConfig(BaseSettings):
     modal_proxy_token_id: SecretStr | None = None
     modal_proxy_token_secret: SecretStr | None = None
     ctrl_pi_mock_mode: bool = True
+    yam_can_interface: str | None = None
+    yam_leader_port: str | None = None
+    yam_mujoco_xml_path: str | None = None
+    yam_gripper_type: str = "crank_4310"
+    yam_leader_calibration_id: str = "yam-leader"
+    yam_leader_calibration_dir: str | None = None
     frontend_dist_dir: Path | None = None
     recording_staging_dir: Path = Path(".ctrl-pi/recordings")
     recording_fps: int = Field(default=20, ge=1, le=60)

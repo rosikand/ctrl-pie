@@ -26,29 +26,29 @@ class JointTelemetry(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
-    position_radians: float
-    velocity_radians_per_second: float
-    effort_newton_meters: float
-    temperature_celsius: float
+    position_radians: float = Field(allow_inf_nan=False)
+    velocity_radians_per_second: float = Field(allow_inf_nan=False)
+    effort_newton_meters: float | None = Field(default=None, allow_inf_nan=False)
+    temperature_celsius: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class EndEffectorPose(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    x_m: float
-    y_m: float
-    z_m: float
-    roll_radians: float
-    pitch_radians: float
-    yaw_radians: float
+    x_m: float = Field(allow_inf_nan=False)
+    y_m: float = Field(allow_inf_nan=False)
+    z_m: float = Field(allow_inf_nan=False)
+    roll_radians: float = Field(allow_inf_nan=False)
+    pitch_radians: float = Field(allow_inf_nan=False)
+    yaw_radians: float = Field(allow_inf_nan=False)
 
 
 class GripperTelemetry(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    position: float = Field(ge=0.0, le=1.0)
-    velocity: float
-    force_newtons: float = Field(ge=0.0)
+    position: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    velocity: float = Field(allow_inf_nan=False)
+    force_newtons: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
     is_closed: bool
 
 
@@ -58,17 +58,17 @@ class CANTelemetry(BaseModel):
     interface: str
     state: Literal["active", "warning", "bus_off", "disconnected"]
     bitrate: int = Field(gt=0)
-    tx_error_count: int = Field(ge=0)
-    rx_error_count: int = Field(ge=0)
+    tx_error_count: int | None = Field(default=None, ge=0)
+    rx_error_count: int | None = Field(default=None, ge=0)
 
 
 class ControlLoopTelemetry(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    target_frequency_hz: float = Field(gt=0.0)
-    frequency_hz: float = Field(ge=0.0)
-    cycle_time_ms: float = Field(ge=0.0)
-    jitter_ms: float = Field(ge=0.0)
+    target_frequency_hz: float = Field(gt=0.0, allow_inf_nan=False)
+    frequency_hz: float = Field(ge=0.0, allow_inf_nan=False)
+    cycle_time_ms: float = Field(ge=0.0, allow_inf_nan=False)
+    jitter_ms: float = Field(ge=0.0, allow_inf_nan=False)
     dropped_cycles: int = Field(ge=0)
 
 
@@ -172,8 +172,45 @@ class ActionLimitError(ValueError):
     pass
 
 
+class YAMDriverUnavailableError(RuntimeError):
+    """A sanitized, operator-actionable hardware availability failure."""
+
+
+class YAMDriverDiagnostic(BaseModel):
+    """Public driver health without device paths or vendor exception payloads."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["connected", "configured", "missing", "error"]
+    detail: str = Field(min_length=1, max_length=240)
+
+
 class YAMDriver(ABC):
     """Hardware boundary used by APIs, teleoperation, and inference loops."""
+
+    def startup(self) -> None:
+        """Open driver resources.
+
+        Mock and test implementations need no resources, so lifecycle hooks are
+        deliberately safe no-ops by default.
+        """
+
+    def shutdown(self) -> None:
+        """Stop command writers and close resources; repeated calls are safe."""
+
+    def diagnostic(self) -> YAMDriverDiagnostic:
+        """Return a sanitized readiness summary from in-memory state only."""
+
+        arms = self.list_arms()
+        if arms and all(arm.connected for arm in arms):
+            return YAMDriverDiagnostic(
+                status="connected",
+                detail=f"{self.__class__.__name__} is ready.",
+            )
+        return YAMDriverDiagnostic(
+            status="missing",
+            detail=f"{self.__class__.__name__} is not connected.",
+        )
 
     @abstractmethod
     def list_arms(self) -> list[ArmTelemetry]:

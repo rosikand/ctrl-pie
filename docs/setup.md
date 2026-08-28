@@ -33,7 +33,13 @@ variable with a backend secret.
 | `MODAL_TOKEN_SECRET` | Real Modal lifecycle, unless a local Modal profile is mounted | Modal API credential secret. |
 | `MODAL_PROXY_TOKEN_ID` | Real LeRobot endpoint traffic | Distinct Modal Proxy Token ID beginning `wk-`. |
 | `MODAL_PROXY_TOKEN_SECRET` | Real LeRobot endpoint traffic | Distinct Modal Proxy Token secret beginning `ws-`. |
-| `CTRL_PI_MOCK_MODE` | No; defaults to `true` | Selects deterministic Stub compute when true and real Modal compute when false. It does not currently select a real YAM driver. |
+| `CTRL_PI_MOCK_MODE` | No; defaults to `true` | Selects mock arms plus Stub compute when true, and the real YAM driver plus Modal compute when false. Hardware mode never falls back to the mock driver. |
+| `YAM_CAN_INTERFACE` | Hardware mode | Exact SocketCAN interface for the follower, for example `can0`. |
+| `YAM_LEADER_PORT` | Hardware mode | Exact GELLO leader serial device; prefer a stable `/dev/serial/by-id/...` path. |
+| `YAM_MUJOCO_XML_PATH` | Hardware mode | Explicit YAM MuJoCo XML used for follower gravity compensation; ctrl-π never guesses a developer checkout path. |
+| `YAM_GRIPPER_TYPE` | Hardware mode | Must be `crank_4310` in V1. The pinned plugin's linear-gripper calibration path is not usable with LeRobot 0.4.4, so linear values fail before device access. |
+| `YAM_LEADER_CALIBRATION_ID` | Hardware mode | Stable LeRobot calibration ID; defaults to `yam-leader`. |
+| `YAM_LEADER_CALIBRATION_DIR` | Hardware mode | Directory containing `<YAM_LEADER_CALIBRATION_ID>.json`; startup is noninteractive and will not create it. |
 | `RECORDING_STAGING_DIR` | No | Local MP4/JSONL workspace; defaults to `.ctrl-pi/recordings`. |
 | `RECORDING_FPS` | No | Initial/fallback recording rate, 1–60; defaults to 20. The PostgreSQL-backed Settings value takes precedence after it is saved. |
 | `FRONTEND_DIST_DIR` | Production static serving only | Built Vite directory containing `index.html`; unset in source development. Docker sets `/app/frontend/dist`. |
@@ -155,7 +161,7 @@ verify zero provider tasks. If ordinary teardown is interrupted, follow
 [Modal operator cleanup](modal-operations.md). Real GPU work costs money;
 always stop a test deployment and verify teardown before leaving it.
 
-## Mock mode and hardware status
+## Mock mode and real YAM configuration
 
 With `CTRL_PI_MOCK_MODE=true`, the backend supplies two process-local arms,
 `yam-leader` and `yam-follower`, a synthetic camera, and credential-free Stub
@@ -163,12 +169,54 @@ compute/runtime behavior. Recording still uses real FFmpeg, writes a real MP4,
 and converts through LeRobot. Hub operations remain real unless a test or the
 offline smoke command explicitly injects the filesystem fake.
 
-At the current milestone, the application still constructs `MockYAMDriver`
-when started normally. Setting `CTRL_PI_MOCK_MODE=false` selects real external
-compute behavior but does not silently enable unfinished hardware access. The
-driver contract and integration boundary are documented in
-[YAM driver interface](yam-driver.md); container device visibility is covered
-by [Docker deployment](docker-deployment.md).
+With `CTRL_PI_MOCK_MODE=false`, ctrl-π constructs the real driver backed by the
+pinned `lerobot-robot-yam==0.1.1`,
+`lerobot-teleoperator-yam-gello==0.1.1`, and `yam-common==0.1.1` packages. The
+follower uses SocketCAN and the leader uses a calibrated Dynamixel serial bus.
+Configure every `YAM_*` value above before connecting hardware. The leader
+calibration file must already exist; backend startup never opens an interactive
+calibration prompt.
+
+The process remains available when hardware configuration, a plugin import, or
+a device connection fails. In that state `/api/arms` returns the two stable arm
+IDs as disconnected and Settings reports a sanitized, actionable reason.
+Motion calls fail before vendor mutation, and hardware mode never substitutes a
+`MockYAMDriver`. Correct the configuration or device problem and restart the
+single backend process.
+
+Only the real follower accepts commands. Joint and gripper jogs are checked
+against both ctrl-π step bounds and the pinned YAM joint limits; Cartesian jog
+is explicitly unsupported. Before the first position command the adapter exits
+zero-torque mode into the plugin's position-control mode. A command failure
+latches the driver unavailable and attempts zero torque rather than silently
+continuing.
+
+Validate package versions, configuration, model assets, calibration, and
+device/interface visibility without opening either bus:
+
+```bash
+make yam-probe
+```
+
+Only after that preflight passes, secure the arm, clear the workspace, have an
+operator at the emergency stop, and opt into a connected sample:
+
+```bash
+PYTHONPATH=backend/src \
+  .venv/bin/python -m ctrl_pi.yam_probe --connect
+```
+
+The connected probe never jogs or sends an application action, but it is not
+electrically read-only: the leader plugin configures its serial bus and the
+follower plugin starts its gravity-compensation/control thread. It prints only
+safe IDs, roles, connection state, and bus state, then always attempts the
+bounded shutdown path, including follower safe mode and both device closes.
+A stuck vendor I/O call can prevent cleanup and requires operator intervention.
+This repository has
+no YAM hardware attached in CI, so fake-vendor tests do not replace the
+Ubuntu-box validation checklist in [YAM driver interface](yam-driver.md).
+Container device visibility is covered by
+[Docker deployment](docker-deployment.md).
 
 ## Network exposure
 

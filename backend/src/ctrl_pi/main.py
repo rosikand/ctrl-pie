@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from ctrl_pi.deployments import (
     HFModelRevisionResolver,
     ModelRevisionResolver,
 )
-from ctrl_pi.drivers.mock_yam import MockYAMDriver
+from ctrl_pi.drivers.real_yam import create_yam_driver
 from ctrl_pi.drivers.yam import YAMDriver
 from ctrl_pi.hf import HFDatasetUploader
 from ctrl_pi.hf_datasets import HFDatasetBrowser
@@ -56,7 +57,7 @@ def create_app(
     frontend_dist_dir: Path | None = None,
 ) -> FastAPI:
     config = get_config()
-    driver = yam_driver or MockYAMDriver()
+    driver = yam_driver if yam_driver is not None else create_yam_driver(config)
     camera = mock_camera or MockCamera()
     if recording_manager is None:
         rig_lease = RigLease()
@@ -141,8 +142,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        await application.state.recording_manager.startup()
+        driver_started = False
+        recording_started = False
         try:
+            driver_started = True
+            await asyncio.to_thread(application.state.yam_driver.startup)
+            await application.state.recording_manager.startup()
+            recording_started = True
             await application.state.deployment_service.reconcile_startup()
             await application.state.inference_session_manager.startup()
             yield
@@ -150,7 +156,12 @@ def create_app(
             try:
                 await application.state.inference_session_manager.shutdown()
             finally:
-                await application.state.recording_manager.shutdown()
+                try:
+                    if recording_started:
+                        await application.state.recording_manager.shutdown()
+                finally:
+                    if driver_started:
+                        await asyncio.to_thread(application.state.yam_driver.shutdown)
 
     application = FastAPI(
         title="ctrl-π API",
@@ -193,7 +204,7 @@ def create_app(
 
     @application.get("/api/health", tags=["system"])
     def health() -> dict[str, str]:
-        return {"status": "ok", "mode": "mock"}
+        return {"status": "ok", "mode": "mock" if config.mock_mode else "hardware"}
 
     install_spa(
         application,

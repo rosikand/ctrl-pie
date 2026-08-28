@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ctrl_pi.config import AppConfig, get_config
 from ctrl_pi.db import engine_for_url, get_db
+from ctrl_pi.drivers.yam import YAMDriver
 from ctrl_pi.models import AppSetting
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -155,22 +156,52 @@ def modal_status(config: AppConfig) -> ServiceStatus:
     )
 
 
-def get_connection_status(config: AppConfig | None = None) -> SettingsStatus:
+def get_connection_status(
+    config: AppConfig | None = None,
+    driver: YAMDriver | None = None,
+) -> SettingsStatus:
     config = config or get_config()
+    if driver is None:
+        arms_status = ServiceStatus(
+            id="arms",
+            label="YAM arms",
+            status="connected" if config.mock_mode else "missing",
+            detail=(
+                "MockYAMDriver is ready."
+                if config.mock_mode
+                else "YAM hardware driver is unavailable."
+            ),
+        )
+    else:
+        try:
+            diagnostic = driver.diagnostic()
+            arms = driver.list_arms()
+            all_connected = bool(arms) and all(arm.connected for arm in arms)
+            status = (
+                "connected"
+                if diagnostic.status == "connected" and all_connected
+                else diagnostic.status
+            )
+            if status == "connected" and not all_connected:
+                status = "error"
+            arms_status = ServiceStatus(
+                id="arms",
+                label="YAM arms",
+                status=status,
+                detail=diagnostic.detail,
+            )
+        except Exception:
+            arms_status = ServiceStatus(
+                id="arms",
+                label="YAM arms",
+                status="error",
+                detail="YAM driver status is unavailable.",
+            )
     services = [
         postgres_status(config),
         huggingface_status(config),
         modal_status(config),
-        ServiceStatus(
-            id="arms",
-            label="YAM arms",
-            status="connected" if config.mock_mode else "configured",
-            detail=(
-                "MockYAMDriver is ready."
-                if config.mock_mode
-                else "Hardware mode selected; live driver validation is pending."
-            ),
-        ),
+        arms_status,
     ]
     ready = {"connected", "configured"}
     hf_configured = bool(
@@ -227,8 +258,11 @@ def read_public_settings(db: Session, config: AppConfig) -> PublicSettings:
 
 
 @router.get("/status", response_model=SettingsStatus)
-def settings_status() -> SettingsStatus:
-    return get_connection_status()
+def settings_status(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SettingsStatus:
+    return get_connection_status(config, request.app.state.yam_driver)
 
 
 @router.get("", response_model=PublicSettings)

@@ -12,6 +12,7 @@ from ctrl_pi.api.settings import (
 )
 from ctrl_pi.config import AppConfig
 from ctrl_pi.db import Base
+from ctrl_pi.drivers.real_yam import RealYAMDriver
 
 
 def test_missing_configuration_is_reported_without_exposing_secrets() -> None:
@@ -54,6 +55,24 @@ def test_environment_secrets_are_redacted() -> None:
     assert "hf_private" not in representation
     assert "secret_private" not in representation
     assert "**********" in representation
+
+
+def test_hardware_arm_status_uses_sanitized_driver_diagnostic() -> None:
+    config = AppConfig(
+        _env_file=None,
+        ctrl_pi_mock_mode=False,
+        yam_leader_port="/dev/serial/by-id/operator-selected",
+    )
+    driver = RealYAMDriver.from_app_config(config)
+
+    status = get_connection_status(config, driver)
+    arms = next(service for service in status.services if service.id == "arms")
+
+    assert status.mode == "hardware"
+    assert arms.status == "missing"
+    assert arms.detail == driver.diagnostic().detail
+    assert "/dev/serial" not in arms.detail
+    assert all(not arm.connected for arm in driver.list_arms())
 
 
 def test_non_secret_settings_round_trip() -> None:

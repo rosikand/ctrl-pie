@@ -102,94 +102,116 @@ docker compose down
 ```
 
 The one Uvicorn worker joins robot actions, finalizes or aborts FFmpeg safely,
-and verifies provider teardown during application shutdown. Do not scale the
-app service: live rig leases and session state are deliberately
+verifies provider teardown, stops the YAM sampling loop, and then asks the
+follower to enter its safe mode before closing both hardware connections. Do
+not scale the app service: live rig leases and session state are deliberately
 process-local. If Modal cleanup was interrupted, run:
 
 ```bash
 docker compose run --rm app python -m ctrl_pi.modal_panic
 ```
 
-## USB serial passthrough
+## Real YAM device and model passthrough
 
-Use stable `/dev/serial/by-id` names and pass only the required device. Do not
-mount all of `/dev` and do not use `privileged: true`.
-
-```bash
-export YAM_USB_DEVICE=/dev/serial/by-id/your-yam-adapter
-export YAM_USB_GID="$(stat -Lc '%g' "$YAM_USB_DEVICE")"
-```
-
-Create a local `docker-compose.usb.yml` override:
-
-```yaml
-services:
-  app:
-    devices:
-      - ${YAM_USB_DEVICE:?set YAM_USB_DEVICE}:/dev/yam:rw
-    group_add:
-      - ${YAM_USB_GID:?set YAM_USB_GID}
-```
-
-Then start with both files and verify the non-root process can reach it:
+The supported V1 hardware shape is one standard YAM follower with a crank 4310
+gripper on SocketCAN and one calibrated GELLO-style leader on a Dynamixel
+serial bus. Linear grippers and YAM Pro/Ultra variants are not claimed. Use a
+stable `/dev/serial/by-id` name for the leader and pass only that device. Do
+not mount all of `/dev`, add `NET_ADMIN`, or use `privileged: true`.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d --wait
-docker compose -f docker-compose.yml -f docker-compose.usb.yml \
-  exec app sh -c 'test -r /dev/yam && test -w /dev/yam'
-```
-
-Repeat the mapping with a distinct container path for each adapter when the
-leader and follower use separate USB devices. Restart the container after a
-USB disconnect/reconnect so Docker can map the current device node again.
-
-## SocketCAN passthrough
-
-A SocketCAN interface is a network interface, not a `/dev` node. Configure it
-on the Ubuntu host using the interface name and bitrate from the YAM hardware
-documentation; ctrl-pi does not guess either value:
-
-```bash
+export YAM_LEADER_DEVICE=/dev/serial/by-id/your-gello-leader
+export YAM_LEADER_GID="$(stat -Lc '%g' "$YAM_LEADER_DEVICE")"
 export YAM_CAN_INTERFACE=can0
-export YAM_CAN_BITRATE=REPLACE_WITH_HARDWARE_BITRATE
-sudo ip link set "$YAM_CAN_INTERFACE" down
-sudo ip link set "$YAM_CAN_INTERFACE" type can bitrate "$YAM_CAN_BITRATE"
-sudo ip link set "$YAM_CAN_INTERFACE" up
-ip -details -statistics link show "$YAM_CAN_INTERFACE"
+export YAM_CAN_BITRATE=1000000
+export YAM_MODEL_DIR=/absolute/path/to/yam-model-assets
+export YAM_MODEL_XML=yam_crank_4310_d405.xml
+export YAM_CALIBRATION_DIR=/absolute/path/to/leader-calibration
+export YAM_LEADER_CALIBRATION_ID=yam-leader
 ```
 
-To share that interface, create `docker-compose.socketcan.yml`:
+The model directory must contain the selected XML and every relative asset it
+includes. The calibration directory must already contain
+`yam-leader.json` (or the configured ID plus `.json`). Mount both read-only.
+Create a local `docker-compose.yam.yml` override:
 
 ```yaml
 services:
   app:
     network_mode: host
     ports: !reset []
+    devices:
+      - ${YAM_LEADER_DEVICE:?set YAM_LEADER_DEVICE}:/dev/yam-leader:rw
+    group_add:
+      - ${YAM_LEADER_GID:?set YAM_LEADER_GID}
+    cap_add:
+      - NET_RAW
+    volumes:
+      - ctrl-pi-data:/var/lib/ctrl-pi
+      - ${YAM_MODEL_DIR:?set YAM_MODEL_DIR}:/opt/ctrl-pi/yam-model:ro
+      - ${YAM_CALIBRATION_DIR:?set YAM_CALIBRATION_DIR}:/opt/ctrl-pi/yam-calibration:ro
     environment:
+      CTRL_PI_MOCK_MODE: "false"
       YAM_CAN_INTERFACE: ${YAM_CAN_INTERFACE:?set YAM_CAN_INTERFACE}
+      YAM_LEADER_PORT: /dev/yam-leader
+      YAM_MUJOCO_XML_PATH: /opt/ctrl-pi/yam-model/${YAM_MODEL_XML:?set YAM_MODEL_XML}
+      YAM_GRIPPER_TYPE: crank_4310
+      YAM_LEADER_CALIBRATION_ID: ${YAM_LEADER_CALIBRATION_ID:-yam-leader}
+      YAM_LEADER_CALIBRATION_DIR: /opt/ctrl-pi/yam-calibration
 ```
 
-Start with the override, then confirm interface visibility without granting
-the container `NET_ADMIN`:
+`NET_RAW` is the only capability added back after the base service drops all
+capabilities; it permits the container to open the existing CAN raw socket.
+The host retains `NET_ADMIN` and owns all interface configuration.
+
+Configure SocketCAN on the Ubuntu host before starting the container:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.socketcan.yml up -d --wait
-docker compose -f docker-compose.yml -f docker-compose.socketcan.yml \
-  exec app python -c \
-  'import os,socket; name=os.environ["YAM_CAN_INTERFACE"]; print(socket.if_nametoindex(name))'
+sudo ip link set "$YAM_CAN_INTERFACE" down
+sudo ip link set "$YAM_CAN_INTERFACE" type can bitrate "$YAM_CAN_BITRATE"
+sudo ip link set "$YAM_CAN_INTERFACE" up
+ip -details -statistics link show "$YAM_CAN_INTERFACE"
 ```
 
-Add `YAM_CAN_INTERFACE` to `.env` so the probe and, in Milestone 14, the real
-driver receive the same explicit name. In this mode ctrl-pi is available on
-host port 8000 rather than the mapped `CTRL_PI_PORT`. Host networking exposes
-that port directly through the host network namespace; firewall it carefully.
-The host owns CAN setup, so the container keeps all Linux capabilities
-dropped.
+Validate the merged Compose definition and the non-opening hardware preflight:
 
-## Milestone boundary
+```bash
+docker compose -f docker-compose.yml -f docker-compose.yam.yml config -q
+docker compose -f docker-compose.yml -f docker-compose.yam.yml \
+  run --rm --no-deps app python -m ctrl_pi.yam_probe
+```
 
-Milestone 12 proves isolated packaging and narrowly scoped device visibility.
-The current application still constructs `MockYAMDriver`; setting
-`CTRL_PI_MOCK_MODE=false` selects real external compute behavior but does not
-silently substitute an unfinished hardware driver. Real `YAMDriver` selection,
-protocol configuration, and hardware validation land in Milestone 14.
+The default probe validates configuration, pinned packages, model/calibration
+paths, serial visibility, and the named network interface without opening the
+leader or follower. A connected probe is an explicit physical operation:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.yam.yml \
+  run --rm --no-deps app python -m ctrl_pi.yam_probe --connect
+```
+
+Even with `calibrate=False`, the leader plugin configures its serial bus and
+the follower plugin starts a gravity-compensation/control thread. Run the
+connected probe only with an operator present, a clear workspace, the arm
+secured, and an independent emergency stop. It sends no jog or policy action
+and always attempts bounded driver shutdown in a `finally` path, but it is not
+electrically read-only. If vendor I/O does not return, make the rig safe and
+terminate the container rather than treating the probe as cleanly closed.
+
+After the connected probe succeeds, start the one service and verify its safe
+status payload:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.yam.yml up -d --wait
+curl --fail http://127.0.0.1:8000/api/health
+curl --fail http://127.0.0.1:8000/api/settings/status
+```
+
+Host networking makes ctrl-π available directly on host port 8000 rather than
+the mapped `CTRL_PI_PORT`; firewall it carefully. Restart the container after a
+serial disconnect so Docker maps the current device node. The cloud test suite
+uses fake vendor objects and cannot validate motor direction/offsets, the
+wrist-flex/wrist-roll mapping, gravity compensation, physical limits, bus-off
+behavior, non-root access on the target kernel, or emergency-stop behavior.
+Complete the operator checklist in [YAM driver interface](yam-driver.md) before
+allowing teleoperation or inference to move real hardware.

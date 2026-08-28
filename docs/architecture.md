@@ -17,7 +17,7 @@ FastAPI control plane ───────────────► PostgreSQ
   │       └──────────────────────────► Modal
   │                                    inference workloads only
   ▼
-YAMDriver + camera
+YAMDriver (mock or real standard-YAM adapter) + V1 MockCamera
   │
 CAN / USB / local mock rig
 ```
@@ -33,7 +33,7 @@ and [Docker deployment](docker-deployment.md) for the two launch paths.
 | --- | --- | --- |
 | React frontend | Five workflow tabs and Settings; renders typed API state only | `frontend/src/` |
 | FastAPI routers | Validate browser input, return sanitized errors, and serialize public state | `backend/src/ctrl_pi/api/` |
-| Hardware boundary | Typed arm snapshots, bounded jogs, and absolute actions | `drivers/yam.py`, `drivers/mock_yam.py` |
+| Hardware boundary | Typed cached arm snapshots, bounded jogs/actions, and fail-closed lifecycle | `drivers/yam.py`, `drivers/mock_yam.py`, `drivers/real_yam.py` |
 | Recording service | Teleop, camera capture, FFmpeg lifecycle, and synchronized samples | `recording.py`, `camera.py` |
 | Hub services | LeRobot conversion/upload and SHA-pinned dataset/model browsing | `hf.py`, `hf_datasets.py`, `hf_episodes.py`, `hf_models.py` |
 | Training tracker | PostgreSQL run metadata plus the synchronous reporting client | `api/trainer.py`, `trainer.py` |
@@ -99,10 +99,27 @@ stopped at the provider with zero running tasks.
 ### Arms and teleoperation
 
 `YAMDriver` returns typed point-in-time snapshots. `/ws/arms` publishes those
-snapshots without persistence. Manual jog, teleoperation, and inference all
-write through the same driver and compete for one process-local `RigLease`.
-The lease fails immediately on a conflict; it is not a distributed lock or a
-queue.
+snapshots without persistence. Mock mode selects the complete in-memory
+`MockYAMDriver`. Hardware mode selects the lazy real adapter for one standard
+YAM SocketCAN follower, one GELLO/Dynamixel leader, and the `crank_4310`
+gripper. It never substitutes the mock after a hardware failure.
+
+The real adapter owns vendor devices in one backend process and refreshes a
+cache on a 50 Hz target loop. Public telemetry reads copy that cache; they do
+not discover devices or send commands. Pose is model-derived MuJoCo forward
+kinematics. Leader effort is absent and temperatures may be absent, while
+gripper force and bus error counters are unavailable in the pinned plugin and
+cross the API as `null`. Driver-reported timing measures ctrl-π's sampling loop
+rather than motor firmware. A sample, vendor-worker, or command failure marks
+both arms disconnected and latches motion unavailable.
+
+The camera remains `MockCamera` in V1 even when real arms are selected, so
+recordings from hardware mode still contain the documented synthetic video.
+
+Manual jog, teleoperation, and inference all write through the same driver and
+compete for one process-local `RigLease`. The lease fails immediately on a
+conflict; it is not a distributed lock or a queue. The real adapter accepts
+only follower joint/gripper commands; Cartesian jog is unsupported.
 
 Teleop samples the leader, converts it to an absolute `ArmAction`, and applies
 that action to the follower. Recording adds camera capture and synchronized
@@ -145,12 +162,21 @@ operation. Details are in [Compute and inference](inference.md).
 
 ## Startup, recovery, and shutdown
 
-FastAPI lifespan startup performs three ordered operations:
+FastAPI lifespan startup performs these ordered operations:
 
-1. enable the recording manager;
-2. reconcile persisted deployment rows with the configured compute target;
-3. tear down any running provider resource that has no process-local robot
-   loop.
+1. start the selected driver off the asynchronous event loop;
+2. enable and reconcile the recording manager;
+3. reconcile persisted deployment rows with the configured compute target;
+4. start inference-session reconciliation and tear down any running provider
+   resource that has no process-local robot loop.
+
+Real-driver construction and imports are lazy. On hardware startup it validates
+the narrow standard-YAM/GELLO/crank configuration, connects with interactive
+calibration disabled, takes a first sample, and then starts cached sampling. A
+configuration, plugin, file, permission, or connection failure leaves the API
+running with stable disconnected arm identities and a sanitized Settings
+diagnostic. It never falls back to mock hardware and does not reconnect until
+the backend restarts.
 
 No loop is auto-resumed after a crash or restart. Interrupted upload statuses
 are reconciled to a safe retryable failure when no in-process uploader owns
@@ -159,9 +185,25 @@ their process-local task no longer exists.
 
 Shutdown first asks the inference session manager to stop arm writes and
 verify compute teardown. It then joins or aborts recording work, closes
-FFmpeg, and releases rig ownership. Compose supplies a 90-second grace period.
-If Modal cleanup remains uncertain, use the procedure in
-[Modal operator cleanup](modal-operations.md).
+FFmpeg, and releases rig ownership before driver shutdown rejects commands,
+stops sampling, asks the follower plugin for its safe mode, and closes both
+devices. That plugin call is not an electrical torque-free guarantee; physical
+emergency-stop and firmware safety remain independent requirements. Compose
+supplies a 90-second grace period. If Modal cleanup remains uncertain, use the
+procedure in [Modal operator cleanup](modal-operations.md).
+
+The default `make yam-probe` checks hardware-mode configuration, exact pinned
+package metadata, readable model/calibration files, leader serial permissions,
+and whether the named network interface exists. It does so without importing
+vendor modules, constructing their devices, or opening a bus. The explicit
+`python -m ctrl_pi.yam_probe --connect` path then opens both devices, obtains
+connected telemetry, emits a sanitized summary, and always attempts bounded
+driver shutdown. It does not issue an application jog/action but does start
+vendor bus/control behavior. The real adapter has been tested with fake vendor
+objects only in this cloud workspace.
+Joint mapping, calibration contents, CAN type/bitrate, physical limits, failure
+response, and container device access still require the Ubuntu/YAM procedure
+in [YAM driver interface](yam-driver.md).
 
 ## Trust and security boundary
 

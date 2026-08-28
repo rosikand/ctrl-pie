@@ -155,7 +155,9 @@ def test_milestone_13_reference_contracts_are_documented() -> None:
         "RigLease",
         "process-local",
         "50 Hz",
-        "Milestone 14",
+        "RealYAMDriver",
+        "crank_4310",
+        "yam_probe --connect",
     ):
         assert required in yam
 

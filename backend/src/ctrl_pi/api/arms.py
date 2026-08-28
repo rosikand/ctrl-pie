@@ -13,6 +13,7 @@ from ctrl_pi.drivers.yam import (
     JogLimitError,
     TelemetryFrame,
     YAMDriver,
+    YAMDriverUnavailableError,
 )
 from ctrl_pi.rig import RigLease, RigLeaseConflictError
 
@@ -57,6 +58,8 @@ def jog_arm(
         raise HTTPException(status_code=404, detail=f"Arm '{arm_id}' was not found.") from error
     except JogLimitError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except YAMDriverUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.websocket("/ws/arms")
