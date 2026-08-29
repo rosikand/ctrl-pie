@@ -41,6 +41,13 @@ The complete UI and orchestration flow works in mock mode with
 development and safe workflow checks; it does not pretend that cloud or
 hardware work occurred.
 
+Settings includes a first-time YAM flow for one leader/follower pair: passive
+device discovery, configuration and calibration-file preflight, PostgreSQL
+persistence, explicit connection, and opt-in boot/hot-plug restoration. Both
+immediate and automatic hardware connection have explicit safety gates because
+the pinned follower controller may engage; neither readiness nor fake-vendor
+tests claim that a physical rig was calibrated or validated.
+
 ## Quickstart with Docker
 
 Requirements are Docker Engine, a current Compose/Buildx plugin, and a
@@ -119,7 +126,8 @@ The boundaries are deliberately explicit:
   runtime is unavailable in V1 and fails clearly before provider deployment.
 - `CTRL_PI_MOCK_MODE=false` selects the fail-closed real YAM adapter for a
   standard SocketCAN follower with a crank 4310 gripper and a calibrated
-  GELLO serial leader. Missing configuration or hardware remains visibly
+  GELLO serial leader. Settings can discover, preflight, save, and later
+  restore that one setup. Missing configuration or hardware remains visibly
   disconnected and never falls back to `MockYAMDriver`.
 - The real adapter is covered with fake-vendor mapping, lifecycle, fault, and
   concurrency tests, but this cloud workspace has no physical YAM rig. Motor
@@ -136,7 +144,7 @@ contract, cost guardrails, model packaging, robot loop, and teardown model.
 
 | Guide | Contents |
 | --- | --- |
-| [Setup and configuration](docs/setup.md) | Environment variables, PostgreSQL/Supabase, Hugging Face, Modal credentials, and first-run checks |
+| [Setup and configuration](docs/setup.md) | Environment variables, service readiness, YAM first-run onboarding, and safe automatic restoration |
 | [Architecture](docs/architecture.md) | Process boundaries, persistence, live state, leases, and safety invariants |
 | [Development](docs/development.md) | Source installation, dev servers, tests, migrations, seeding, and contribution workflow |
 | [Docker deployment](docs/docker-deployment.md) | Production container, storage, graceful shutdown, USB, and SocketCAN |

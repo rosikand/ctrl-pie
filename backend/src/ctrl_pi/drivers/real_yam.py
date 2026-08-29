@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from importlib import metadata
+import json
 import logging
 import math
 import os
@@ -10,9 +11,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 import socket
+import stat
 import threading
 import time
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 
@@ -31,9 +33,13 @@ from ctrl_pi.drivers.yam import (
     JogCommand,
     JogLimitError,
     JointTelemetry,
+    YAMDiscoveryCandidate,
+    YAMDiscoveryResult,
     YAMDriver,
     YAMDriverDiagnostic,
     YAMDriverUnavailableError,
+    YAMPreflightResult,
+    YAMSetupConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +56,19 @@ PINNED_YAM_DISTRIBUTIONS = {
     "lerobot-teleoperator-yam-gello": "0.1.1",
     "yam-common": "0.1.1",
 }
+MAX_CALIBRATION_FILE_BYTES = 64 * 1024
+SYS_CLASS_NET_ROOT = Path("/sys/class/net")
+STABLE_SERIAL_ROOT = Path("/dev/serial/by-id")
+CONVENTIONAL_LEADER_DEVICE = Path("/dev/yam-leader")
+LEADER_CALIBRATION_MOTORS = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "wrist_yaw",
+    "gripper",
+)
 
 # The pinned plugin speaks this order. ctrl-pi deliberately puts wrist roll
 # before wrist pitch, so every read and write must map by name.
@@ -106,6 +125,40 @@ class RealYAMConfig:
             leader_calibration_id=config.yam_leader_calibration_id,
             leader_calibration_dir=config.yam_leader_calibration_dir,
         )
+
+    @classmethod
+    def from_setup_config(cls, config: YAMSetupConfig) -> RealYAMConfig:
+        return cls(
+            can_interface=config.can_interface,
+            leader_port=config.leader_port,
+            mujoco_xml_path=config.mujoco_xml_path,
+            gripper_type="crank_4310",
+            leader_calibration_id=config.leader_calibration_id,
+            leader_calibration_dir=config.leader_calibration_dir,
+        )
+
+    def public_setup_config(self) -> YAMSetupConfig | None:
+        if self.gripper_type != "crank_4310" or any(
+            value is None
+            for value in (
+                self.can_interface,
+                self.leader_port,
+                self.mujoco_xml_path,
+                self.leader_calibration_id,
+                self.leader_calibration_dir,
+            )
+        ):
+            return None
+        try:
+            return YAMSetupConfig(
+                can_interface=self.can_interface,
+                leader_port=self.leader_port,
+                mujoco_xml_path=self.mujoco_xml_path,
+                leader_calibration_id=self.leader_calibration_id,
+                leader_calibration_dir=self.leader_calibration_dir,
+            )
+        except ValueError:
+            return None
 
 
 class LeaderDevice(Protocol):
@@ -300,7 +353,9 @@ class RealYAMDriver(YAMDriver):
         vendor_factory: VendorFactory | None = None,
     ) -> None:
         self.config = config
+        self._initial_config = config
         self._vendor_factory = vendor_factory or DefaultVendorFactory()
+        self._lifecycle_lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._leader_io_lock = threading.RLock()
         self._follower_io_lock = threading.RLock()
@@ -344,6 +399,131 @@ class RealYAMDriver(YAMDriver):
                 detail="YAM hardware configuration could not be inspected safely.",
             )
 
+    def setup_config(self) -> YAMSetupConfig | None:
+        with self._state_lock:
+            config = self.config
+        return config.public_setup_config()
+
+    def discover_setup(self) -> YAMDiscoveryResult:
+        """List bounded OS-level candidates without importing or opening a device."""
+
+        interfaces: list[str] = []
+        try:
+            for _, name in sorted(socket.if_nameindex(), key=lambda item: item[1]):
+                if len(interfaces) >= 32 or len(name.encode("utf-8")) > 15:
+                    continue
+                type_path = SYS_CLASS_NET_ROOT / name / "type"
+                try:
+                    with type_path.open("rb") as handle:
+                        raw_type = handle.read(16)
+                    if raw_type.strip() == b"280":  # Linux ARPHRD_CAN
+                        interfaces.append(name)
+                except OSError:
+                    continue
+        except OSError:
+            interfaces = []
+        ports: list[str] = []
+        try:
+            serial_root = STABLE_SERIAL_ROOT
+            if serial_root.is_dir():
+                for path in sorted(serial_root.iterdir(), key=lambda item: item.name):
+                    if len(ports) >= 32 or not path.is_symlink():
+                        continue
+                    try:
+                        if stat.S_ISCHR(path.stat().st_mode):
+                            ports.append(str(path))
+                    except OSError:
+                        continue
+            conventional = CONVENTIONAL_LEADER_DEVICE
+            if (
+                len(ports) < 32
+                and conventional not in (Path(item) for item in ports)
+                and conventional.exists()
+                and stat.S_ISCHR(conventional.stat().st_mode)
+            ):
+                ports.append(str(conventional))
+        except OSError:
+            ports = []
+
+        current = self.setup_config()
+        suggested = current
+        if suggested is None:
+            with self._state_lock:
+                raw = self.config
+            try:
+                suggested = YAMSetupConfig(
+                    can_interface=raw.can_interface or (interfaces[0] if interfaces else ""),
+                    leader_port=raw.leader_port or (ports[0] if ports else ""),
+                    mujoco_xml_path=raw.mujoco_xml_path or "",
+                    leader_calibration_id=raw.leader_calibration_id or "yam-leader",
+                    leader_calibration_dir=raw.leader_calibration_dir or "",
+                )
+            except ValueError:
+                suggested = None
+        return YAMDiscoveryResult(
+            mode="hardware",
+            can_interfaces=[
+                YAMDiscoveryCandidate(
+                    id=name,
+                    label=f"SocketCAN interface {name}",
+                )
+                for name in interfaces
+            ],
+            leader_ports=[
+                YAMDiscoveryCandidate(
+                    id=path,
+                    label=f"Stable serial device {index + 1}",
+                )
+                for index, path in enumerate(ports)
+            ],
+            suggested_config=suggested,
+            detail=(
+                "Discovery found OS-level YAM connection candidates without opening them."
+                if interfaces or ports
+                else "No OS-level YAM connection candidates are currently visible."
+            ),
+        )
+
+    def preflight_setup(self, config: YAMSetupConfig) -> YAMPreflightResult:
+        candidate = RealYAMDriver(
+            RealYAMConfig.from_setup_config(config),
+            vendor_factory=self._vendor_factory,
+        )
+        diagnostic = candidate.diagnostic()
+        calibration_ready = candidate._calibration_file_ready()
+        return YAMPreflightResult(
+            ready=diagnostic.status == "configured",
+            calibration_ready=calibration_ready,
+            diagnostic=diagnostic,
+        )
+
+    def apply_setup(self, config: YAMSetupConfig) -> YAMDriverDiagnostic:
+        self._replace_config(RealYAMConfig.from_setup_config(config))
+        return self.diagnostic()
+
+    def reset_setup(self) -> YAMDriverDiagnostic:
+        self._replace_config(self._initial_config)
+        return self.diagnostic()
+
+    def _replace_config(self, config: RealYAMConfig) -> None:
+        with self._lifecycle_lock:
+            self.shutdown()
+            with self._state_lock:
+                if self._io_thread is not None and self._io_thread.is_alive():
+                    raise YAMDriverUnavailableError(
+                        "YAM setup could not change before the hardware loop stopped."
+                    )
+                self.config = config
+                self._snapshots = {
+                    LEADER_ID: self._disconnected_snapshot(
+                        LEADER_ID, "YAM Leader", "leader"
+                    ),
+                    FOLLOWER_ID: self._disconnected_snapshot(
+                        FOLLOWER_ID, "YAM Follower", "follower"
+                    ),
+                }
+                self._diagnostic = self.preflight()
+
     def _preflight_unchecked(self) -> YAMDriverDiagnostic:
         problem = self._configuration_problem()
         if problem is not None:
@@ -372,14 +552,13 @@ class RealYAMDriver(YAMDriver):
 
         assert self.config.leader_calibration_dir is not None
         assert self.config.leader_calibration_id is not None
-        calibration_path = (
-            Path(self.config.leader_calibration_dir).expanduser()
-            / f"{self.config.leader_calibration_id}.json"
-        )
-        if not calibration_path.is_file() or not os.access(calibration_path, os.R_OK):
+        if not self._calibration_file_ready():
             return YAMDriverDiagnostic(
                 status="missing",
-                detail="The configured YAM leader calibration is unavailable or unreadable.",
+                detail=(
+                    "The configured YAM leader calibration file is unavailable, unreadable, "
+                    "or invalid."
+                ),
             )
 
         assert self.config.leader_port is not None
@@ -389,6 +568,18 @@ class RealYAMDriver(YAMDriver):
                 status="missing",
                 detail="The configured YAM leader serial device is not visible.",
             )
+        try:
+            serial_is_character = self._serial_device_is_character(leader_device)
+        except OSError:
+            return YAMDriverDiagnostic(
+                status="missing",
+                detail="The configured YAM leader serial device is not visible.",
+            )
+        if not serial_is_character:
+            return YAMDriverDiagnostic(
+                status="error",
+                detail="The configured YAM leader path is not a serial device.",
+            )
         if not os.access(leader_device, os.R_OK | os.W_OK):
             return YAMDriverDiagnostic(
                 status="error",
@@ -396,19 +587,90 @@ class RealYAMDriver(YAMDriver):
             )
 
         assert self.config.can_interface is not None
-        try:
-            socket.if_nametoindex(self.config.can_interface)
-        except OSError:
+        can_kind = self._network_interface_kind(self.config.can_interface)
+        if can_kind == "missing":
             return YAMDriverDiagnostic(
                 status="missing",
                 detail="The configured YAM SocketCAN interface is not visible.",
             )
+        if can_kind == "other":
+            return YAMDriverDiagnostic(
+                status="error",
+                detail="The configured network interface is not SocketCAN.",
+            )
         return YAMDriverDiagnostic(
             status="configured",
-            detail="YAM packages, configuration, model, calibration, and devices passed preflight.",
+            detail=(
+                "YAM packages, configuration, model, calibration file, and devices passed "
+                "non-opening preflight."
+            ),
         )
 
+    @staticmethod
+    def _serial_device_is_character(path: Path) -> bool:
+        return stat.S_ISCHR(path.stat().st_mode)
+
+    @staticmethod
+    def _network_interface_kind(name: str) -> Literal["can", "other", "missing"]:
+        try:
+            socket.if_nametoindex(name)
+            type_path = SYS_CLASS_NET_ROOT / name / "type"
+            with type_path.open("rb") as handle:
+                raw_type = handle.read(16)
+        except OSError:
+            return "missing"
+        return "can" if raw_type.strip() == b"280" else "other"
+
+    def _calibration_file_ready(self) -> bool:
+        """Validate the pinned leader artifact without constructing vendor objects."""
+
+        directory = self.config.leader_calibration_dir
+        calibration_id = self.config.leader_calibration_id
+        if directory is None or calibration_id is None:
+            return False
+        try:
+            path = Path(directory).expanduser() / f"{calibration_id}.json"
+            with path.open("rb") as handle:
+                opened = os.fstat(handle.fileno())
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_size <= 0
+                    or opened.st_size > MAX_CALIBRATION_FILE_BYTES
+                ):
+                    return False
+                raw = handle.read(MAX_CALIBRATION_FILE_BYTES + 1)
+            if not raw or len(raw) > MAX_CALIBRATION_FILE_BYTES:
+                return False
+            payload = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(payload, dict) or set(payload) != set(LEADER_CALIBRATION_MOTORS):
+            return False
+        expected_ids = {
+            name: index for index, name in enumerate(LEADER_CALIBRATION_MOTORS, start=1)
+        }
+        required = {"id", "drive_mode", "homing_offset", "range_min", "range_max"}
+        for name, calibration in payload.items():
+            if not isinstance(calibration, dict) or set(calibration) != required:
+                return False
+            values = tuple(calibration[field] for field in required)
+            if any(not isinstance(value, int) or isinstance(value, bool) for value in values):
+                return False
+            if calibration["id"] != expected_ids[name]:
+                return False
+            if calibration["drive_mode"] != 0:
+                return False
+            if any(abs(calibration[field]) > 2_147_483_647 for field in required):
+                return False
+            if calibration["range_min"] >= calibration["range_max"]:
+                return False
+        return True
+
     def startup(self) -> None:
+        with self._lifecycle_lock:
+            self._startup_locked()
+
+    def _startup_locked(self) -> None:
         with self._state_lock:
             if self._accepting_commands:
                 return
@@ -452,15 +714,56 @@ class RealYAMDriver(YAMDriver):
                 daemon=True,
             )
             self._io_thread = thread
+        try:
             thread.start()
+        except Exception:
+            logger.error("YAM telemetry thread could not start safely")
+            with self._state_lock:
+                self._accepting_commands = False
+                self._stop_event.set()
+            # A normal Thread.start failure leaves the thread unstarted. If an
+            # implementation starts it before raising, let its finally block
+            # own device cleanup and wait only for the existing safety bound.
+            if thread.ident is not None and thread is not threading.current_thread():
+                try:
+                    thread.join(timeout=2.0)
+                except RuntimeError:
+                    pass
+            if not thread.is_alive():
+                self._disconnect_devices()
+            with self._state_lock:
+                self._io_thread = thread if thread.is_alive() else None
+                self._diagnostic = YAMDriverDiagnostic(
+                    status="error",
+                    detail=(
+                        "YAM telemetry could not start; the devices were closed safely."
+                        if not thread.is_alive()
+                        else (
+                            "YAM telemetry could not start cleanly; device cleanup remains "
+                            "with the I/O owner."
+                        )
+                    ),
+                )
+                self._mark_disconnected_locked()
 
     def shutdown(self) -> None:
+        with self._lifecycle_lock:
+            self._shutdown_locked()
+
+    def _shutdown_locked(self) -> None:
         with self._state_lock:
             self._accepting_commands = False
             self._stop_event.set()
             thread = self._io_thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+        if (
+            thread is not None
+            and thread is not threading.current_thread()
+            and thread.ident is not None
+        ):
+            try:
+                thread.join(timeout=2.0)
+            except RuntimeError:
+                logger.error("YAM telemetry thread could not be joined safely")
             if thread.is_alive():
                 logger.error("YAM telemetry thread missed its shutdown deadline")
                 with self._state_lock:

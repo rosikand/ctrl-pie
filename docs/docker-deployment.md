@@ -198,13 +198,18 @@ and always attempts bounded driver shutdown in a `finally` path, but it is not
 electrically read-only. If vendor I/O does not return, make the rig safe and
 terminate the container rather than treating the probe as cleanly closed.
 
-After the connected probe succeeds, start the one service and verify its safe
-status payload:
+The probe's temporary connection is closed before it exits. After it succeeds,
+start the one service and verify its safe status payload. A `YAM_*` environment
+bootstrap selects configuration but deliberately leaves the devices closed;
+complete the acknowledged [Settings onboarding flow](setup.md#yam-first-time-setup-and-automatic-restoration)
+to preflight and save it, then choose explicit Connect or opt into automatic
+connection.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.yam.yml up -d --wait
 curl --fail http://127.0.0.1:8000/api/health
 curl --fail http://127.0.0.1:8000/api/settings/status
+curl --fail http://127.0.0.1:8000/api/yam/setup
 ```
 
 Host networking makes ctrl-π available directly on host port 8000 rather than

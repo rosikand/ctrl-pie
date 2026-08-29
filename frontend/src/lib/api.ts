@@ -28,6 +28,14 @@ import type {
   TrainingRun,
   TrainingRunsResponse,
 } from "../types/training";
+import type {
+  ConnectYamSetupRequest,
+  SaveYamSetupRequest,
+  YamSetupConfig,
+  YamSetupDiscovery,
+  YamSetupPreflight,
+  YamSetupStatus,
+} from "../types/yamSetup";
 
 export type ServiceStatus = {
   id: "postgres" | "huggingface" | "modal" | "arms";
@@ -265,6 +273,60 @@ export function savePublicSettings(
   return request<PublicSettings>("/api/settings", {
     method: "PATCH",
     body: JSON.stringify(settings),
+  });
+}
+
+export function fetchYamSetup(signal?: AbortSignal): Promise<YamSetupStatus> {
+  return request<YamSetupStatus>("/api/yam/setup", {
+    signal,
+    cache: "no-store",
+  });
+}
+
+export function discoverYamSetup(signal?: AbortSignal): Promise<YamSetupDiscovery> {
+  return request<YamSetupDiscovery>("/api/yam/setup/discover", {
+    method: "POST",
+    signal,
+  });
+}
+
+export function preflightYamSetup(
+  config: YamSetupConfig,
+  signal?: AbortSignal,
+): Promise<YamSetupPreflight> {
+  return request<YamSetupPreflight>("/api/yam/setup/preflight", {
+    method: "POST",
+    body: JSON.stringify({ config }),
+    signal,
+  });
+}
+
+export function saveYamSetup(
+  payload: SaveYamSetupRequest,
+  signal?: AbortSignal,
+): Promise<YamSetupStatus> {
+  return request<YamSetupStatus>("/api/yam/setup", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function connectYamSetup(
+  payload: ConnectYamSetupRequest,
+  signal?: AbortSignal,
+): Promise<YamSetupStatus> {
+  return request<YamSetupStatus>("/api/yam/setup/connect", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function deleteYamSetup(signal?: AbortSignal): Promise<YamSetupStatus> {
+  return request<YamSetupStatus>("/api/yam/setup", {
+    method: "DELETE",
+    signal,
   });
 }
 

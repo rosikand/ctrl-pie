@@ -36,12 +36,12 @@ variable with a backend secret.
 | `MODAL_PROXY_TOKEN_ID` | Real LeRobot endpoint traffic | Distinct Modal Proxy Token ID beginning `wk-`. |
 | `MODAL_PROXY_TOKEN_SECRET` | Real LeRobot endpoint traffic | Distinct Modal Proxy Token secret beginning `ws-`. |
 | `CTRL_PI_MOCK_MODE` | No; defaults to `true` | Selects mock arms plus Stub compute when true, and the real YAM driver plus Modal compute when false. Hardware mode never falls back to the mock driver. |
-| `YAM_CAN_INTERFACE` | Hardware mode | Exact SocketCAN interface for the follower, for example `can0`. |
-| `YAM_LEADER_PORT` | Hardware mode | Exact GELLO leader serial device; prefer a stable `/dev/serial/by-id/...` path. |
-| `YAM_MUJOCO_XML_PATH` | Hardware mode | Explicit YAM MuJoCo XML used for follower gravity compensation; ctrl-π never guesses a developer checkout path. |
+| `YAM_CAN_INTERFACE` | Optional hardware bootstrap | Exact SocketCAN interface for the follower, for example `can0`. Used when no physical setup has been saved in Settings. |
+| `YAM_LEADER_PORT` | Optional hardware bootstrap | Exact GELLO leader serial device; prefer a stable `/dev/serial/by-id/...` path. Used when no physical setup has been saved. |
+| `YAM_MUJOCO_XML_PATH` | Optional hardware bootstrap | Explicit YAM MuJoCo XML used for follower gravity compensation. Used when no physical setup has been saved. |
 | `YAM_GRIPPER_TYPE` | Hardware mode | Must be `crank_4310` in V1. The pinned plugin's linear-gripper calibration path is not usable with LeRobot 0.4.4, so linear values fail before device access. |
-| `YAM_LEADER_CALIBRATION_ID` | Hardware mode | Stable LeRobot calibration ID; defaults to `yam-leader`. |
-| `YAM_LEADER_CALIBRATION_DIR` | Hardware mode | Directory containing `<YAM_LEADER_CALIBRATION_ID>.json`; startup is noninteractive and will not create it. |
+| `YAM_LEADER_CALIBRATION_ID` | Optional hardware bootstrap | Stable LeRobot calibration ID; defaults to `yam-leader`. |
+| `YAM_LEADER_CALIBRATION_DIR` | Optional hardware bootstrap | Directory containing `<YAM_LEADER_CALIBRATION_ID>.json`; startup is noninteractive and will not create it. |
 | `RECORDING_STAGING_DIR` | No | Local MP4/JSONL workspace; defaults to `.ctrl-pi/recordings`. |
 | `RECORDING_FPS` | No | Initial/fallback recording rate, 1–60; defaults to 20. The PostgreSQL-backed Settings value takes precedence after it is saved. |
 | `FRONTEND_DIST_DIR` | Production static serving only | Built Vite directory containing `index.html`; unset in source development. Docker sets `/app/frontend/dist`. |
@@ -176,6 +176,119 @@ verify zero provider tasks. If ordinary teardown is interrupted, follow
 [Modal operator cleanup](modal-operations.md). Real GPU work costs money;
 always stop a test deployment and verify teardown before leaving it.
 
+## YAM first-time setup and automatic restoration
+
+The Settings page contains the first-class **YAM onboarding** flow for one
+standard leader/follower pair. A migrated, reachable PostgreSQL database is
+required to save physical setup. The supported sequence is:
+
+1. Start in hardware mode and open **Settings → YAM onboarding**.
+2. Select **Discover devices**. Discovery enumerates a bounded list of host-
+   visible network interfaces and stable serial candidates. It does not import
+   vendor modules, open either device, start a controller, or move an arm.
+3. Select exactly one follower CAN interface and one leader serial path. V1.1
+   deliberately does not auto-select an ambiguous list or configure multiple
+   rigs. Enter absolute backend-host paths for the YAM MuJoCo XML and existing
+   leader calibration directory.
+4. Run the read-only preflight. It checks the pinned packages, files,
+   permissions, Linux ARPHRD_CAN type, and that the selected leader is a
+   character device from the current bounded discovery result.
+   `calibration_ready` means only that the expected bounded JSON artifact is
+   readable and matches the pinned motor,
+   field, integer, ID, drive-mode, and range-order structure; it does not
+   validate physical calibration accuracy, alignment, directions, or offsets.
+   ctrl-π does not run an interactive calibration routine.
+5. Save the configuration. It is stored as one bounded, non-secret
+   `yam_setups` row in PostgreSQL and applied to the existing `YAMDriver`
+   instance without opening hardware. A rejected update leaves the prior saved
+   configuration intact. Saving a changed configuration disconnects the old
+   selection; updating only auto-restore on the identical connected setup does
+   not interrupt that connection.
+6. Secure the workspace, verify the independent power/motion controls, and put
+   an operator at the emergency stop before selecting **Connect and verify one
+   sample**. The request requires an explicit hardware-motion acknowledgment.
+   Connection can configure the leader serial bus and engage the pinned
+   follower gravity-compensation/control worker even though ctrl-π sends no jog
+   or application action.
+
+### Creating the leader calibration artifact
+
+If the selected leader does not already have a calibration JSON, create it
+outside the ctrl-π web application and backend with the pinned LeRobot CLI.
+This is an interactive physical-hardware operation, not part of passive
+discovery or preflight. Stop ctrl-π and any other process that could own the
+leader serial device first. Secure the workspace, review the expected leader
+movement and vendor calibration prompts, verify the independent power/motion
+controls, and keep a physical operator at the emergency stop.
+
+From the repository environment installed with the hardware dependencies, run
+the following with the exact stable leader port, calibration ID, and absolute
+calibration directory that you will enter in Settings:
+
+```bash
+.venv/bin/lerobot-calibrate \
+  --teleop.type=yam_leader \
+  --teleop.port=/dev/serial/by-id/REPLACE_WITH_LEADER \
+  --teleop.id=yam-leader \
+  --teleop.calibration_dir=/absolute/path/to/leader-calibration
+```
+
+The command opens and configures the leader and guides the operator through
+the pinned leader calibration routine. It does not connect, calibrate, or
+validate the follower. Do not proceed if the detected device, prompts, or
+motion differ from the reviewed YAM procedure. On successful completion, the
+expected artifact is
+`/absolute/path/to/leader-calibration/yam-leader.json`; a different
+`--teleop.id` changes that filename. Restart ctrl-π, enter the same port, ID,
+and directory in YAM onboarding, rediscover the devices, and run read-only
+preflight before saving or connecting.
+
+This procedure and command have not been executed on a physical YAM in the
+development environment. File creation and structural preflight still do not
+prove physical directions, offsets, limits, bus behavior, model fidelity, or
+emergency-stop operation; complete the target-box checklist in
+[YAM driver interface](yam-driver.md#required-ubuntuyam-validation).
+
+Automatic restoration is off on a new physical setup. Enabling it is a
+separate explicit acknowledgment that ctrl-π may automatically connect—and
+therefore engage that follower controller—when the saved devices become ready
+after a later boot or hot-plug. The backend loads the saved physical setup,
+performs passive preflight checks, and makes one serialized connection attempt
+when prerequisites change from missing to ready. It never substitutes
+`MockYAMDriver`, never opens devices during discovery/preflight, and does not
+blindly retry a latched runtime or vendor error. Settings polls the sanitized
+status while a saved rig is waiting, so plugging it in becomes visible without
+reloading the page. A manual **Connect** remains available after correcting a
+failure.
+
+Consent is revocable while the rig is unplugged: uncheck automatic connection
+and save the unchanged persisted configuration. That transactional disable
+does not require preflight, open a device, or disconnect hardware that is
+already connected. Any configuration change or later re-enable still requires
+a current passing preflight, and re-enable requires the motion-risk
+acknowledgment again.
+
+Mock setup returns deterministic discovery, preflight, and connection results
+through the same API. Mock save/reset calls do not overwrite or delete the
+persisted physical rig, and no mock readiness state is evidence of physical
+detection or calibration.
+
+The public setup endpoints are `GET /api/yam/setup`, passive
+`POST /api/yam/setup/discover`, read-only
+`POST /api/yam/setup/preflight`, `PUT /api/yam/setup`, explicit
+`POST /api/yam/setup/connect`, and `DELETE /api/yam/setup`. Inputs are bounded;
+responses contain selected non-secret configuration and sanitized diagnostics,
+never vendor exceptions. Both connection-enabling hardware paths enforce their
+motion-risk acknowledgment in the backend, so bypassing the UI does not bypass
+the safety gate.
+
+The `YAM_*` environment bootstrap remains supported when no physical row
+exists, but it selects configuration only. Hardware startup does not open that
+environment-selected rig without persisted automatic-connection consent. Run
+preflight and save through Settings, then use acknowledged Connect or explicitly
+enable automatic connection. Once a physical setup is saved, it takes
+precedence over the environment bootstrap.
+
 ## Mock mode and real YAM configuration
 
 With `CTRL_PI_MOCK_MODE=true`, the backend supplies two process-local arms,
@@ -188,16 +301,20 @@ With `CTRL_PI_MOCK_MODE=false`, ctrl-π constructs the real driver backed by the
 pinned `lerobot-robot-yam==0.1.1`,
 `lerobot-teleoperator-yam-gello==0.1.1`, and `yam-common==0.1.1` packages. The
 follower uses SocketCAN and the leader uses a calibrated Dynamixel serial bus.
-Configure every `YAM_*` value above before connecting hardware. The leader
-calibration file must already exist; backend startup never opens an interactive
-calibration prompt.
+Use Settings onboarding to discover and persist the non-secret device
+configuration. The `YAM_*` values above remain a bootstrap fallback when no
+physical setup has been saved, but never bypass the persisted connection
+consent. The leader calibration file must already exist;
+backend startup and onboarding never open an interactive calibration prompt.
 
 The process remains available when hardware configuration, a plugin import, or
 a device connection fails. In that state `/api/arms` returns the two stable arm
 IDs as disconnected and Settings reports a sanitized, actionable reason.
 Motion calls fail before vendor mutation, and hardware mode never substitutes a
-`MockYAMDriver`. Correct the configuration or device problem and restart the
-single backend process.
+`MockYAMDriver`. A saved auto-restore setup waits fail-closed for missing
+devices and can reconnect once passive preflight sees them become ready. A
+latched runtime/vendor failure requires an explicit operator retry or process
+restart rather than an uncontrolled reconnect loop.
 
 Only the real follower accepts commands. Joint and gripper jogs are checked
 against both ctrl-π step bounds and the pinned YAM joint limits; Cartesian jog
@@ -248,6 +365,7 @@ After starting both services or the production container, check:
 ```bash
 curl --fail http://127.0.0.1:8000/api/health
 curl --fail http://127.0.0.1:8000/api/settings/status
+curl --fail http://127.0.0.1:8000/api/yam/setup
 ```
 
 The health endpoint proves that FastAPI is reachable. The Settings response

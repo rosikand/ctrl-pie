@@ -20,7 +20,12 @@ from ctrl_pi.drivers.yam import (
     JogCommand,
     JogLimitError,
     JointTelemetry,
+    YAMDiscoveryCandidate,
+    YAMDiscoveryResult,
     YAMDriver,
+    YAMDriverDiagnostic,
+    YAMPreflightResult,
+    YAMSetupConfig,
 )
 
 JOINT_LIMIT_RADIANS = (-math.pi, math.pi)
@@ -32,6 +37,14 @@ POSE_LIMITS = {
     "pitch": (-math.pi, math.pi),
     "yaw": (-math.pi, math.pi),
 }
+
+MOCK_SETUP_CONFIG = YAMSetupConfig(
+    can_interface="mock-can0",
+    leader_port="/dev/serial/by-id/ctrl-pi-mock-yam-leader",
+    mujoco_xml_path="/opt/ctrl-pi/mock-yam.xml",
+    leader_calibration_id="ctrl-pi-mock-leader",
+    leader_calibration_dir="/var/lib/ctrl-pi/mock-calibration",
+)
 
 
 @dataclass
@@ -61,6 +74,7 @@ class MockYAMDriver(YAMDriver):
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._setup_config = MOCK_SETUP_CONFIG
         self._arms: dict[str, _MockArmState] = {
             "yam-leader": _MockArmState(
                 id="yam-leader",
@@ -81,6 +95,58 @@ class MockYAMDriver(YAMDriver):
                 gripper_position=0.45,
             ),
         }
+
+    def setup_config(self) -> YAMSetupConfig:
+        with self._lock:
+            return self._setup_config.model_copy(deep=True)
+
+    def discover_setup(self) -> YAMDiscoveryResult:
+        return YAMDiscoveryResult(
+            mode="mock",
+            can_interfaces=[
+                YAMDiscoveryCandidate(id="mock-can0", label="Mock SocketCAN interface")
+            ],
+            leader_ports=[
+                YAMDiscoveryCandidate(
+                    id="/dev/serial/by-id/ctrl-pi-mock-yam-leader",
+                    label="Mock leader serial device",
+                )
+            ],
+            suggested_config=self.setup_config(),
+            detail="Mock leader and follower candidates are ready without hardware access.",
+        )
+
+    def preflight_setup(self, config: YAMSetupConfig) -> YAMPreflightResult:
+        if config != MOCK_SETUP_CONFIG:
+            return YAMPreflightResult(
+                ready=False,
+                calibration_ready=False,
+                diagnostic=YAMDriverDiagnostic(
+                    status="error",
+                    detail="Mock mode accepts only its deterministic built-in YAM setup.",
+                ),
+            )
+        return YAMPreflightResult(
+            ready=True,
+            calibration_ready=True,
+            diagnostic=YAMDriverDiagnostic(
+                status="configured",
+                detail="Mock YAM setup passed preflight without hardware access.",
+            ),
+        )
+
+    def apply_setup(self, config: YAMSetupConfig) -> YAMDriverDiagnostic:
+        result = self.preflight_setup(config)
+        if not result.ready:
+            return result.diagnostic
+        with self._lock:
+            self._setup_config = config.model_copy(deep=True)
+        return result.diagnostic
+
+    def reset_setup(self) -> YAMDriverDiagnostic:
+        with self._lock:
+            self._setup_config = MOCK_SETUP_CONFIG
+        return self.preflight_setup(MOCK_SETUP_CONFIG).diagnostic
 
     def list_arms(self) -> list[ArmTelemetry]:
         with self._lock:

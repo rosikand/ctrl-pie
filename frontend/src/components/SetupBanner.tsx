@@ -18,6 +18,9 @@ export function SetupBanner({
   const count = status?.services.filter(
     (service) => service.required && !["connected", "configured"].includes(service.status),
   ).length;
+  const armsNeedAttention = status?.services.some(
+    (service) => service.id === "arms" && service.required && !["connected", "configured"].includes(service.status),
+  ) ?? false;
 
   return (
     <div className="border-b border-amber-200 bg-amber-50 px-5 py-3 sm:px-8 lg:px-10">
@@ -31,14 +34,13 @@ export function SetupBanner({
           </span>
         </div>
         <Link
-          to="/settings"
+          to={armsNeedAttention ? "/settings#yam-setup" : "/settings"}
           className="flex shrink-0 items-center gap-1 text-xs font-semibold text-amber-800 hover:text-amber-950"
         >
-          Open checklist
+          {armsNeedAttention ? "Set up YAMs" : "Open checklist"}
           <ArrowRight className="h-3.5 w-3.5" />
         </Link>
       </div>
     </div>
   );
 }
-

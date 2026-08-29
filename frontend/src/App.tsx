@@ -8,11 +8,11 @@ import {
   Video,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { SetupBanner } from "./components/SetupBanner";
-import { fetchSettingsStatus, type SettingsStatus } from "./lib/api";
+import { fetchSettingsStatus, fetchYamSetup, type SettingsStatus } from "./lib/api";
 import { ArmsPage } from "./pages/ArmsPage";
 import { DatasetEpisodePage } from "./pages/DatasetEpisodePage";
 import { DatasetsPage } from "./pages/DatasetsPage";
@@ -60,6 +60,7 @@ function ShellNavLink({ item }: { item: NavigationItem }) {
 }
 
 function AppShell() {
+  const location = useLocation();
   const [settingsStatus, setSettingsStatus] = useState<SettingsStatus | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(true);
@@ -78,6 +79,74 @@ function AppShell() {
   useEffect(() => {
     refreshSettings();
   }, [refreshSettings]);
+
+  const armsServiceStatus = settingsStatus?.services.find(
+    (service) => service.id === "arms",
+  )?.status;
+  const postgresServiceStatus = settingsStatus?.services.find(
+    (service) => service.id === "postgres",
+  )?.status;
+  const refreshInFlight = useRef(false);
+
+  useEffect(() => {
+    if (
+      location.pathname === "/settings"
+      || settingsStatus?.mode !== "hardware"
+      || postgresServiceStatus !== "connected"
+      || armsServiceStatus === "connected"
+    ) return;
+
+    let stopped = false;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+
+    const schedule = (delay = 2_000) => {
+      window.clearTimeout(timer);
+      if (stopped || document.visibilityState !== "visible") return;
+      timer = window.setTimeout(() => void poll(), delay);
+    };
+    const poll = async () => {
+      if (stopped || controller || document.visibilityState !== "visible") return;
+      controller = new AbortController();
+      let continuePolling = false;
+      try {
+        const yam = await fetchYamSetup(controller.signal);
+        if (yam.connected || yam.state === "error") {
+          if (
+            !refreshInFlight.current
+            && (yam.connected || armsServiceStatus !== "error")
+          ) {
+            refreshInFlight.current = true;
+            refreshSettings();
+          }
+          return;
+        }
+        continuePolling = yam.saved && yam.auto_restore;
+      } catch {
+        continuePolling = true;
+      } finally {
+        controller = null;
+        if (continuePolling) schedule();
+      }
+    };
+    const visibilityChanged = () => {
+      if (document.visibilityState === "visible") schedule(0);
+      else window.clearTimeout(timer);
+    };
+
+    document.addEventListener("visibilitychange", visibilityChanged);
+    schedule();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      controller?.abort();
+      document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, [armsServiceStatus, location.pathname, postgresServiceStatus, refreshSettings, settingsStatus?.mode]);
+
+  useEffect(() => {
+    if (!settingsLoading) refreshInFlight.current = false;
+  }, [settingsLoading]);
 
   return (
     <div className="min-h-screen bg-canvas text-ink">

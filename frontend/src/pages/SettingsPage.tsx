@@ -11,8 +11,10 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 
+import { YamSetupPanel } from "../components/YamSetupPanel";
 import {
   fetchPublicSettings,
   savePublicSettings,
@@ -290,6 +292,24 @@ export function SettingsPage({
   error: string | null;
   refresh: () => void;
 }) {
+  const location = useLocation();
+  const focusedYamHash = useRef(false);
+
+  useEffect(() => {
+    if (location.hash !== "#yam-setup") {
+      focusedYamHash.current = false;
+      return;
+    }
+    if (!status || focusedYamHash.current) return;
+    focusedYamHash.current = true;
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById("yam-setup");
+      target?.scrollIntoView({ block: "start" });
+      target?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [location.hash, status]);
+
   return (
     <div className="mx-auto max-w-7xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
       <header className="flex items-start justify-between gap-6">
@@ -338,6 +358,7 @@ export function SettingsPage({
               <ConnectionCard key={service.id} service={service} />
             ))}
           </div>
+          <YamSetupPanel onSettingsRefresh={refresh} />
           <InferenceCredentials status={status} />
           <div className="mt-6 grid gap-6 xl:grid-cols-2">
             <Checklist status={status} />

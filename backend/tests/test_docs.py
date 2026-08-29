@@ -241,3 +241,33 @@ def test_milestone_13_reference_contracts_are_documented() -> None:
     assert "exactly 100 successful arm writes" in smoke
     assert "--fake-hub" in smoke
     assert "actual `make smoke` target does not pass `--fake-hub`" in smoke
+
+
+def test_ros58_onboarding_documents_external_leader_calibration_boundary() -> None:
+    setup = (DOCS_ROOT / "setup.md").read_text(encoding="utf-8")
+    for required in (
+        ".venv/bin/lerobot-calibrate",
+        "--teleop.type=yam_leader",
+        "--teleop.port=/dev/serial/by-id/REPLACE_WITH_LEADER",
+        "--teleop.id=yam-leader",
+        "--teleop.calibration_dir=/absolute/path/to/leader-calibration",
+        "outside the ctrl-π web application and backend",
+        "physical operator at the emergency stop",
+        "It does not connect, calibrate, or\nvalidate the follower",
+        "have not been executed on a physical YAM",
+    ):
+        assert required in setup
+
+    yam = (DOCS_ROOT / "yam-driver.md").read_text(encoding="utf-8")
+    assert "setup.md#creating-the-leader-calibration-artifact" in yam
+    for required in (
+        "Settings discovery and preflight",
+        "automatic connection remains off by default",
+        "boot once with the rig\n    unplugged, hot-plug it",
+        "without background retries",
+        "revoke automatic connection without\n    forgetting the setup",
+        "physical PostgreSQL row was neither overwritten nor deleted",
+        "serial-device remap",
+        "have not been performed on a physical\nUbuntu/YAM box",
+    ):
+        assert required in yam

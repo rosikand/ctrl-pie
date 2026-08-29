@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Literal
 
-RigOwner = Literal["teleop", "inference", "manual"]
+RigOwner = Literal["teleop", "inference", "manual", "setup"]
 
 
 class RigLeaseConflictError(RuntimeError):

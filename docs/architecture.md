@@ -31,7 +31,7 @@ and [Docker deployment](docker-deployment.md) for the two launch paths.
 
 | Layer | Responsibility | Representative code |
 | --- | --- | --- |
-| React frontend | Five workflow tabs and Settings; renders typed API state only | `frontend/src/` |
+| React frontend | Six workflow tabs plus Settings and YAM onboarding; renders typed API state only | `frontend/src/` |
 | FastAPI routers | Validate browser input, return sanitized errors, and serialize public state | `backend/src/ctrl_pi/api/` |
 | Hardware boundary | Typed cached arm snapshots, bounded jogs/actions, and fail-closed lifecycle | `drivers/yam.py`, `drivers/mock_yam.py`, `drivers/real_yam.py` |
 | Recording service | Teleop, camera capture, FFmpeg lifecycle, and synchronized samples | `recording.py`, `camera.py` |
@@ -51,9 +51,10 @@ ctrl-π deliberately separates four kinds of state.
 
 ### PostgreSQL: durable control-plane metadata
 
-PostgreSQL stores robots, recording summaries, training runs and their bounded
-metric/checkpoint metadata, inference endpoints/deployments, and non-secret
-settings. Alembic owns the schema. Robot rows use a database UUID internally
+PostgreSQL stores robots, the one non-secret physical `yam_setups` record,
+recording summaries, training runs and their bounded metric/checkpoint
+metadata, inference endpoints/deployments, and non-secret settings. Alembic
+owns the schema. Robot rows use a database UUID internally
 and a stable hardware-facing `driver_id` such as `yam-follower` at API and
 driver boundaries.
 
@@ -115,6 +116,15 @@ gripper force and bus error counters are unavailable in the pinned plugin and
 cross the API as `null`. Driver-reported timing measures ctrl-π's sampling loop
 rather than motor firmware. A sample, vendor-worker, or command failure marks
 both arms disconnected and latches motion unavailable.
+
+`YAMSetupManager` keeps that same driver object stable while Settings performs
+passive candidate discovery, read-only preflight, in-place setup selection,
+explicit connection, and reset. One physical setup can be persisted; mock
+setup exercises the same boundary without mutating it. Enabling boot/hot-plug
+automatic connection and connecting immediately require separate backend-
+enforced hardware-motion acknowledgments because either connection can engage
+the follower gravity-compensation controller. Setup operations share the
+process `RigLease`; they cannot race teleop, recording, inference, or jog.
 
 The camera remains `MockCamera` in V1 even when real arms are selected, so
 recordings from hardware mode still contain the documented synthetic video.
@@ -195,22 +205,29 @@ operation. Details are in [Compute and inference](inference.md).
 
 FastAPI lifespan startup performs these ordered operations:
 
-1. start the selected driver off the asynchronous event loop;
+1. restore the saved physical setup into the selected stable driver and, only
+   when explicitly enabled, attempt its acknowledged automatic connection. If
+   no physical row exists, environment values may select configuration but the
+   hardware remains closed until an acknowledged explicit save/connect flow;
 2. enable and reconcile the recording manager;
 3. tear down unattended resources through the provider adapter named by each
    row's persisted target kind, including rows left by a mock/hardware mode
    switch, without calling a runtime web endpoint;
-4. start the deployment-lifetime watchdog.
+4. start the deployment-lifetime watchdog while the setup manager passively
+   watches a missing saved rig for prerequisites to appear.
 
-Real-driver construction and imports are lazy. On hardware startup it validates
-the narrow standard-YAM/GELLO/crank configuration, connects with interactive
-calibration disabled, takes a first sample, and then starts cached sampling. A
-configuration, plugin, file, permission, or connection failure leaves the API
-running with stable disconnected arm identities and a sanitized Settings
-diagnostic. It never falls back to mock hardware and does not reconnect until
-the backend restarts.
+Real-driver construction and imports are lazy. Hardware discovery and preflight
+do not open devices. An acknowledged connection validates the narrow standard-
+YAM/GELLO/crank configuration, connects with interactive calibration disabled,
+takes a first sample, and then starts cached sampling. A configuration, plugin,
+file, permission, or connection failure leaves the API running with stable
+disconnected arm identities and a sanitized Settings diagnostic. It never
+falls back to mock hardware. A saved auto-connect setup passively rechecks only
+`missing` prerequisites and makes one serialized attempt when they become
+ready; a latched `error` is not automatically retried.
 
-No loop is auto-resumed after a crash or restart. Interrupted upload statuses
+No teleop, recording, inference, or policy-action loop is auto-resumed after a
+crash or restart. Interrupted upload statuses
 are reconciled to a safe retryable failure when no in-process uploader owns
 them. Recording statuses such as `teleop` or `recording` are normalized when
 their process-local task no longer exists. Complete episode manifests are
@@ -229,9 +246,10 @@ supplies a 90-second grace period. If Modal cleanup remains uncertain, use the
 procedure in [Modal operator cleanup](modal-operations.md).
 
 The default `make yam-probe` checks hardware-mode configuration, exact pinned
-package metadata, readable model/calibration files, leader serial permissions,
-and whether the named network interface exists. It does so without importing
-vendor modules, constructing their devices, or opening a bus. The explicit
+package metadata, a readable model, bounded structural calibration JSON,
+leader character-device permissions, and Linux ARPHRD_CAN type. It does so
+without importing vendor modules, constructing their devices, or opening a
+bus. The explicit
 `python -m ctrl_pi.yam_probe --connect` path then opens both devices, obtains
 connected telemetry, emits a sanitized summary, and always attempts bounded
 driver shutdown. It does not issue an application jog/action but does start

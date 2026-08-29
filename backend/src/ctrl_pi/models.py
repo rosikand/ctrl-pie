@@ -52,6 +52,29 @@ class Robot(TimestampMixin, Base):
     config: Mapped[dict[str, Any]] = mapped_column(json_type, default=dict, nullable=False)
 
 
+class YAMSetup(TimestampMixin, Base):
+    """The one persisted, non-secret YAM rig setup supported by V1.1."""
+
+    __tablename__ = "yam_setups"
+    __table_args__ = (
+        CheckConstraint("id = 'primary'", name="ck_yam_setups_singleton"),
+        CheckConstraint("mode IN ('mock', 'hardware')", name="ck_yam_setups_mode"),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default="primary")
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    can_interface: Mapped[str] = mapped_column(String(15), nullable=False)
+    leader_port: Mapped[str] = mapped_column(String(200), nullable=False)
+    mujoco_xml_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    leader_calibration_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    leader_calibration_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
+    auto_restore: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Recording(TimestampMixin, Base):
     __tablename__ = "recordings"
     __table_args__ = (Index("ix_recordings_created_at", "created_at"),)

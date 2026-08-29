@@ -3,9 +3,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 import math
+from pathlib import Path
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ArmRole = Literal["leader", "follower"]
 JogKind = Literal["joint", "cartesian", "gripper"]
@@ -185,6 +187,82 @@ class YAMDriverDiagnostic(BaseModel):
     detail: str = Field(min_length=1, max_length=240)
 
 
+_CAN_INTERFACE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,14})")
+_CALIBRATION_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,118}[A-Za-z0-9])?")
+
+
+class YAMSetupConfig(BaseModel):
+    """Bounded, non-secret configuration for one YAM leader/follower rig."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    can_interface: str = Field(min_length=1, max_length=15)
+    leader_port: str = Field(min_length=1, max_length=200)
+    mujoco_xml_path: str = Field(min_length=1, max_length=1_024)
+    leader_calibration_id: str = Field(min_length=1, max_length=64)
+    leader_calibration_dir: str = Field(min_length=1, max_length=1_024)
+
+    @field_validator("can_interface")
+    @classmethod
+    def validate_can_interface(cls, value: str) -> str:
+        if _CAN_INTERFACE.fullmatch(value) is None or len(value.encode("utf-8")) > 15:
+            raise ValueError("can_interface must be a Linux-safe interface name")
+        return value
+
+    @field_validator("leader_calibration_id")
+    @classmethod
+    def validate_calibration_id(cls, value: str) -> str:
+        if _CALIBRATION_ID.fullmatch(value) is None:
+            raise ValueError("leader_calibration_id contains unsupported characters")
+        return value
+
+    @field_validator("leader_port", "mujoco_xml_path", "leader_calibration_dir")
+    @classmethod
+    def validate_absolute_path(cls, value: str) -> str:
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("hardware paths may not contain control characters")
+        if len(value.encode("utf-8")) > 1_024:
+            raise ValueError("hardware path is too long")
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError("hardware paths must be absolute")
+        if ".." in path.parts:
+            raise ValueError("hardware paths may not traverse parent directories")
+        return str(path)
+
+    @field_validator("leader_port")
+    @classmethod
+    def validate_leader_device_path(cls, value: str) -> str:
+        if Path(value).parts[:2] != ("/", "dev"):
+            raise ValueError("leader_port must select a device below /dev")
+        return value
+
+
+class YAMDiscoveryCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1, max_length=1_024)
+    label: str = Field(min_length=1, max_length=160)
+
+
+class YAMDiscoveryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["mock", "hardware"]
+    can_interfaces: list[YAMDiscoveryCandidate] = Field(max_length=32)
+    leader_ports: list[YAMDiscoveryCandidate] = Field(max_length=32)
+    suggested_config: YAMSetupConfig | None
+    detail: str = Field(min_length=1, max_length=240)
+
+
+class YAMPreflightResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ready: bool
+    calibration_ready: bool
+    diagnostic: YAMDriverDiagnostic
+
+
 class YAMDriver(ABC):
     """Hardware boundary used by APIs, teleoperation, and inference loops."""
 
@@ -211,6 +289,45 @@ class YAMDriver(ABC):
             status="missing",
             detail=f"{self.__class__.__name__} is not connected.",
         )
+
+    def setup_config(self) -> YAMSetupConfig | None:
+        """Return the selected non-secret setup, when this driver supports it."""
+
+        return None
+
+    def discover_setup(self) -> YAMDiscoveryResult:
+        """Enumerate safe setup candidates without opening hardware."""
+
+        return YAMDiscoveryResult(
+            mode="hardware",
+            can_interfaces=[],
+            leader_ports=[],
+            suggested_config=self.setup_config(),
+            detail="YAM setup discovery is unavailable for this driver.",
+        )
+
+    def preflight_setup(self, config: YAMSetupConfig) -> YAMPreflightResult:
+        """Inspect a candidate configuration without opening hardware."""
+
+        return YAMPreflightResult(
+            ready=False,
+            calibration_ready=False,
+            diagnostic=YAMDriverDiagnostic(
+                status="error",
+                detail="YAM setup preflight is unavailable for this driver.",
+            ),
+        )
+
+    def apply_setup(self, config: YAMSetupConfig) -> YAMDriverDiagnostic:
+        """Select a validated setup while leaving device resources closed."""
+
+        raise YAMDriverUnavailableError("YAM setup cannot be changed for this driver.")
+
+    def reset_setup(self) -> YAMDriverDiagnostic:
+        """Restore the driver's process configuration with resources closed."""
+
+        self.shutdown()
+        return self.diagnostic()
 
     @abstractmethod
     def list_arms(self) -> list[ArmTelemetry]:

@@ -22,6 +22,11 @@ class YAMDriver(ABC):
     def startup(self) -> None: ...
     def shutdown(self) -> None: ...
     def diagnostic(self) -> YAMDriverDiagnostic: ...
+    def setup_config(self) -> YAMSetupConfig | None: ...
+    def discover_setup(self) -> YAMDiscoveryResult: ...
+    def preflight_setup(self, config: YAMSetupConfig) -> YAMPreflightResult: ...
+    def apply_setup(self, config: YAMSetupConfig) -> YAMDriverDiagnostic: ...
+    def reset_setup(self) -> YAMDriverDiagnostic: ...
     def list_arms(self) -> list[ArmTelemetry]: ...
     def get_arm(self, arm_id: str) -> ArmTelemetry: ...
     def jog(self, arm_id: str, command: JogCommand) -> ArmTelemetry: ...
@@ -33,6 +38,11 @@ class YAMDriver(ABC):
 | `startup()` | Open resources and start sampling. A failure leaves the driver safely unavailable; it does not select a different implementation. |
 | `shutdown()` | Reject new commands, stop sampling, put the follower in the vendor safe mode, and close both devices. Repeated calls are safe. |
 | `diagnostic()` | Return a sanitized `configured`, `connected`, `missing`, or `error` summary without device paths or vendor payloads. |
+| `setup_config()` | Return the selected bounded, non-secret single-rig configuration, or `None`; no I/O. |
+| `discover_setup()` | Enumerate bounded OS/mock candidates without importing vendor modules or opening devices. |
+| `preflight_setup(config)` | Check a candidate without opening devices. Calibration readiness means a bounded, readable artifact with the pinned structural fields—not physical calibration proof. |
+| `apply_setup(config)` | Select an already validated configuration in place while resources remain closed. |
+| `reset_setup()` | Close resources and restore the driver's process bootstrap configuration. |
 | `list_arms()` | Return a copied, point-in-time snapshot for every configured arm. An empty list is valid for another implementation. |
 | `get_arm(arm_id)` | Return one copied snapshot or raise `ArmNotFoundError`. |
 | `jog(arm_id, command)` | Apply one validated relative command atomically and return the resulting snapshot. Raise `JogLimitError` for an unsafe or unsupported target. |
@@ -61,15 +71,64 @@ in [Setup and configuration](setup.md).
 
 Vendor imports and device construction are lazy. Merely importing ctrl-π, or
 running the default preflight probe, does not construct a vendor object or
-open a bus. During FastAPI lifespan startup the real driver connects both
-devices with `calibrate=False`, takes a first sample, and only then reports
-connected. A missing calibration is an error to correct outside the server;
-ctrl-π never starts an interactive calibration routine.
+open a bus. The application-scoped `YAMSetupManager` applies the one saved
+physical setup to the same driver instance before other arm consumers start.
+If explicit automatic connection was enabled, it connects both devices with
+`calibrate=False`, takes a first sample, and only then reports connected. A
+missing calibration is an error to correct outside the server; ctrl-π never
+starts an interactive calibration routine.
+Use the safety-framed, external pinned-CLI
+[leader calibration procedure](setup.md#creating-the-leader-calibration-artifact),
+then return to onboarding and rerun read-only preflight. The procedure has not
+been executed on physical YAM hardware in this development environment.
+
+When no physical row exists, a complete `YAM_*` environment bootstrap selects
+configuration but does not open the driver during lifespan startup. The
+operator must preflight and save it, then use acknowledged Connect or opt in to
+saved automatic connection. Environment configuration cannot bypass persisted
+hardware-motion consent.
 
 Even when startup cannot connect, the backend remains available. `/api/arms`
 continues to expose the stable `yam-leader` and `yam-follower` identities as
 disconnected, Settings shows the sanitized diagnostic, and every motion call
-fails closed. Correct the host/configuration issue and restart the process.
+fails closed. For a saved auto-connect setup, a passive monitor repeats only
+non-opening preflight while the diagnostic is `missing` and makes one
+`RigLease`-protected connection attempt when prerequisites become ready. It
+does not retry a latched runtime/vendor `error`; that requires a manual Connect
+or process restart.
+
+## Setup and restoration boundary
+
+The `/api/yam/setup` service is the only browser-facing configuration path.
+The frontend does not inspect USB, serial, SocketCAN, files, or vendor objects.
+Discovery lists at most 32 real SocketCAN interfaces and 32 stable leader
+devices under `/dev/serial/by-id` (plus the documented `/dev/yam-leader`
+container path), with sanitized labels. Hardware preflight accepts only a
+currently discovered CAN/serial pair and bounded absolute model/calibration
+paths. Preflight requires Linux ARPHRD_CAN and a character serial device. It
+schema-parses a bounded JSON object with exactly the seven pinned motors and
+their exact integer fields, motor IDs, drive mode, and ordered ranges. Neither
+discovery nor preflight opens a device.
+
+One physical setup is persisted in PostgreSQL. Mock-mode setup uses the same
+driver methods with deterministic candidates but never mutates or deletes that
+physical row. Saving an update first passes preflight and rolls back both the
+database and in-memory selection on failure. A changed setup disconnects the
+old selection; changing only auto-restore on the identical connected setup
+does not. Setup changes, reset, explicit Connect, and automatic restoration all
+compete for the same `RigLease` as jog,
+teleop, recording, and inference; a conflict fails immediately rather than
+queueing.
+
+Automatic connection is disabled on a new saved setup. Enabling it requires a
+backend-enforced acknowledgment that a later boot or hot-plug connection can
+engage the follower gravity-compensation/control worker. Explicit Connect has
+its own required hardware-motion acknowledgment. These acknowledgments do not
+claim the calibration, physical model, bus, limits, or emergency stop were
+validated. Disabling automatic connection for the unchanged persisted config
+is a no-I/O transaction that works while hardware is missing and does not
+disconnect an already connected driver. See
+[Setup and configuration](setup.md) for the operator flow.
 
 ## IDs, mapping, and units
 
@@ -154,7 +213,9 @@ position-control mode before writing the seven-element target in plugin order.
 A write, telemetry, or vendor-worker failure latches the driver unavailable,
 rejects subsequent commands, stops sampling, calls the plugin's
 `zero_torque_mode()`, closes the follower, and disconnects the leader. Recovery
-requires a backend restart; there is no automatic reconnect during V1.
+is intentionally deliberate: automatic restoration does not retry a latched
+runtime/vendor error, and the operator must use manual Connect after review or
+restart the backend.
 
 The plugin safe-mode call is not a claim that the arm is electrically
 torque-free: its gravity-compensation worker or controller state may still be
@@ -190,16 +251,18 @@ It constructs the fail-closed adapter and checks, in order:
 
 - required values and the supported `crank_4310` configuration;
 - installed distribution metadata for all three exact `0.1.1` package pins;
-- that the configured MuJoCo XML and leader calibration JSON are readable
-  regular files;
-- that the leader serial device exists and is readable and writable; and
-- that the configured network-interface name resolves on the host.
+- that the configured MuJoCo XML is readable and the bounded leader calibration
+  JSON matches the exact seven pinned motors and field/ID/drive-mode/range
+  structure;
+- that the leader serial device is a readable/writable character device; and
+- that the configured network interface is Linux ARPHRD_CAN.
 
 It then prints a small JSON report and shuts down without importing vendor
 modules, constructing their devices, or opening the leader/follower. These
-read-only host checks do **not** parse the XML/calibration contents, validate
-referenced model assets, prove the named interface is SocketCAN at 1 Mbit/s,
-or prove that either physical device responds.
+read-only host checks do **not** parse the MuJoCo XML or referenced model
+assets, validate the calibration values against the physical leader, prove the
+named SocketCAN interface runs at 1 Mbit/s, or prove that either physical
+device responds.
 
 Only after securing the arm and positioning an operator at the emergency stop,
 opt into one connection and sample:
@@ -250,10 +313,30 @@ perform and record all of the following on the target Ubuntu/YAM box:
    or bus-off CAN, stop the vendor worker, and induce a command failure. Each
    case must stop motion, disconnect telemetry, latch commands unavailable,
    close resources, and leave the shared `RigLease` free.
-9. Repeat the connected probe and a bounded mock-policy-compatible flow inside
+9. With the rig independently safe, exercise Settings discovery and preflight
+   while observing the devices: confirm neither operation configures a bus,
+   starts a controller, nor causes motion. Save the selected setup, restart
+   ctrl-π, and confirm the same non-secret configuration survives while
+   automatic connection remains off by default.
+10. Explicitly opt into automatic connection and confirm exactly one connection
+    occurs when the saved devices are ready. Then boot once with the rig
+    unplugged, hot-plug it, and confirm exactly one connection occurs. Induce an
+    active/vendor failure and confirm it latches without background retries or
+    repeated controller engagement.
+11. While the saved rig is unplugged, revoke automatic connection without
+    forgetting the setup; restart and hot-plug to confirm no connection occurs.
+    Boot once in mock mode and then return to hardware mode, confirming the
+    physical PostgreSQL row was neither overwritten nor deleted.
+12. Repeat the connected probe and a bounded mock-policy-compatible flow inside
    the documented production container with the exact serial/CAN/model mounts.
-   Only run a real policy after independently verifying its observation,
-   action, and safety compatibility with this YAM pair.
+   Restart the container after a serial-device remap and verify the stable
+   mounted path is rediscovered before reconnecting. Only run a real policy
+   after independently verifying its observation, action, and safety
+   compatibility with this YAM pair.
+
+The ROS-58 lifecycle checks in items 9–12 have not been performed on a physical
+Ubuntu/YAM box in this development environment; automated mock and fake-vendor
+coverage is not a substitute for recording those observations on the target.
 
 Container setup is in [Docker deployment](docker-deployment.md). Recording
 ownership is in [Recording and teleoperation](recording.md).

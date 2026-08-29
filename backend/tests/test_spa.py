@@ -49,6 +49,62 @@ def test_frontend_has_six_primary_routes_and_separate_training_models_owners() -
     assert "logs.slice(-500)" not in training_source
 
 
+def test_settings_exposes_service_backed_yam_onboarding_without_browser_device_logic() -> None:
+    app_source = (REPOSITORY_ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
+    settings_source = (REPOSITORY_ROOT / "frontend/src/pages/SettingsPage.tsx").read_text(encoding="utf-8")
+    panel_source = (REPOSITORY_ROOT / "frontend/src/components/YamSetupPanel.tsx").read_text(encoding="utf-8")
+    hook_source = (REPOSITORY_ROOT / "frontend/src/hooks/useYamSetup.ts").read_text(encoding="utf-8")
+    api_source = (REPOSITORY_ROOT / "frontend/src/lib/api.ts").read_text(encoding="utf-8")
+    type_source = (REPOSITORY_ROOT / "frontend/src/types/yamSetup.ts").read_text(encoding="utf-8")
+
+    assert "<YamSetupPanel onSettingsRefresh={refresh} />" in settings_source
+    assert 'id="yam-setup"' in panel_source
+    assert "Discovery only lists network interfaces and stable serial candidates" in panel_source
+    assert "It does not open a bus, start a controller, or move an arm." in panel_source
+    assert "calibration file is readiness evidence only" in panel_source
+    assert "I secured the workspace" in panel_source
+    assert "emergency stop" in panel_source
+    assert "requires_physical_validation" in panel_source or "Physical directions, offsets" in panel_source
+    assert "Multiple candidates are intentionally not auto-selected" in panel_source
+    assert "Mock mode provides a deterministic leader" in panel_source
+    assert "const [autoRestore, setAutoRestore] = useState(false);" in panel_source
+    assert "yam.setup.auto_restore || !yam.setup.saved" not in panel_source
+    assert "canDisableAutomaticConnection" in panel_source
+    assert "It does not disconnect hardware that is already connected." in panel_source
+    assert 'setup.saved ? "Waiting for saved devices" : "Configured hardware missing"' in panel_source
+    assert "Another robot operation is active" not in panel_source
+    assert "{yam.error}" in panel_source
+    assert "dirty || autoRestoreDirty || !yam.setup.calibration_ready" in panel_source
+    assert "acknowledge_automatic_motion_risk" in type_source
+    assert "acknowledge_hardware_motion_risk" in type_source
+    assert "acknowledge_automatic_motion_risk" in hook_source
+    assert "acknowledge_hardware_motion_risk" in hook_source
+    assert 'maxLength={15}' in panel_source
+
+    assert '"/api/yam/setup"' in api_source
+    assert '"/api/yam/setup/discover"' in api_source
+    assert '"/api/yam/setup/preflight"' in api_source
+    assert '"/api/yam/setup/connect"' in api_source
+    assert "navigator.serial" not in panel_source
+    assert "navigator.usb" not in panel_source
+    assert "new WebSocket" not in panel_source
+
+    # Refresh remains stable after state updates and every request is abortable.
+    assert "const hasSetup = useRef(false);" in hook_source
+    assert "currentController" in hook_source
+    assert "operationRef" in hook_source
+    assert "controller.signal" in hook_source
+    assert 'document.visibilityState !== "visible"' in hook_source
+    assert 'document.addEventListener("visibilitychange"' in hook_source
+    assert 'setup.state === "error"' in hook_source
+    assert "}, [setup]);" not in hook_source
+    assert "lastGlobalStatus" in panel_source
+    assert "onSettingsRefresh();" in panel_source
+    assert "fetchYamSetup" in app_source
+    assert 'location.pathname === "/settings"' in app_source
+    assert 'yam.saved && yam.auto_restore' in app_source
+
+
 def _frontend_dist(tmp_path: Path) -> Path:
     dist = tmp_path / "dist"
     assets = dist / "assets"

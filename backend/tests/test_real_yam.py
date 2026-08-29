@@ -38,6 +38,7 @@ from ctrl_pi.drivers.yam import (
     JogLimitError,
     YAMDriverDiagnostic,
     YAMDriverUnavailableError,
+    YAMSetupConfig,
 )
 from ctrl_pi.yam_probe import run_probe
 
@@ -372,6 +373,76 @@ def test_startup_maps_vendor_order_units_and_nullable_telemetry() -> None:
         assert driver.diagnostic().status == "connected"
     finally:
         driver.shutdown()
+
+
+def test_telemetry_thread_start_failure_disconnects_devices_and_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[str] = []
+    driver, factory = _driver(FakeLeader(events), FakeFollower(events))
+
+    def fail_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("/dev/operator-secret RAW_THREAD_FAILURE")
+
+    monkeypatch.setattr("ctrl_pi.drivers.real_yam.threading.Thread.start", fail_start)
+    caplog.set_level(logging.ERROR, logger="ctrl_pi.drivers.real_yam")
+
+    driver.startup()
+    driver.shutdown()
+    driver.shutdown()
+
+    assert factory.calls == 1
+    assert driver.diagnostic().status == "error"
+    assert all(not arm.connected for arm in driver.list_arms())
+    assert events.count("follower.zero") == 1
+    assert events.count("follower.close") == 1
+    assert events.count("leader.disconnect") == 1
+    assert "operator-secret" not in caplog.text
+    assert "RAW_THREAD_FAILURE" not in caplog.text
+
+
+def test_lifecycle_lock_prevents_reconfiguration_during_device_startup() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    events: list[str] = []
+
+    class BlockingFactory(FakeFactory):
+        def create(self, config: RealYAMConfig) -> VendorDevices:
+            entered.set()
+            assert release.wait(timeout=2.0)
+            return super().create(config)
+
+    factory = BlockingFactory(FakeLeader(events), FakeFollower(events))
+    driver = RealYAMDriver(_config(), vendor_factory=factory)
+    driver.preflight = lambda: CONFIGURED  # type: ignore[method-assign]
+    replacement = YAMSetupConfig(
+        can_interface="can1",
+        leader_port="/dev/serial/by-id/replacement",
+        mujoco_xml_path="/opt/ctrl-pi/replacement.xml",
+        leader_calibration_id="replacement",
+        leader_calibration_dir="/var/lib/ctrl-pi/calibration",
+    )
+
+    startup = threading.Thread(target=driver.startup)
+    configure = threading.Thread(target=lambda: driver.apply_setup(replacement))
+    startup.start()
+    assert entered.wait(timeout=1.0)
+    configure.start()
+    time.sleep(0.03)
+    assert configure.is_alive()
+    release.set()
+    startup.join(timeout=2.0)
+    configure.join(timeout=2.0)
+
+    assert not startup.is_alive()
+    assert not configure.is_alive()
+    assert driver.setup_config() == replacement
+    assert factory.calls == 1
+    assert "follower.zero" in events
+    assert "follower.close" in events
+    assert "leader.disconnect" in events
+    driver.shutdown()
 
 
 def test_apply_action_reorders_wrist_axes_and_enables_position_control_once() -> None:
@@ -803,7 +874,28 @@ def _preflight_config(tmp_path: Path) -> RealYAMConfig:
     model.write_text("<mujoco/>")
     calibration_dir = tmp_path / "calibration"
     calibration_dir.mkdir()
-    (calibration_dir / "yam-leader.json").write_text("{}")
+    calibration = {
+        name: {
+            "id": index,
+            "drive_mode": 0,
+            "homing_offset": 0,
+            "range_min": -100,
+            "range_max": 100,
+        }
+        for index, name in enumerate(
+            (
+                "shoulder_pan",
+                "shoulder_lift",
+                "elbow_flex",
+                "wrist_flex",
+                "wrist_roll",
+                "wrist_yaw",
+                "gripper",
+            ),
+            start=1,
+        )
+    }
+    (calibration_dir / "yam-leader.json").write_text(json.dumps(calibration))
     serial = tmp_path / "ttyYAM"
     serial.write_text("")
     return _config(
@@ -821,6 +913,16 @@ def test_preflight_checks_exact_versions_files_serial_and_can_without_vendor(
         "ctrl_pi.drivers.real_yam.metadata.version",
         lambda _distribution: "0.1.1",
     )
+    monkeypatch.setattr(
+        RealYAMDriver,
+        "_serial_device_is_character",
+        staticmethod(lambda _path: True),
+    )
+    monkeypatch.setattr(
+        RealYAMDriver,
+        "_network_interface_kind",
+        staticmethod(lambda _name: "can"),
+    )
     events: list[str] = []
     factory = FakeFactory(FakeLeader(events), FakeFollower(events))
     driver = RealYAMDriver(_preflight_config(tmp_path), vendor_factory=factory)
@@ -828,6 +930,85 @@ def test_preflight_checks_exact_versions_files_serial_and_can_without_vendor(
     result = driver.preflight()
 
     assert result.status == "configured"
+    assert factory.calls == 0
+    assert events == []
+
+
+def test_discovery_is_passive_typed_bounded_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sys_net = tmp_path / "sys-class-net"
+    sys_net.mkdir()
+    interface_names = [f"can{index}" for index in range(40)] + ["ethernet-secret"]
+    for name in interface_names:
+        directory = sys_net / name
+        directory.mkdir()
+        (directory / "type").write_text("280\n" if name.startswith("can") else "1\n")
+    serial_root = tmp_path / "by-id"
+    serial_root.mkdir()
+    for index in range(40):
+        (serial_root / f"operator-secret-{index}").symlink_to("/dev/null")
+    (serial_root / "regular-file").write_text("not a device")
+    (serial_root / "broken-link").symlink_to(tmp_path / "missing-device")
+    monkeypatch.setattr(
+        "ctrl_pi.drivers.real_yam.SYS_CLASS_NET_ROOT", sys_net
+    )
+    monkeypatch.setattr(
+        "ctrl_pi.drivers.real_yam.STABLE_SERIAL_ROOT", serial_root
+    )
+    monkeypatch.setattr(
+        "ctrl_pi.drivers.real_yam.CONVENTIONAL_LEADER_DEVICE",
+        tmp_path / "missing-conventional",
+    )
+    monkeypatch.setattr(
+        "ctrl_pi.drivers.real_yam.socket.if_nameindex",
+        lambda: list(enumerate(interface_names, start=1)),
+    )
+    events: list[str] = []
+    factory = FakeFactory(FakeLeader(events), FakeFollower(events))
+    driver = RealYAMDriver(_config(), vendor_factory=factory)
+
+    result = driver.discover_setup()
+
+    assert len(result.can_interfaces) == 32
+    assert len(result.leader_ports) == 32
+    assert all(item.id.startswith("can") for item in result.can_interfaces)
+    assert "ethernet-secret" not in result.model_dump_json()
+    assert all("operator-secret" not in item.label for item in result.leader_ports)
+    assert all(Path(item.id).is_symlink() for item in result.leader_ports)
+    assert factory.calls == 0
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"{not-json",
+        b"{}",
+        b"x" * (64 * 1024 + 1),
+    ],
+)
+def test_preflight_rejects_malformed_or_oversized_calibration_without_vendor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    monkeypatch.setattr(
+        "ctrl_pi.drivers.real_yam.metadata.version",
+        lambda _distribution: "0.1.1",
+    )
+    config = _preflight_config(tmp_path)
+    assert config.leader_calibration_dir is not None
+    (Path(config.leader_calibration_dir) / "yam-leader.json").write_bytes(payload)
+    events: list[str] = []
+    factory = FakeFactory(FakeLeader(events), FakeFollower(events))
+    driver = RealYAMDriver(config, vendor_factory=factory)
+
+    result = driver.preflight()
+
+    assert result.status == "missing"
+    assert "calibration file" in result.detail
     assert factory.calls == 0
     assert events == []
 
@@ -850,6 +1031,11 @@ def test_preflight_fails_closed_without_disclosing_selected_paths(
     monkeypatch.setattr(
         "ctrl_pi.drivers.real_yam.metadata.version",
         lambda _distribution: "0.1.1",
+    )
+    monkeypatch.setattr(
+        RealYAMDriver,
+        "_serial_device_is_character",
+        staticmethod(lambda _path: True),
     )
     config = replace(_preflight_config(tmp_path), **mutation)
     driver = RealYAMDriver(config)

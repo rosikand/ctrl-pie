@@ -17,6 +17,7 @@ from ctrl_pi.api.recordings import (
 )
 from ctrl_pi.api.settings import router as settings_router
 from ctrl_pi.api.trainer import router as trainer_router
+from ctrl_pi.api.yam_setup import router as yam_setup_router
 from ctrl_pi.camera import MockCamera
 from ctrl_pi.compute import ComputeTarget, TargetKind
 from ctrl_pi.compute_stub import StubComputeTarget
@@ -42,6 +43,7 @@ from ctrl_pi.inference_transport import (
 from ctrl_pi.recording import RecordingManager
 from ctrl_pi.rig import RigLease
 from ctrl_pi.spa import install_spa
+from ctrl_pi.yam_setup import YAMSetupManager
 
 
 def create_app(
@@ -58,12 +60,17 @@ def create_app(
     inference_session_manager: InferenceSessionManager | None = None,
     inference_transport_factory: TransportFactory | None = None,
     frontend_dist_dir: Path | None = None,
+    yam_setup_manager: YAMSetupManager | None = None,
 ) -> FastAPI:
     config = get_config()
     driver = yam_driver if yam_driver is not None else create_yam_driver(config)
     camera = mock_camera or MockCamera()
     if recording_manager is None:
-        rig_lease = RigLease()
+        rig_lease = (
+            yam_setup_manager.rig_lease
+            if yam_setup_manager is not None
+            else RigLease()
+        )
         manager = RecordingManager(
             driver=driver,
             camera=camera,
@@ -81,6 +88,16 @@ def create_app(
     application_session_factory = (
         None if engine is None else sessionmaker(bind=engine, expire_on_commit=False)
     )
+    setup_manager = yam_setup_manager or YAMSetupManager(
+        driver=driver,
+        rig_lease=rig_lease,
+        mock_mode=config.mock_mode,
+        session_factory=application_session_factory,
+    )
+    if setup_manager.driver is not driver:
+        raise ValueError("YAM setup manager and application must share one driver instance")
+    if setup_manager.rig_lease is not rig_lease:
+        raise ValueError("YAM setup manager and application must share one rig lease")
     if deployment_service is None:
         if compute_target is not None:
             target = compute_target
@@ -166,11 +183,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        driver_started = False
+        setup_started = False
         recording_started = False
         try:
-            driver_started = True
-            await asyncio.to_thread(application.state.yam_driver.startup)
+            setup_started = True
+            await application.state.yam_setup_manager.startup()
             await application.state.recording_manager.startup()
             recording_started = True
             if callable(
@@ -194,8 +211,8 @@ def create_app(
                     if recording_started:
                         await application.state.recording_manager.shutdown()
                 finally:
-                    if driver_started:
-                        await asyncio.to_thread(application.state.yam_driver.shutdown)
+                    if setup_started:
+                        await application.state.yam_setup_manager.shutdown()
 
     application = FastAPI(
         title="ctrl-π API",
@@ -219,6 +236,7 @@ def create_app(
         return JSONResponse(status_code=422, content={"detail": details})
 
     application.state.yam_driver = driver
+    application.state.yam_setup_manager = setup_manager
     application.state.rig_lease = rig_lease
     application.state.mock_camera = manager.camera
     application.state.recording_manager = manager
@@ -232,6 +250,7 @@ def create_app(
     application.state.deployment_service = deployment_service
     application.state.inference_session_manager = session_manager
     application.include_router(settings_router)
+    application.include_router(yam_setup_router)
     application.include_router(arms_router)
     application.include_router(recordings_router)
     application.include_router(camera_router)

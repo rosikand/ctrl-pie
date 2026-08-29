@@ -187,7 +187,7 @@ Browser ── LAN ──► ctrl-π backend (Ubuntu box) ── CAN/USB ──�
 
 Key interfaces/components:
 
-- `YAMDriver` / `MockYAMDriver`
+- `YAMDriver` / `MockYAMDriver` plus the single-rig `YAMSetupManager`
 - `LeRobotRuntime`, `OpenPIRuntime` (runtime adapters)
 - `ModalComputeTarget` (behind a generic `ComputeTarget` abstraction)
 - Trainer API (REST + thin Python client package)
@@ -200,9 +200,10 @@ Modal). No YAM/CAN, Modal, or policy-framework details in frontend components.
 Three categories:
 
 1. **PostgreSQL** — source of truth for small mutable control-plane state:
-   robots/arms config, recording metadata, training runs, inference
-   endpoints/deployments, settings. Suggested tables: `robots`, `recordings`,
-   `training_runs`, `inference_endpoints`, `deployments`, `settings`.
+   robots/arms config, the one persisted physical YAM setup, recording
+   metadata, training runs, inference endpoints/deployments, settings.
+   Suggested tables: `robots`, `yam_setups`, `recordings`, `training_runs`,
+   `inference_endpoints`, `deployments`, `settings`.
    SQLAlchemy + Alembic; depend only on standard Postgres via `DATABASE_URL`
    (Supabase is just the recommended host).
 2. **Hugging Face Hub** — source of truth for artifacts: LeRobot datasets,
@@ -220,6 +221,22 @@ Three categories:
   secrets in Postgres or HF.
 - First-run experience: if required config is missing, the UI shows a clear
   setup checklist instead of broken pages.
+- V1.1 YAM onboarding supports one standard leader/follower pair. The backend
+  passively discovers bounded SocketCAN/stable-serial candidates without
+  opening devices, accepts bounded non-secret host configuration, and performs
+  a read-only preflight. Calibration readiness proves only that a bounded JSON
+  artifact matches the pinned structure; physical calibration accuracy remains
+  an Ubuntu/YAM-box validation.
+- A passing physical setup can be persisted in PostgreSQL and applied to the
+  existing `YAMDriver` without a process restart. Explicit Connect can open the
+  devices only after a backend-enforced hardware-motion acknowledgment.
+  Automatic boot/hot-plug connection is off by default and requires a distinct
+  acknowledgment because it can engage the follower gravity-compensation
+  controller. Missing hardware remains fail-closed and is passively rechecked;
+  latched runtime/vendor errors are never blindly retried.
+- Mock onboarding implements the same discovery/preflight/apply/connect surface
+  deterministically but cannot overwrite or delete the persisted physical
+  setup and never implies physical discovery, calibration, or validation.
 
 ## Deployment & isolation
 
@@ -450,3 +467,17 @@ open issues. Do not expand scope.
   512 KiB and reports gaps explicitly. This is an observer contract for
   external trainers and future workers, not managed training or direct Modal
   console attachment/streaming.
+- 2026-08-29 — V1.1 persists one bounded, non-secret physical YAM rig setup in
+  PostgreSQL and applies it in place to the same `YAMDriver` object shared by
+  Arms, recording, and inference. Discovery and preflight inspect bounded
+  SocketCAN, stable serial-device, package, model, and calibration-file
+  readiness without constructing vendor devices or opening hardware. Explicit
+  connect and opt-in automatic restoration require separate hardware-motion
+  acknowledgements; automatic restoration passively re-detects only a saved
+  rig that was missing at boot, acquires the shared rig lease, and makes one
+  serialized connection attempt when readiness changes. A failed active or
+  runtime connection stays latched for manual review. A schema-valid readable
+  calibration file is readiness evidence only, never proof that directions,
+  offsets, limits, zero-torque behavior, or emergency-stop behavior are safe on
+  a physical rig. Mock setup remains deterministic and never overwrites a
+  saved physical setup when modes change.
