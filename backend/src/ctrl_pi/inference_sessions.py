@@ -288,33 +288,48 @@ class InferenceSessionManager:
         self._now = now or (lambda: datetime.now(UTC))
         self._monotonic = monotonic
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._startup_cleanup_pending = False
+        self._startup_cleanup_cutoff: datetime | None = None
 
     async def startup(self) -> None:
         """Never auto-resume motion; tear down unattended running providers."""
 
+        cleanup_cutoff = (
+            self._utc_now() if self._session_factory is not None else None
+        )
         async with self._lock:
             previous_watchdog = self._watchdog_task
             self._watchdog_task = None
             self._shutting_down = False
             self._idle_state_cache.clear()
+            self._startup_cleanup_pending = cleanup_cutoff is not None
+            self._startup_cleanup_cutoff = cleanup_cutoff
         if previous_watchdog is not None and not previous_watchdog.done():
             previous_watchdog.cancel()
             await asyncio.gather(previous_watchdog, return_exceptions=True)
         if self._session_factory is None:
             return
-        cleanup_rows = self._persisted_cleanup_rows(
-            {"deploying", "running", "stopping", "failed"}
+        cleanup_rows = self._try_persisted_cleanup_rows(
+            {"deploying", "running", "stopping", "failed"},
+            created_before=cleanup_cutoff,
         )
-        for deployment_id, target_kind in cleanup_rows:
-            try:
-                await self._cleanup_persisted_deployment(
-                    deployment_id,
-                    target_kind,
-                )
-            except Exception:
-                # A provider/configuration failure stays explicit and
-                # retryable; startup remains available and never starts an arm.
-                continue
+        cleanup_complete = cleanup_rows is not None
+        if cleanup_rows is not None:
+            for deployment_id, target_kind in cleanup_rows:
+                try:
+                    await self._cleanup_persisted_deployment(
+                        deployment_id,
+                        target_kind,
+                    )
+                except Exception:
+                    # A provider/configuration failure stays explicit and
+                    # retryable; startup remains available and never starts an arm.
+                    cleanup_complete = False
+        if cleanup_complete:
+            async with self._lock:
+                if self._startup_cleanup_cutoff == cleanup_cutoff:
+                    self._startup_cleanup_pending = False
+                    self._startup_cleanup_cutoff = None
         if self._watchdog_interval_seconds is not None:
             async with self._lock:
                 if not self._shutting_down:
@@ -425,6 +440,10 @@ class InferenceSessionManager:
             if self._shutting_down:
                 raise InferenceSessionConflictError(
                     "The inference service is shutting down."
+                )
+            if self._startup_cleanup_pending:
+                raise InferenceSessionUnavailableError(
+                    "Startup deployment reconciliation is still pending."
                 )
             existing = self._sessions.get(deployment_id)
             if existing is not None and existing.status in {
@@ -706,6 +725,7 @@ class InferenceSessionManager:
     async def _watchdog_once(self) -> None:
         if self._session_factory is None:
             return
+        await self._retry_startup_cleanup()
         now = self._utc_now()
         try:
             with self._session_factory() as db:
@@ -739,6 +759,38 @@ class InferenceSessionManager:
                 # teardown cannot yet be verified.
                 continue
 
+    async def _retry_startup_cleanup(self) -> None:
+        """Retry the fail-closed startup sweep after transient storage failure."""
+
+        async with self._lock:
+            pending = self._startup_cleanup_pending
+            cutoff = self._startup_cleanup_cutoff
+            shutting_down = self._shutting_down
+        if not pending or cutoff is None or shutting_down:
+            return
+        rows = self._try_persisted_cleanup_rows(
+            {"deploying", "running", "stopping", "failed"},
+            created_before=cutoff,
+        )
+        if rows is None:
+            return
+        complete = True
+        for deployment_id, target_kind in rows:
+            try:
+                await self._cleanup_persisted_deployment(
+                    deployment_id,
+                    target_kind,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                complete = False
+        if complete:
+            async with self._lock:
+                if self._startup_cleanup_cutoff == cutoff:
+                    self._startup_cleanup_pending = False
+                    self._startup_cleanup_cutoff = None
+
     def _service_for_kind(
         self, target_kind: TargetKind
     ) -> DeploymentService | None:
@@ -763,18 +815,30 @@ class InferenceSessionManager:
         self,
         statuses: set[str],
     ) -> list[tuple[uuid.UUID, TargetKind]]:
+        rows = self._try_persisted_cleanup_rows(statuses)
+        return [] if rows is None else rows
+
+    def _try_persisted_cleanup_rows(
+        self,
+        statuses: set[str],
+        *,
+        created_before: datetime | None = None,
+    ) -> list[tuple[uuid.UUID, TargetKind]] | None:
         if self._session_factory is None:
             return []
         try:
             with self._session_factory() as db:
-                rows = db.execute(
-                    select(Deployment.id, Deployment.target_kind).where(
-                        Deployment.stopped_at.is_(None),
-                        Deployment.status.in_(tuple(statuses)),
+                statement = select(Deployment.id, Deployment.target_kind).where(
+                    Deployment.stopped_at.is_(None),
+                    Deployment.status.in_(tuple(statuses)),
+                )
+                if created_before is not None:
+                    statement = statement.where(
+                        Deployment.created_at <= created_before
                     )
-                ).all()
+                rows = db.execute(statement).all()
         except SQLAlchemyError:
-            return []
+            return None
         return [
             (deployment_id, target_kind)
             for deployment_id, target_kind in rows

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -32,6 +33,7 @@ from ctrl_pi.inference_sessions import (
     InferenceSessionConflictError,
     InferenceSessionManager,
     InferenceSessionRuntimeError,
+    InferenceSessionUnavailableError,
     InferenceStartOptions,
     InferenceStopOptions,
 )
@@ -330,6 +332,62 @@ async def test_restart_never_resumes_actions_and_tears_down_running_provider(
     with factory() as db:
         deployment = db.get(Deployment, deployment_id)
         assert deployment.status == "stopped"
+    after = driver.get_arm("yam-follower")
+    assert [joint.position_radians for joint in before.joints] == [
+        joint.position_radians for joint in after.joints
+    ]
+    assert all(state.stopped_verified for state in target.list_owned())
+    assert await manager.active_resource_counts() == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_startup_database_outage_retries_unexpired_cleanup_without_motion(
+    inference_stack,
+) -> None:
+    _, factory, target, service, driver, _, existing = inference_stack
+    deployment_id = await _deploy(service, factory)
+    before = driver.get_arm("yam-follower")
+    attempts = 0
+
+    def flaky_factory():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SQLAlchemyError("transient startup database outage")
+        return factory()
+
+    manager = InferenceSessionManager(
+        deployment_service=service,
+        driver=driver,
+        camera=existing.camera,
+        rig_lease=existing.rig_lease,
+        recording_manager=existing.recording_manager,
+        transport_factory=existing.transport_factory,
+        session_factory=flaky_factory,
+        recording_fps=50,
+        watchdog_interval_seconds=None,
+    )
+
+    await manager.startup()
+    with factory() as db:
+        assert service.get(db, deployment_id).status == "running"
+        with pytest.raises(
+            InferenceSessionUnavailableError,
+            match="Startup deployment reconciliation is still pending",
+        ):
+            await manager.start(
+                db,
+                deployment_id,
+                InferenceStartOptions(
+                    arm_id="yam-follower",
+                    task="Must not move before restart cleanup",
+                ),
+            )
+
+    await manager._watchdog_once()
+
+    with factory() as db:
+        assert service.get(db, deployment_id).status == "stopped"
     after = driver.get_arm("yam-follower")
     assert [joint.position_radians for joint in before.joints] == [
         joint.position_radians for joint in after.joints

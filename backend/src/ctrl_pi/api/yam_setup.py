@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -30,14 +30,14 @@ class YAMSetupWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     config: YAMSetupConfig
-    auto_restore: bool = False
-    acknowledge_automatic_motion_risk: bool = False
+    auto_restore: bool = Field(default=False, strict=True)
+    acknowledge_automatic_motion_risk: bool = Field(default=False, strict=True)
 
 
 class YAMConnectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    acknowledge_hardware_motion_risk: bool = False
+    acknowledge_hardware_motion_risk: bool = Field(default=False, strict=True)
 
 
 def get_yam_setup_manager(request: Request) -> YAMSetupManager:

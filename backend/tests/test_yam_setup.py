@@ -326,6 +326,90 @@ def test_hardware_api_requires_motion_consent_and_respects_active_rig(
     assert connected.json()["connected"] is True
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        (
+            "PUT",
+            "/api/yam/setup",
+            {
+                "config": HARDWARE_CONFIG.model_dump(),
+                "auto_restore": 1,
+                "acknowledge_automatic_motion_risk": True,
+            },
+        ),
+        (
+            "PUT",
+            "/api/yam/setup",
+            {
+                "config": HARDWARE_CONFIG.model_dump(),
+                "auto_restore": "yes",
+                "acknowledge_automatic_motion_risk": True,
+            },
+        ),
+        (
+            "PUT",
+            "/api/yam/setup",
+            {
+                "config": HARDWARE_CONFIG.model_dump(),
+                "auto_restore": True,
+                "acknowledge_automatic_motion_risk": 1,
+            },
+        ),
+        (
+            "PUT",
+            "/api/yam/setup",
+            {
+                "config": HARDWARE_CONFIG.model_dump(),
+                "auto_restore": True,
+                "acknowledge_automatic_motion_risk": "yes",
+            },
+        ),
+        (
+            "POST",
+            "/api/yam/setup/connect",
+            {"acknowledge_hardware_motion_risk": 1},
+        ),
+        (
+            "POST",
+            "/api/yam/setup/connect",
+            {"acknowledge_hardware_motion_risk": "yes"},
+        ),
+    ],
+)
+def test_hardware_api_rejects_coerced_safety_booleans_before_driver_access(
+    setup_database,
+    method: str,
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    _, factory = setup_database
+    _persist_hardware(factory, auto_restore=False)
+    driver = SetupDriver(visible=True)
+    manager = YAMSetupManager(
+        driver=driver,
+        rig_lease=RigLease(),
+        mock_mode=False,
+        session_factory=factory,
+    )
+    app = create_app(yam_driver=driver, yam_setup_manager=manager)
+    _database_overrides(app, factory)
+
+    def unexpected_manager_call(*_args, **_kwargs):
+        raise AssertionError("invalid safety booleans reached the setup manager")
+
+    manager.save = unexpected_manager_call  # type: ignore[method-assign]
+    manager.connect = unexpected_manager_call  # type: ignore[method-assign]
+
+    with TestClient(app) as client:
+        driver.events.clear()
+        driver.start_calls = 0
+        response = client.request(method, path, json=payload)
+        assert response.status_code == 422
+        assert driver.events == []
+        assert driver.start_calls == 0
+
+
 def test_save_commit_failure_restores_previous_connected_setup(
     setup_database,
     monkeypatch: pytest.MonkeyPatch,

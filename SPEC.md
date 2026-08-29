@@ -16,9 +16,13 @@ says. Record any ambiguity resolutions under "Decisions" at the bottom.
   same FastAPI control plane. Every meaningful product workflow is available
   through the public REST API; the Python SDK must not bypass services or add
   a privileged hardware/provider path.
-- All state lives in services the user owns: their Postgres, their HF
-  namespace, their Modal account. Booting ctrl-π on a fresh machine with the
-  same credentials restores the same state.
+- Durable control-plane state and uploaded artifacts live in services the user
+  owns: their Postgres, their HF namespace, and their Modal account. Booting
+  ctrl-π on a fresh machine with the same credentials restores that durable
+  state. Finalized recordings that have not reached a verified Hub upload are
+  still local staging data, however, so the operator must preserve or restore
+  `RECORDING_STAGING_DIR` (the Docker `ctrl-pi-data` volume) as well; process-
+  local live motion and capture sessions are deliberately never resumed.
 - Target platform is Linux (Ubuntu box physically connected to the YAM arms
   over CAN/USB). Development on macOS against mocks is fine.
 - Visual style: light Tailwind, sparse, simple, engineering-oriented. The
@@ -574,8 +578,9 @@ V1.1 builds on the completed V1 in this order:
   six product workflows, installation, YAM onboarding, the REST/Python SDK,
   architecture, operations, screenshots, troubleshooting, and release notes.
   The top-level README remains a concise entry point rather than a duplicate
-  manual. Documentation describes only behavior present in the current tree;
-  managed training remains out of scope until its accepted issue is built.
+  manual. Documentation describes only behavior present in the current tree,
+  including SDK/REST-launched managed Modal training and its verified teardown
+  boundary.
 - 2026-08-29 — V1.1 managed training is an SDK/REST-launched, artifact-backed
   SmolVLA job through LeRobot 0.4.4 on the operator's Modal account, linked one-to-one with the
   existing Training run rather than replacing external reporting. The request

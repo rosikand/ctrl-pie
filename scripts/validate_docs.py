@@ -21,6 +21,7 @@ REQUIRED_ROUTES = {
     "quickstart",
     "setup",
     "configuration",
+    "managed-training",
     "yam-setup",
     "arms",
     "recording",
