@@ -130,6 +130,9 @@ def _recording_state() -> dict[str, object]:
     return {
         "recording_id": RECORDING_ID,
         "teleop_active": False,
+        "sync_enabled": False,
+        "sync_in_progress": False,
+        "joint_deltas_radians": {},
         "episode_active": False,
         "current_episode_index": None,
         "episode_duration_seconds": 0.0,
@@ -393,9 +396,14 @@ def test_sdk_covers_the_current_public_rest_workflows_with_typed_results() -> No
         client.get_recording(RECORDING_ID)
         client.get_recording_state(RECORDING_ID)
         client.start_teleop(RECORDING_ID)
-        client.stop_teleop(RECORDING_ID)
+        client.enable_teleop_sync(
+            RECORDING_ID,
+            acknowledge_slow_sync_motion=True,
+        )
         client.start_episode(RECORDING_ID, operator="operator")
         client.stop_episode(RECORDING_ID, success=True)
+        client.disable_teleop_sync(RECORDING_ID)
+        client.stop_teleop(RECORDING_ID)
         client.upload_recording(RECORDING_ID, repo_name="pick-cube", private=True)
         client.list_datasets(limit=10, cursor="cursor", refresh=True)
         client.list_dataset_episodes("pick-cube")
@@ -455,6 +463,14 @@ def test_sdk_covers_the_current_public_rest_workflows_with_typed_results() -> No
     )
     assert json.loads(yam_connect.content) == {
         "acknowledge_hardware_motion_risk": True
+    }
+    sync_enable = next(
+        request
+        for request in requests
+        if request.url.path.endswith("/teleop/sync/enable")
+    )
+    assert json.loads(sync_enable.content) == {
+        "acknowledge_slow_sync_motion": True
     }
     upload = next(request for request in requests if request.url.path.endswith("/upload"))
     assert json.loads(upload.content)["private"] is True

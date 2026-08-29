@@ -16,12 +16,13 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ctrl_pi.db import Base
 
@@ -74,6 +75,114 @@ class YAMSetup(TimestampMixin, Base):
     )
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class YAMCell(TimestampMixin, Base):
+    """The one persisted physical YAM cell supported by V1.2.
+
+    Mock topology remains driver-owned and is deliberately not stored here. Runtime
+    SocketCAN names are likewise absent: an arm's durable USB adapter identity lives
+    on :class:`YAMCellArm` and resolves to the current ``canN`` only in live state.
+    """
+
+    __tablename__ = "yam_cells"
+    __table_args__ = (
+        CheckConstraint("id = 'primary'", name="ck_yam_cells_singleton"),
+        CheckConstraint("length(i2rt_commit) = 40", name="ck_yam_cells_i2rt_commit"),
+    )
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default="primary")
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    i2rt_root: Mapped[str] = mapped_column(String(1_024), nullable=False)
+    i2rt_commit: Mapped[str] = mapped_column(String(40), nullable=False)
+    pair_ports: Mapped[dict[str, int]] = mapped_column(
+        json_type, default=dict, server_default=text("'{}'"), nullable=False
+    )
+    auto_restore: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    arms: Mapped[list[YAMCellArm]] = relationship(
+        back_populates="cell",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="YAMCellArm.position",
+    )
+
+
+class YAMCellArm(TimestampMixin, Base):
+    """One typed, durable arm assignment within the primary physical cell."""
+
+    __tablename__ = "yam_cell_arms"
+    __table_args__ = (
+        CheckConstraint("position >= 0", name="ck_yam_cell_arms_position"),
+        CheckConstraint(
+            "role IN ('leader', 'follower')", name="ck_yam_cell_arms_role"
+        ),
+        CheckConstraint(
+            "transport_kind IN ('socketcan', 'serial')",
+            name="ck_yam_cell_arms_transport_kind",
+        ),
+        CheckConstraint(
+            "end_effector_kind IN ('yam_teaching_handle', 'linear_4310', "
+            "'crank_4310', 'gello', 'none')",
+            name="ck_yam_cell_arms_end_effector_kind",
+        ),
+        CheckConstraint(
+            "(calibration_id IS NULL AND calibration_dir IS NULL) OR "
+            "(calibration_id IS NOT NULL AND calibration_dir IS NOT NULL)",
+            name="ck_yam_cell_arms_calibration_pair",
+        ),
+        CheckConstraint(
+            "(transport_kind = 'socketcan' AND role = 'leader' AND "
+            "end_effector_kind = 'yam_teaching_handle') OR "
+            "(transport_kind = 'socketcan' AND role = 'follower' AND "
+            "end_effector_kind IN ('linear_4310', 'crank_4310')) OR "
+            "(transport_kind = 'serial' AND role = 'leader' AND "
+            "end_effector_kind = 'gello')",
+            name="ck_yam_cell_arms_supported_shape",
+        ),
+        UniqueConstraint(
+            "cell_id", "position", name="uq_yam_cell_arms_position"
+        ),
+        UniqueConstraint(
+            "cell_id", "logical_id", name="uq_yam_cell_arms_logical_id"
+        ),
+        UniqueConstraint("cell_id", "name", name="uq_yam_cell_arms_name"),
+        UniqueConstraint(
+            "cell_id",
+            "transport_kind",
+            "stable_identity",
+            name="uq_yam_cell_arms_stable_identity",
+        ),
+        Index("ix_yam_cell_arms_pair", "cell_id", "pair_id"),
+        Index("ix_yam_cell_arms_group", "cell_id", "group_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    cell_id: Mapped[str] = mapped_column(
+        String(16), ForeignKey("yam_cells.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    logical_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    pair_id: Mapped[str | None] = mapped_column(String(120))
+    group_id: Mapped[str | None] = mapped_column(String(120))
+    side: Mapped[str | None] = mapped_column(String(64))
+    transport_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    stable_identity: Mapped[str] = mapped_column(String(256), nullable=False)
+    end_effector_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    frame_map_path: Mapped[str | None] = mapped_column(String(1_024))
+    soft_limits_path: Mapped[str | None] = mapped_column(String(1_024))
+    mujoco_xml_path: Mapped[str | None] = mapped_column(String(1_024))
+    calibration_id: Mapped[str | None] = mapped_column(String(64))
+    calibration_dir: Mapped[str | None] = mapped_column(String(1_024))
+    config: Mapped[dict[str, Any]] = mapped_column(
+        json_type, default=dict, server_default=text("'{}'"), nullable=False
+    )
+    cell: Mapped[YAMCell] = relationship(back_populates="arms")
 
 
 class Recording(TimestampMixin, Base):

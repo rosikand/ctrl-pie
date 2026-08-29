@@ -20,6 +20,7 @@ from ctrl_pi.api.recordings import (
 )
 from ctrl_pi.api.settings import router as settings_router
 from ctrl_pi.api.trainer import router as trainer_router
+from ctrl_pi.api.yam_setup import cell_router as yam_cell_router
 from ctrl_pi.api.yam_setup import router as yam_setup_router
 from ctrl_pi.camera import MockCamera
 from ctrl_pi.compute import ComputeTarget, TargetKind
@@ -332,6 +333,7 @@ def create_app(
     application.state.managed_training_manager = managed_training_manager
     application.include_router(settings_router)
     application.include_router(yam_setup_router)
+    application.include_router(yam_cell_router)
     application.include_router(arms_router)
     application.include_router(recordings_router)
     application.include_router(camera_router)

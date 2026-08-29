@@ -46,7 +46,12 @@ from ctrl_pi.sdk_models import (
     SDKModel,
     SystemStatus,
     TrainingRun,
+    YAMCellConfig,
+    YAMCellDiscovery,
+    YAMCellPreflight,
+    YAMCellStatus,
     YAMDiscovery,
+    YAMHandleRangeResult,
     YAMPreflight,
     YAMSetupConfig,
     YAMSetupStatus,
@@ -406,6 +411,136 @@ class CtrlPiClient:
             },
         )
 
+    def get_yam_cell(self) -> YAMCellStatus:
+        """Return the canonical V1.2 cell status.
+
+        ``get_yam_setup`` remains available for V1.1 clients and returns the
+        same compatibility-aware status shape.
+        """
+
+        return self._get(YAMCellStatus, "/api/yam/cell")
+
+    def discover_yam_cell(self) -> YAMCellDiscovery:
+        """Passively discover stable transports without opening devices."""
+
+        return self._post(YAMCellDiscovery, "/api/yam/cell/discover")
+
+    def preflight_yam_cell(self, config: YAMCellConfig) -> YAMCellPreflight:
+        config = self._yam_cell_config(config)
+        return self._post(
+            YAMCellPreflight,
+            "/api/yam/cell/preflight",
+            json={"config": config.model_dump(mode="json")},
+        )
+
+    def save_yam_cell(
+        self,
+        config: YAMCellConfig,
+        *,
+        auto_restore: bool,
+        acknowledge_automatic_motion_risk: bool,
+        acknowledge_gripper_calibration_motion: bool,
+    ) -> YAMCellStatus:
+        config = self._yam_cell_config(config)
+        self._require_bool(auto_restore, "Auto-restore flag")
+        self._require_bool(
+            acknowledge_automatic_motion_risk, "Automatic-motion acknowledgement"
+        )
+        self._require_bool(
+            acknowledge_gripper_calibration_motion,
+            "Gripper-calibration-motion acknowledgement",
+        )
+        return self._post(
+            YAMCellStatus,
+            "/api/yam/cell",
+            method="PUT",
+            json={
+                "config": config.model_dump(mode="json"),
+                "auto_restore": auto_restore,
+                "acknowledge_automatic_motion_risk": (
+                    acknowledge_automatic_motion_risk
+                ),
+                "acknowledge_gripper_calibration_motion": (
+                    acknowledge_gripper_calibration_motion
+                ),
+            },
+        )
+
+    def connect_yam_arms(
+        self,
+        *,
+        arm_ids: list[str] | None = None,
+        acknowledge_hardware_motion_risk: bool,
+        acknowledge_gripper_calibration_motion: bool,
+    ) -> YAMCellStatus:
+        """Connect selected arms, or all arms when ``arm_ids`` is ``None``."""
+
+        selected = self._yam_arm_ids(arm_ids)
+        self._require_bool(
+            acknowledge_hardware_motion_risk, "Hardware-motion acknowledgement"
+        )
+        self._require_bool(
+            acknowledge_gripper_calibration_motion,
+            "Gripper-calibration-motion acknowledgement",
+        )
+        return self._post(
+            YAMCellStatus,
+            "/api/yam/cell/connect",
+            json={
+                "arm_ids": selected,
+                "acknowledge_hardware_motion_risk": (
+                    acknowledge_hardware_motion_risk
+                ),
+                "acknowledge_gripper_calibration_motion": (
+                    acknowledge_gripper_calibration_motion
+                ),
+            },
+        )
+
+    def disconnect_yam_arms(
+        self, *, arm_ids: list[str] | None = None
+    ) -> YAMCellStatus:
+        """Disconnect selected arms, or all arms when ``arm_ids`` is ``None``."""
+
+        return self._post(
+            YAMCellStatus,
+            "/api/yam/cell/disconnect",
+            json={"arm_ids": self._yam_arm_ids(arm_ids)},
+        )
+
+    def check_yam_handle(
+        self,
+        arm_id: str,
+        *,
+        duration_seconds: float = 10.0,
+        acknowledge_active_can_diagnostic: bool,
+    ) -> YAMHandleRangeResult:
+        """Run the separately acknowledged teaching-handle range diagnostic."""
+
+        arm_id = self._raw_component(arm_id, "Arm ID")
+        if (
+            isinstance(duration_seconds, bool)
+            or not isinstance(duration_seconds, (int, float))
+            or not math.isfinite(duration_seconds)
+            or not 1.0 <= duration_seconds <= 15.0
+        ):
+            raise CtrlPiError("Handle diagnostic duration is invalid.") from None
+        self._require_bool(
+            acknowledge_active_can_diagnostic,
+            "Active-CAN-diagnostic acknowledgement",
+        )
+        return self._post(
+            YAMHandleRangeResult,
+            "/api/yam/cell/handle-check",
+            json={
+                "arm_id": arm_id,
+                "duration_seconds": float(duration_seconds),
+                "acknowledge_active_can_diagnostic": (
+                    acknowledge_active_can_diagnostic
+                ),
+            },
+        )
+
     def reset_yam_setup(self) -> YAMSetupStatus:
         return self._post(YAMSetupStatus, "/api/yam/setup", method="DELETE")
 
@@ -481,6 +616,26 @@ class CtrlPiClient:
         return self._post(
             RecordingState,
             f"/api/recordings/{self._uuid(recording_id, 'Recording')}/teleop/stop",
+        )
+
+    def enable_teleop_sync(
+        self,
+        recording_id: UUID | str,
+        *,
+        acknowledge_slow_sync_motion: bool = False,
+    ) -> RecordingState:
+        return self._post(
+            RecordingState,
+            f"/api/recordings/{self._uuid(recording_id, 'Recording')}/teleop/sync/enable",
+            json={
+                "acknowledge_slow_sync_motion": acknowledge_slow_sync_motion
+            },
+        )
+
+    def disable_teleop_sync(self, recording_id: UUID | str) -> RecordingState:
+        return self._post(
+            RecordingState,
+            f"/api/recordings/{self._uuid(recording_id, 'Recording')}/teleop/sync/disable",
         )
 
     def start_episode(
@@ -1052,6 +1207,29 @@ class CtrlPiClient:
     def _yam_config(value: YAMSetupConfig) -> YAMSetupConfig:
         if not isinstance(value, YAMSetupConfig):
             raise CtrlPiError("YAM setup config is invalid.") from None
+        return value
+
+    @staticmethod
+    def _yam_cell_config(value: YAMCellConfig) -> YAMCellConfig:
+        if not isinstance(value, YAMCellConfig):
+            raise CtrlPiError("YAM cell config is invalid.") from None
+        return value
+
+    @classmethod
+    def _yam_arm_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, list) or not 1 <= len(value) <= 16:
+            raise CtrlPiError("YAM arm selection is invalid.") from None
+        selected = [cls._raw_component(arm_id, "Arm ID") for arm_id in value]
+        if len(selected) != len(set(selected)):
+            raise CtrlPiError("YAM arm selection contains duplicates.") from None
+        return selected
+
+    @staticmethod
+    def _raw_component(value: str, label: str) -> str:
+        if not isinstance(value, str) or _ARM_ID.fullmatch(value) is None:
+            raise CtrlPiError(f"{label} is invalid.") from None
         return value
 
     @staticmethod
