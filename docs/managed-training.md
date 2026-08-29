@@ -54,8 +54,13 @@ idempotency key. If you deliberately delete the Hub repo yourself, that does
 not make the old slug reusable in the existing ctrl-π database.
 If a provider launch response is lost before its App/FunctionCall identity is
 persisted, the one-job slot stays occupied while ctrl-π watches the exact
-deterministic App identity through the job deadline. A late App is stopped;
-absence is not declared safe immediately after the interrupted request.
+deterministic App identity through the job deadline. An exact App that still
+reports zero running tasks may be deploying or building its image before
+spawn, so ctrl-π keeps watching it rather than destroying the in-flight
+launch. If that App reports an active task without a durably persisted
+FunctionCall identity, ctrl-π cannot supervise its events or result and stops
+it promptly with verified teardown. A late App is also stopped; absence is not
+declared safe immediately after the interrupted request.
 
 ## Launch from Python
 
@@ -212,8 +217,10 @@ identity/teardown state machine, but the Training page labels it **simulation ·
 no GPU** and does not link the synthetic output revision as a real Hub
 artifact.
 
-No real managed Modal training job was launched while implementing V1.1.
-Before relying on it for valuable training, perform a short private A10G job,
-verify the final root loads through the inference runtime, cancel a second job
+V1.1 release validation exercised real Modal App deployment and image-build
+reconciliation, but no FunctionCall or GPU training task started. That evidence
+therefore does not validate a successful managed training run. Before relying
+on the feature for valuable training, perform a short private A10G job, verify
+the final root loads through the inference runtime, cancel a second job
 mid-run, and require `make modal-panic` to report zero active inference and
 training tasks.

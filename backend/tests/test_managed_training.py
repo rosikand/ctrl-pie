@@ -423,10 +423,8 @@ async def test_restart_uses_persisted_call_id_not_app_only_listing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_without_call_is_watched_until_the_deadline_not_destroyed() -> None:
-    """A discovered App with no FunctionCall is the normal shape of a launch
-    still in flight (deploy and image build precede spawn). A reconciler must
-    watch the exact identity through the persisted deadline, not stop it."""
+async def test_zero_task_app_is_watched_then_stopped_if_a_task_appears() -> None:
+    """A build may settle, but an active task without a durable call may not."""
 
     _engine, factory = _factory()
     target = HoldingTarget()
@@ -447,6 +445,11 @@ async def test_app_without_call_is_watched_until_the_deadline_not_destroyed() ->
         row.provider_function_call_id = None
         db.commit()
     target.list_app_only = True
+    target.states[record.id] = replace(
+        target.states[record.id],
+        execution_state="pending",
+        running_tasks=0,
+    )
     second = ManagedTrainingManager(
         target, artifacts, session_factory=factory, poll_interval_seconds=0.01
     )
@@ -460,6 +463,86 @@ async def test_app_without_call_is_watched_until_the_deadline_not_destroyed() ->
         assert current.last_error is not None
         assert "reconciled" in current.last_error
     assert target.states[record.id].resource_lifecycle != "stopped"
+    target.states[record.id] = replace(
+        target.states[record.id],
+        execution_state="running",
+        running_tasks=1,
+    )
+    job = await _wait_status(factory, record.id, {"failed", "cancelled"})
+    assert job.teardown_verified_at is not None
+    assert target.states[record.id].resource_lifecycle == "stopped"
+    await second.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_active_app_without_durable_call_is_failed_and_stopped() -> None:
+    """An active task without a durable call cannot be supervised safely."""
+
+    _engine, factory = _factory()
+    target = HoldingTarget()
+    artifacts = StubManagedTrainingArtifactService()
+    first = ManagedTrainingManager(
+        target, artifacts, session_factory=factory, poll_interval_seconds=0.01
+    )
+    await first.startup()
+    with factory() as db:
+        record = await first.create(db, _launch())
+    await _wait_status(factory, record.id, {"running"})
+    await first.shutdown()
+    with factory() as db:
+        row = db.get(ManagedTrainingJob, record.id)
+        assert row is not None
+        row.status = "launching"
+        row.provider_app_id = None
+        row.provider_function_call_id = None
+        db.commit()
+    target.list_app_only = True
+
+    second = ManagedTrainingManager(
+        target, artifacts, session_factory=factory, poll_interval_seconds=0.01
+    )
+    await second.startup()
+    job = await _wait_status(factory, record.id, {"failed", "cancelled"})
+    assert job.teardown_verified_at is not None
+    assert target.states[record.id].resource_lifecycle == "stopped"
+    await second.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_zero_task_app_without_launch_marker_is_failed_and_stopped() -> None:
+    _engine, factory = _factory()
+    target = HoldingTarget()
+    artifacts = StubManagedTrainingArtifactService()
+    first = ManagedTrainingManager(
+        target, artifacts, session_factory=factory, poll_interval_seconds=0.01
+    )
+    await first.startup()
+    with factory() as db:
+        record = await first.create(db, _launch())
+    await _wait_status(factory, record.id, {"running"})
+    await first.shutdown()
+    with factory() as db:
+        row = db.get(ManagedTrainingJob, record.id)
+        assert row is not None
+        row.status = "launching"
+        row.provider_app_id = None
+        row.provider_function_call_id = None
+        row.provider_launch_started_at = None
+        db.commit()
+    target.list_app_only = True
+    target.states[record.id] = replace(
+        target.states[record.id],
+        execution_state="pending",
+        running_tasks=0,
+    )
+
+    second = ManagedTrainingManager(
+        target, artifacts, session_factory=factory, poll_interval_seconds=0.01
+    )
+    await second.startup()
+    job = await _wait_status(factory, record.id, {"failed", "cancelled"})
+    assert job.teardown_verified_at is not None
+    assert target.states[record.id].resource_lifecycle == "stopped"
     await second.shutdown()
 
 
@@ -485,6 +568,11 @@ async def test_app_without_reattachable_call_is_failed_and_stopped_after_deadlin
         row.deadline_at = datetime.now(UTC) - timedelta(seconds=1)
         db.commit()
     target.list_app_only = True
+    target.states[record.id] = replace(
+        target.states[record.id],
+        execution_state="pending",
+        running_tasks=0,
+    )
     second = ManagedTrainingManager(
         target, artifacts, session_factory=factory, poll_interval_seconds=0.01
     )

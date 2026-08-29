@@ -17,10 +17,13 @@ backend instance is running against your `DATABASE_URL`. Concurrent instances
 the same durable jobs and interfere with each other's provider supervision.
 Stop the extras and inspect the original durable job. While no App is visible,
 ctrl-π keeps checking for a late provider mutation until the hard deadline.
-Once the exact owned App is visible without a durably persisted FunctionCall
-identity, ctrl-π stops it promptly and verifies zero tasks. Retry only after
-the original job is terminal with teardown verified, using a new output
-repository and idempotency key.
+An exact App with zero running tasks can still be deploying or building its
+image before spawn, so ctrl-π watches that identity through the deadline. It
+does not claim the job is supervised or recover its missing FunctionCall from
+that listing. If the App reports an active task without a durably persisted
+FunctionCall identity, ctrl-π stops it promptly and verifies zero tasks. Retry
+only after the original job is terminal with teardown verified, using a new
+output repository and idempotency key.
 
 ### The setup banner says the backend is unavailable
 

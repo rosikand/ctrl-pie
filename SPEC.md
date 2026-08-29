@@ -608,6 +608,12 @@ V1.1 builds on the completed V1 in this order:
   verified final artifact. Graceful backend shutdown preserves intentionally
   running training; deadline, explicit cancel, failure, startup reconciliation,
   and `make modal-panic` all use the same fail-closed ownership boundary.
+  After an interrupted launch, absence or an exact zero-task App may represent
+  a provider mutation or image build still settling, so reconciliation watches
+  that deterministic identity through the immutable deadline. An App with an
+  active task but no durably persisted FunctionCall cannot be supervised and
+  is stopped promptly with verified teardown instead of consuming unobservable
+  compute through the deadline.
   A partial unique database index enforces one nonterminal job, so this cost
   guard remains race-safe without introducing a queue. A possibly created
   output repo and its ownership marker are retained after every failed,

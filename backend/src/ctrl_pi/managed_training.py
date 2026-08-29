@@ -829,13 +829,18 @@ class ManagedTrainingManager:
             )
             return
         if state.provider_function_call_id is None:
-            # A discovered App without a FunctionCall is the normal shape of a
+            # A zero-task App without a FunctionCall is the normal shape of a
             # launch still in flight: deploy and the image build take minutes
-            # before spawn runs, and a concurrent reconciler (another boot, or
-            # this process after a crash) must not destroy it early. As
-            # documented, watch the exact deterministic identity through the
-            # persisted deadline; only a late App is stopped.
-            if _aware(self._now()) < _aware(job.deadline_at):
+            # before spawn runs. Preserve that exact deterministic identity
+            # through the persisted deadline. If the App already reports an
+            # active task, however, execution cannot be supervised without a
+            # durable FunctionCall identity, so stop it promptly rather than
+            # leave paid compute unobservable until the deadline.
+            if (
+                job.provider_launch_started_at is not None
+                and state.running_tasks == 0
+                and _aware(self._now()) < _aware(job.deadline_at)
+            ):
                 self._note_retryable_error(
                     job_id,
                     "Managed training provider launch is still being reconciled.",
