@@ -106,6 +106,48 @@ async def _wait_status(factory, job_id: uuid.UUID, statuses: set[str]):
     raise AssertionError(f"managed training did not reach {statuses}")
 
 
+def _insert_running_job(factory, *, last_error: str | None = None) -> uuid.UUID:
+    job_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    with factory() as db:
+        run = TrainingRun(name="terminal error truth", status="running")
+        db.add(run)
+        db.flush()
+        db.add(
+            ManagedTrainingJob(
+                id=job_id,
+                training_run_id=run.id,
+                idempotency_key=uuid.uuid4(),
+                request_hash="a" * 64,
+                status="running",
+                outcome="pending",
+                target_kind="stub",
+                provider_state="running",
+                compute_size="Modal: A10G",
+                runtime="lerobot",
+                dataset_repo="acme/data",
+                dataset_revision="b" * 40,
+                base_model="acme/base",
+                base_model_revision="c" * 40,
+                output_model_repo=f"acme/output-{job_id.hex}",
+                output_private=True,
+                output_marker_revision="d" * 40,
+                max_steps=100,
+                batch_size=8,
+                log_every=1,
+                save_every=10,
+                seed=42,
+                num_workers=0,
+                timeout_seconds=60,
+                deadline_at=now + timedelta(minutes=1),
+                started_at=now,
+                last_error=last_error,
+            )
+        )
+        db.commit()
+    return job_id
+
+
 class HoldingTarget:
     kind = "stub"
 
@@ -216,6 +258,30 @@ class HoldingTarget:
             execution_state=execution_state,
             running_tasks=running_tasks,
         )
+
+
+class OneTransientCleanupFailureTarget(HoldingTarget):
+    """Stop the exact App, then fail its first authoritative inspection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._injected_failure = False
+
+    def stop(self, handle: TrainingHandle) -> None:
+        super().stop(handle)
+        if not self._injected_failure:
+            self.inspect_failures = 1
+            self._injected_failure = True
+
+
+class CleanupErrorRecordingManager(ManagedTrainingManager):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.cleanup_pending_errors: list[str] = []
+
+    def _set_cleanup_pending_error(self, job_id: uuid.UUID, message: str) -> None:
+        super()._set_cleanup_pending_error(job_id, message)
+        self.cleanup_pending_errors.append(message)
 
 
 class GapTarget(StubManagedTrainingTarget):
@@ -385,6 +451,163 @@ async def test_partial_result_fails_and_is_torn_down() -> None:
     assert job.teardown_verified_at is not None
     assert job.output_revision is None
     await manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    (
+        "outcome",
+        "primary_error",
+        "active_status",
+        "terminal_status",
+        "active_error",
+        "terminal_error",
+    ),
+    [
+        (
+            "failed",
+            "Managed training failed in the compute provider.",
+            "finalizing",
+            "failed",
+            "Managed training failed in the compute provider.",
+            "Managed training failed in the compute provider.",
+        ),
+        (
+            "succeeded",
+            None,
+            "finalizing",
+            "completed",
+            "Managed training teardown is not yet verified.",
+            None,
+        ),
+        (
+            "cancelled",
+            None,
+            "cancelling",
+            "cancelled",
+            "Managed training teardown is not yet verified.",
+            None,
+        ),
+        (
+            "cancelled",
+            "Managed training reached its hard deadline.",
+            "cancelling",
+            "cancelled",
+            "Managed training reached its hard deadline.",
+            "Managed training reached its hard deadline.",
+        ),
+    ],
+)
+async def test_cleanup_retry_preserves_only_durable_terminal_error_truth(
+    outcome: Any,
+    primary_error: str | None,
+    active_status: str,
+    terminal_status: str,
+    active_error: str | None,
+    terminal_error: str | None,
+) -> None:
+    _engine, factory = _factory()
+    target = OneTransientCleanupFailureTarget()
+    manager = CleanupErrorRecordingManager(
+        target,
+        StubManagedTrainingArtifactService(),
+        session_factory=factory,
+        poll_interval_seconds=0.1,
+    )
+    job_id = _insert_running_job(factory)
+    handle = TrainingHandle(
+        job_id=job_id,
+        provider_app_id=f"hold-{job_id.hex}",
+        provider_function_call_id=f"call-{job_id.hex}",
+        app_name=training_app_name(job_id),
+        ownership_tag=training_ownership_tag(job_id),
+        request_hash="a" * 64,
+    )
+    execution_state = {
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }[outcome]
+    target.states[job_id] = target._state(
+        handle, "running", execution_state, 0
+    )
+    manager._choose_outcome(job_id, outcome, primary_error)
+
+    cleanup = asyncio.create_task(
+        manager._cleanup_until_stopped(
+            job_id, target=target, preferred_handle=handle
+        )
+    )
+    for _ in range(100):
+        with factory() as db:
+            active = db.get(ManagedTrainingJob, job_id)
+            assert active is not None
+            if (
+                manager.cleanup_pending_errors
+                and active.last_error == active_error
+                and active.status == active_status
+            ):
+                break
+        await asyncio.sleep(0.005)
+    assert manager.cleanup_pending_errors == [
+        "Managed training teardown is not yet verified."
+    ]
+    assert active.status == active_status
+    assert active.teardown_verified_at is None
+    assert active.last_error == active_error
+
+    await asyncio.wait_for(cleanup, timeout=2)
+    with factory() as db:
+        terminal = db.get(ManagedTrainingJob, job_id)
+        assert terminal is not None
+        assert terminal.status == terminal_status
+        assert terminal.teardown_verified_at is not None
+        assert terminal.last_error == terminal_error
+
+
+def test_cleanup_without_execution_result_records_a_durable_failure() -> None:
+    _engine, factory = _factory()
+    manager = ManagedTrainingManager(
+        StubManagedTrainingTarget(),
+        StubManagedTrainingArtifactService(),
+        session_factory=factory,
+    )
+    job_id = _insert_running_job(factory)
+
+    manager._set_cleanup_pending_error(
+        job_id, "Managed training teardown is not yet verified."
+    )
+    manager._mark_terminal(job_id, provider_state="stopped")
+
+    with factory() as db:
+        job = db.get(ManagedTrainingJob, job_id)
+        assert job is not None
+        assert job.status == "failed"
+        assert job.outcome == "failed"
+        assert job.teardown_verified_at is not None
+        assert job.last_error == "Managed training ended without an execution result."
+
+
+async def test_user_cancel_discards_a_stale_running_retry_error() -> None:
+    _engine, factory = _factory()
+    manager = ManagedTrainingManager(
+        StubManagedTrainingTarget(),
+        StubManagedTrainingArtifactService(),
+        session_factory=factory,
+        poll_interval_seconds=0.01,
+    )
+    job_id = _insert_running_job(
+        factory,
+        last_error="Managed training provider status is temporarily unavailable.",
+    )
+
+    with factory() as db:
+        cancelled = await manager.cancel(db, job_id)
+    assert cancelled.outcome == "cancelled"
+    assert cancelled.last_error is None
+
+    terminal = await _wait_status(factory, job_id, {"cancelled"})
+    assert terminal.teardown_verified_at is not None
+    assert terminal.last_error is None
 
 
 @pytest.mark.asyncio

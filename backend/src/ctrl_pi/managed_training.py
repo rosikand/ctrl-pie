@@ -75,6 +75,19 @@ _ACTIVE_STATUSES = {
     "cancelling",
 }
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+_MISSING_EXECUTION_RESULT_ERROR = (
+    "Managed training ended without an execution result."
+)
+_PROVIDER_LAUNCH_SETTLEMENT_PENDING_ERROR = (
+    "Managed training provider launch settlement is still pending."
+)
+_TEARDOWN_PENDING_ERROR = "Managed training teardown is not yet verified."
+_CLEANUP_PENDING_ERRORS = frozenset(
+    {
+        _PROVIDER_LAUNCH_SETTLEMENT_PENDING_ERROR,
+        _TEARDOWN_PENDING_ERROR,
+    }
+)
 _SAFE_REVISION = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?"
 )
@@ -492,6 +505,9 @@ class ManagedTrainingManager:
         if job.outcome == "pending":
             job.outcome = "cancelled"
             job.execution_finished_at = now
+            # A retryable observation error from the running phase is not the
+            # reason this job ended. User cancellation has no failure detail.
+            job.last_error = None
         job.cancel_requested_at = job.cancel_requested_at or now
         if job.outcome == "cancelled":
             job.status = "cancelling"
@@ -1104,7 +1120,7 @@ class ManagedTrainingManager:
                             ):
                                 self._set_cleanup_pending_error(
                                     job_id,
-                                    "Managed training provider launch settlement is still pending.",
+                                    _PROVIDER_LAUNCH_SETTLEMENT_PENDING_ERROR,
                                 )
                                 if self._shutdown.is_set():
                                     return
@@ -1122,7 +1138,7 @@ class ManagedTrainingManager:
                         self._persist_recovered_handle(job_id, handle, state)
                 except Exception:
                     self._set_cleanup_pending_error(
-                        job_id, "Managed training teardown is not yet verified."
+                        job_id, _TEARDOWN_PENDING_ERROR
                     )
                     if self._shutdown.is_set() and attempted_cleanup:
                         return
@@ -1170,7 +1186,7 @@ class ManagedTrainingManager:
                 raise
             except Exception:
                 self._set_cleanup_pending_error(
-                    job_id, "Managed training teardown is not yet verified."
+                    job_id, _TEARDOWN_PENDING_ERROR
                 )
                 if self._shutdown.is_set():
                     return
@@ -1531,8 +1547,20 @@ class ManagedTrainingManager:
                 return
             if job.outcome == "pending":
                 job.outcome = "failed"
-                job.last_error = "Managed training ended without an execution result."
+                job.last_error = _MISSING_EXECUTION_RESULT_ERROR
                 job.execution_finished_at = _aware(self._now())
+            elif job.outcome == "succeeded":
+                # A verified success cannot retain a retry/cleanup diagnostic.
+                job.last_error = None
+            elif job.outcome == "failed" and (
+                job.last_error is None
+                or job.last_error in _CLEANUP_PENDING_ERRORS
+            ):
+                # Cleanup diagnostics describe only the pre-verification state.
+                # A failed execution still needs a durable primary failure.
+                job.last_error = _MISSING_EXECUTION_RESULT_ERROR
+            elif job.last_error in _CLEANUP_PENDING_ERRORS:
+                job.last_error = None
             status_by_outcome = {
                 "succeeded": "completed",
                 "failed": "failed",
@@ -1558,7 +1586,11 @@ class ManagedTrainingManager:
             )
             if job is None or job.status in _TERMINAL_STATUSES:
                 return
-            job.last_error = _bounded_error(message)
+            # Once execution has settled, its primary failure/cancellation
+            # detail is authoritative. Retry diagnostics are only meaningful
+            # while the execution outcome itself remains pending.
+            if job.outcome == "pending":
+                job.last_error = _bounded_error(message)
             self._commit(db)
 
     def _set_cleanup_pending_error(self, job_id: uuid.UUID, message: str) -> None:
@@ -1570,10 +1602,17 @@ class ManagedTrainingManager:
             )
             if job is None or job.status in _TERMINAL_STATUSES:
                 return
-            job.last_error = _bounded_error(message)
             if job.outcome == "pending":
                 job.outcome = "failed"
                 job.execution_finished_at = _aware(self._now())
+                job.last_error = _MISSING_EXECUTION_RESULT_ERROR
+            elif (
+                job.last_error is None
+                or job.last_error in _CLEANUP_PENDING_ERRORS
+            ):
+                # Surface teardown uncertainty while it is true, but never
+                # replace an already-settled execution/cancellation cause.
+                job.last_error = _bounded_error(message)
             job.status = "cancelling" if job.outcome == "cancelled" else "finalizing"
             self._commit(db)
 
