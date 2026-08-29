@@ -80,7 +80,8 @@ with CtrlPiClient("http://127.0.0.1:8000") as ctrl:
 The typed client covers system status, YAM setup and bounded control,
 recording, datasets, models, external and managed training, and inference. See
 the [REST and Python SDK guide](docs/python-sdk.md) for lifecycle and cleanup
-examples.
+examples. Before delegating those workflows, give your automation the
+[user-facing AI-agent integration guide](docs/ai-agent-integration.md).
 
 ## Safety and support boundary
 

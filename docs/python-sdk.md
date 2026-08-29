@@ -336,3 +336,7 @@ JSON client deliberately does not wrap:
 Use those endpoints only on the same trusted network. The SDK polling methods
 cover every state/control operation; streaming does not create a separate
 motion, cleanup, or credential path.
+
+If an AI agent will call this API for you, apply the approval, reconciliation,
+credential, and verified-cleanup rules in [AI agent integration]
+(/ai-agent-integration) before granting it write access.

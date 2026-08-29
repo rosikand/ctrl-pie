@@ -61,6 +61,7 @@
         "group": "API and SDK",
         "pages": [
           "python-sdk",
+          "ai-agent-integration",
           "trainer-api"
         ]
       },

@@ -42,6 +42,9 @@ checklist is completed.
   screenshots, and changelog pages.
 - Added a product-wide REST/Python SDK guide and current YAM onboarding and
   restoration procedures.
+- Added a canonical user-facing AI-agent integration guide for the same public
+  SDK/REST surface, with mock-first operation, fresh human approvals, hostile
+  content boundaries, idempotent reconciliation, and verified cleanup.
 - Kept the existing Trainer API, inference, architecture, Docker, recording,
   YAM driver, Modal operations, development, and smoke guides as the canonical
   deep references.

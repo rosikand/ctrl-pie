@@ -29,6 +29,7 @@ REQUIRED_ROUTES = {
     "models",
     "inference",
     "python-sdk",
+    "ai-agent-integration",
     "trainer-api",
     "architecture",
     "yam-driver",

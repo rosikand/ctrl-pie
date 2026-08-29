@@ -384,9 +384,9 @@ V1.1 builds on the completed V1 in this order:
    through the Trainer REST/Python API with bounded observability and verified
    teardown; Lambda, Auto sizing, arbitrary code, and a browser launch flow are
    deferred.
-
-User-facing AI-agent guidance is specified when its final accepted V1.1 issue
-is implemented; it is not implied by the universal client alone.
+6. User-owned AI agents gain a canonical safety and integration guide over the
+   universal SDK/REST surface. This adds no agent-specific API, privileged
+   identity, or alternate control path.
 
 ## Decisions
 
@@ -610,3 +610,16 @@ is implemented; it is not implied by the universal client alone.
   inference runtime can load the final artifact locally with Hub access
   disabled. Other LeRobot policy families remain available through the
   external reporting path, not this managed worker.
+- 2026-08-29 — V1.1 user-facing AI-agent integration is a documentation and
+  operating-policy layer over the same public `CtrlPiClient` and REST services,
+  not a new identity, route, credential, or backdoor. Agents default to
+  read-only access on a fixed trusted-LAN origin, treat all retrieved content
+  as untrusted data, and never receive backend or provider credentials. Fresh
+  human confirmation is required for motion, hardware connection or automatic
+  restoration, paid compute, public artifacts, setup reset, and panic cleanup;
+  uncertain mutations are reconciled through current state and caller-owned
+  idempotency before any retry, and lifecycle cleanup is explicitly verified.
+  Mock success and calibration readiness do not establish physical safety.
+  Because V1.1 has no authentication or RBAC, capability restriction and human
+  approval enforcement remain responsibilities of the operator and agent tool
+  runner.
