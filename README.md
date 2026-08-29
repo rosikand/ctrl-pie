@@ -41,6 +41,12 @@ The complete UI and orchestration flow works in mock mode with
 development and safe workflow checks; it does not pretend that cloud or
 hardware work occurred.
 
+The same control plane is available to Python scripts through the typed
+`ctrl_pi.CtrlPiClient`. It calls the exact REST services used by the UI for
+status, YAM setup and bounded control, recording, datasets, models, reported
+training, and inference; it does not provide a privileged motion path. See the
+[Python SDK guide](docs/python-sdk.md).
+
 Settings includes a first-time YAM flow for one leader/follower pair: passive
 device discovery, configuration and calibration-file preflight, PostgreSQL
 persistence, explicit connection, and opt-in boot/hot-plug restoration. Both
@@ -151,6 +157,7 @@ contract, cost guardrails, model packaging, robot loop, and teardown model.
 | [Record and teleoperate](docs/recording.md) | Pairing, episode lifecycle, metadata, staging, upload, and recovery |
 | [Datasets and inference](docs/inference.md) | Compute targets, Modal serving, runtime adapters, robot execution, and teardown |
 | [Trainer API](docs/trainer-api.md) | Python client, every REST method, metric and console reporting, and a LeRobot fine-tune example |
+| [Python SDK](docs/python-sdk.md) | Typed access to the complete current REST control plane, safety rules, and model-to-inference example |
 | [YAM driver interface](docs/yam-driver.md) | Driver contract, telemetry, command bounds, leases, and the real-hardware boundary |
 | [Modal operations](docs/modal-operations.md) | Owned-App naming and verified emergency cleanup with `make modal-panic` |
 | [Mock smoke gate](docs/smoke-test.md) | The complete record → upload → discover → infer → teardown acceptance flow |

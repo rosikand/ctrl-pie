@@ -85,6 +85,8 @@ def test_settings_exposes_service_backed_yam_onboarding_without_browser_device_l
     assert '"/api/yam/setup/discover"' in api_source
     assert '"/api/yam/setup/preflight"' in api_source
     assert '"/api/yam/setup/connect"' in api_source
+    assert '`/api/models${suffix}`' in api_source
+    assert '`/api/trainer/models${suffix}`' not in api_source
     assert "navigator.serial" not in panel_source
     assert "navigator.usb" not in panel_source
     assert "new WebSocket" not in panel_source

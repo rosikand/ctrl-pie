@@ -12,6 +12,10 @@ says. Record any ambiguity resolutions under "Decisions" at the bottom.
 - User `git clone`s the repo, configures their own accounts (Postgres,
   Hugging Face, Modal), connects YAM hardware, and runs everything themselves.
 - We host nothing and store no user data. There is no ctrl-π auth system in V1.
+- The browser and the typed `ctrl_pi.CtrlPiClient` are peer clients of the
+  same FastAPI control plane. Every meaningful product workflow is available
+  through the public REST API; the Python SDK must not bypass services or add
+  a privileged hardware/provider path.
 - All state lives in services the user owns: their Postgres, their HF
   namespace, their Modal account. Booting ctrl-π on a fresh machine with the
   same credentials restores the same state.
@@ -75,8 +79,9 @@ never reaches browser code.
 ctrl-π does **not** run training in V1. Users train on their own compute with
 their own LeRobot/OpenPI/custom scripts. ctrl-π provides:
 
-**Trainer API** — a small Python SDK + REST API (wandb-like) that external
-training scripts call to:
+**Trainer API** — a small reporting surface in the universal Python SDK and
+REST API (with the legacy `ctrl_pi.trainer.Client` kept compatible) that
+external training scripts call to:
 
 - create/update a training run (status, current step, config)
 - log scalar metrics over steps (loss curves rendered in the UI)
@@ -102,7 +107,8 @@ namespace.
 - direct links to the corresponding Hub artifacts
 
 Discovery is read-only. Training scripts remain responsible for producing and
-uploading weights.
+uploading weights. REST and the universal SDK can select one of those immutable
+artifacts for inference, but do not provide a raw model-file upload backdoor.
 
 ### 6. Inference
 
@@ -178,11 +184,11 @@ Backend: Python, FastAPI, SQLAlchemy 2, Alembic, PostgreSQL, `huggingface_hub`,
 `modal`.
 
 ```text
-Browser ── LAN ──► ctrl-π backend (Ubuntu box) ── CAN/USB ──► YAM arms
-                        │
-                        ├── PostgreSQL (user's; Supabase recommended)
-                        ├── Hugging Face Hub (user's namespace)
-                        └── Modal (user's account; inference only)
+Browser / Python SDK ── LAN ──► ctrl-π backend (Ubuntu box) ── CAN/USB ──► YAM arms
+                                      │
+                                      ├── PostgreSQL (user's; Supabase recommended)
+                                      ├── Hugging Face Hub (user's namespace)
+                                      └── Modal (user's account; inference only)
 ```
 
 Key interfaces/components:
@@ -190,10 +196,12 @@ Key interfaces/components:
 - `YAMDriver` / `MockYAMDriver` plus the single-rig `YAMSetupManager`
 - `LeRobotRuntime`, `OpenPIRuntime` (runtime adapters)
 - `ModalComputeTarget` (behind a generic `ComputeTarget` abstraction)
-- Trainer API (REST + thin Python client package)
+- universal typed REST/Python SDK (`ctrl_pi.CtrlPiClient`), with the Trainer
+  reporting client retained as a compatibility facade
 
-Boundaries: UI → ctrl-π API → services/interfaces → (Postgres | HF | YAM |
-Modal). No YAM/CAN, Modal, or policy-framework details in frontend components.
+Boundaries: UI or SDK → ctrl-π API → services/interfaces → (Postgres | HF |
+YAM | Modal). No YAM/CAN, Modal, or policy-framework details in frontend or
+SDK code.
 
 ## Persistence
 
@@ -258,7 +266,8 @@ low-latency implementations.
 
 ## Naming
 
-repo `ctrl-pi` · Python package `ctrl_pi` · trainer client `ctrl_pi.trainer`.
+repo `ctrl-pi` · Python package `ctrl_pi` · universal client
+`ctrl_pi.CtrlPiClient` · compatible trainer client `ctrl_pi.trainer.Client`.
 
 ## Addenda
 
@@ -314,6 +323,20 @@ repo `ctrl-pi` · Python package `ctrl_pi` · trainer client `ctrl_pi.trainer`.
 
 After each milestone: run build/tests, commit as `milestone N: <name>`, note
 open issues. Do not expand scope.
+
+### V1.1 accepted evolution
+
+V1.1 builds on the completed V1 in this order:
+
+1. Training and Models become separate first-class tabs.
+2. One YAM rig gains persisted, consent-gated first-time setup and automatic
+   restoration.
+3. The meaningful current control plane becomes available through one typed
+   REST/Python SDK, while preserving the focused Trainer client.
+
+Managed training, the production documentation site, and user-facing AI-agent
+guidance are specified when their later accepted V1.1 issues are implemented;
+they are not implied by the universal client milestone alone.
 
 ## Decisions
 
@@ -481,3 +504,15 @@ open issues. Do not expand scope.
   offsets, limits, zero-torque behavior, or emergency-stop behavior are safe on
   a physical rig. Mock setup remains deterministic and never overwrites a
   saved physical setup when modes change.
+- 2026-08-29 — V1.1 exposes the same FastAPI control-plane services used by
+  the browser through the synchronous typed `ctrl_pi.CtrlPiClient`: system and
+  non-secret settings status, YAM setup and bounded control, recording and Hub
+  dataset workflows, model discovery, externally reported training, and
+  inference lifecycle. The client uses a bounded, no-redirect, no-environment-
+  proxy transport and validates typed responses; the existing
+  `ctrl_pi.trainer.Client` remains source-compatible on that transport.
+  `/api/models` is the canonical first-class model catalog route and
+  `/api/trainer/models` remains a compatibility alias. Model artifacts still
+  originate in the operator's Hugging Face tooling, while selecting a pinned
+  model and starting inference is the supported model-to-YAM path. This
+  milestone adds neither arbitrary action submission nor managed training.

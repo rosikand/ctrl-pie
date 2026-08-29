@@ -57,8 +57,9 @@ npm --prefix frontend ci
 
 The backend package pins LeRobot 0.4.4 and Modal 1.5.4. Do not upgrade either
 independently and assume the runtime or teardown contracts remain compatible.
-The synchronous `ctrl_pi.trainer.Client` is part of this same editable Python
-package; there is no separate published client package in V1.
+The synchronous universal `ctrl_pi.CtrlPiClient` and compatible focused
+`ctrl_pi.trainer.Client` are part of this same editable Python package; there
+is no separately installed SDK package.
 
 ## Configure services
 

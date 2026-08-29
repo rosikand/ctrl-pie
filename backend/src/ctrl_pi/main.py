@@ -11,6 +11,8 @@ from ctrl_pi.api.arms import router as arms_router
 from ctrl_pi.api.camera import router as camera_router
 from ctrl_pi.api.datasets import router as datasets_router
 from ctrl_pi.api.inference import router as inference_router
+from ctrl_pi.api.models import legacy_router as legacy_models_router
+from ctrl_pi.api.models import router as models_router
 from ctrl_pi.api.recordings import (
     reconcile_recordings_startup,
     router as recordings_router,
@@ -255,6 +257,8 @@ def create_app(
     application.include_router(recordings_router)
     application.include_router(camera_router)
     application.include_router(datasets_router)
+    application.include_router(models_router)
+    application.include_router(legacy_models_router)
     application.include_router(trainer_router)
     application.include_router(inference_router)
 

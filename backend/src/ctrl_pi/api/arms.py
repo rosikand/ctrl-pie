@@ -2,8 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 
 from ctrl_pi.drivers.yam import (
     ArmNotFoundError,
@@ -19,6 +28,7 @@ from ctrl_pi.rig import RigLease, RigLeaseConflictError
 
 router = APIRouter(tags=["arms"])
 TELEMETRY_INTERVAL_SECONDS = 0.05
+ArmId = Annotated[str, Path(min_length=1, max_length=120)]
 
 
 def get_yam_driver(request: Request) -> YAMDriver:
@@ -35,7 +45,7 @@ def list_arms(driver: YAMDriver = Depends(get_yam_driver)) -> ArmsResponse:
 
 
 @router.get("/api/arms/{arm_id}", response_model=ArmTelemetry)
-def get_arm(arm_id: str, driver: YAMDriver = Depends(get_yam_driver)) -> ArmTelemetry:
+def get_arm(arm_id: ArmId, driver: YAMDriver = Depends(get_yam_driver)) -> ArmTelemetry:
     try:
         return driver.get_arm(arm_id)
     except ArmNotFoundError as error:
@@ -44,7 +54,7 @@ def get_arm(arm_id: str, driver: YAMDriver = Depends(get_yam_driver)) -> ArmTele
 
 @router.post("/api/arms/{arm_id}/jog", response_model=ArmTelemetry)
 def jog_arm(
-    arm_id: str,
+    arm_id: ArmId,
     command: JogCommand,
     driver: YAMDriver = Depends(get_yam_driver),
     rig_lease: RigLease = Depends(get_rig_lease),

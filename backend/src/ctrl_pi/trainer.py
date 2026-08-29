@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import math
+import json
 from types import TracebackType
 from typing import Any, Literal, NotRequired, TypedDict
 import uuid
 
 import httpx
+
+from ctrl_pi._http import SafeHttpClient
 
 RunStatus = Literal["created", "running", "completed", "failed", "cancelled"]
 ConsoleLogSource = Literal["stdout", "stderr", "system"]
@@ -82,47 +84,19 @@ class Client:
         timeout: float = 10.0,
         _transport: httpx.BaseTransport | None = None,
     ) -> None:
-        parsed_url: httpx.URL | None = None
-        try:
-            parsed_url = httpx.URL(base_url)
-        except (httpx.InvalidURL, TypeError, ValueError):
-            pass
-        if (
-            parsed_url is None
-            or parsed_url.scheme not in ("http", "https")
-            or not parsed_url.host
-            or bool(parsed_url.userinfo)
-            or bool(parsed_url.query)
-            or bool(parsed_url.fragment)
-        ):
-            raise TrainerClientError("ctrl-pi base URL is invalid.")
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or not math.isfinite(timeout)
-            or timeout <= 0
-        ):
-            raise TrainerClientError("ctrl-pi client timeout is invalid.")
-        client: httpx.Client | None = None
-        try:
-            client = httpx.Client(
-                base_url=str(parsed_url).rstrip("/"),
-                timeout=timeout,
-                transport=_transport,
-                headers={"Accept": "application/json"},
-            )
-        except (httpx.InvalidURL, TypeError, ValueError):
-            pass
-        if client is None:
-            raise TrainerClientError("ctrl-pi client configuration is invalid.")
-        self._client = client
+        self._http = SafeHttpClient(
+            base_url,
+            timeout=timeout,
+            error_type=TrainerClientError,
+            _transport=_transport,
+        )
 
     @property
     def is_closed(self) -> bool:
-        return self._client.is_closed
+        return self._http.is_closed
 
     def close(self) -> None:
-        self._client.close()
+        self._http.close()
 
     def __enter__(self) -> Client:
         return self
@@ -246,32 +220,28 @@ class Client:
         )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        response: httpx.Response | None = None
-        try:
-            response = self._client.request(method, path, **kwargs)
-        except httpx.RequestError:
-            pass
-        if response is None:
-            raise TrainerClientError("Could not reach the ctrl-pi API.")
-        if response.is_error:
-            messages = {
-                404: "The requested training run was not found.",
-                409: "The training run update conflicts with current state.",
-                422: "The trainer request failed validation.",
-                503: "The ctrl-pi database or configuration is unavailable.",
-            }
-            raise TrainerClientError(
-                messages.get(response.status_code, "The ctrl-pi API request failed."),
-                status_code=response.status_code,
-            )
+        messages = {
+            404: "The requested training run was not found.",
+            409: "The training run update conflicts with current state.",
+            422: "The trainer request failed validation.",
+            503: "The ctrl-pi database or configuration is unavailable.",
+        }
+        body = self._http.request(
+            method,
+            path,
+            params=kwargs.get("params"),
+            json=kwargs.get("json"),
+            json_supplied="json" in kwargs,
+            status_messages=messages,
+        )
         payload: Any = None
         invalid_json = False
         try:
-            payload = response.json()
-        except ValueError:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, ValueError):
             invalid_json = True
         if invalid_json or not isinstance(payload, dict):
-            raise TrainerClientError("ctrl-pi returned an invalid response.")
+            raise TrainerClientError("ctrl-pi returned an invalid response.") from None
         return payload
 
     @staticmethod

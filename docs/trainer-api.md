@@ -1,5 +1,11 @@
 # Trainer API
 
+This focused reporting client remains compatible for existing training
+scripts. New automation that also needs YAM setup/control, recording,
+datasets, models, or inference can use the universal
+[`ctrl_pi.CtrlPiClient`](python-sdk.md), which calls the same Trainer REST
+routes for run reporting.
+
 ctrl-π does not run training. The Trainer API is a small, local control-plane
 API that lets an external LeRobot, OpenPI, or custom training script report
 run status, scalar metrics, bounded console lines, and Hugging Face checkpoint

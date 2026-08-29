@@ -176,7 +176,7 @@ export function fetchTrainerModels(
   const query = new URLSearchParams();
   if (refresh) query.set("refresh", "true");
   const suffix = query.size ? `?${query.toString()}` : "";
-  return request<TrainerModelsResponse>(`/api/trainer/models${suffix}`, {
+  return request<TrainerModelsResponse>(`/api/models${suffix}`, {
     signal,
     cache: refresh ? "no-store" : "default",
   });

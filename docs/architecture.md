@@ -7,8 +7,8 @@ arm-connected machine owns those boundaries; user-clicked Hub links may still
 open the corresponding Hugging Face page in a new browser tab.
 
 ```text
-Browser
-  │  same-origin HTTP, MJPEG, byte ranges, and WebSockets
+Browser / ctrl_pi.CtrlPiClient
+  │  HTTP; the browser also uses MJPEG, byte ranges, and WebSockets
   ▼
 FastAPI control plane ───────────────► PostgreSQL
   │       │       │                    small durable metadata
@@ -32,6 +32,7 @@ and [Docker deployment](docker-deployment.md) for the two launch paths.
 | Layer | Responsibility | Representative code |
 | --- | --- | --- |
 | React frontend | Six workflow tabs plus Settings and YAM onboarding; renders typed API state only | `frontend/src/` |
+| Python SDK | Typed, bounded access to the same public REST workflows; no direct hardware, Hub-token, or provider access | `client.py`, `sdk_models.py` |
 | FastAPI routers | Validate browser input, return sanitized errors, and serialize public state | `backend/src/ctrl_pi/api/` |
 | Hardware boundary | Typed cached arm snapshots, bounded jogs/actions, and fail-closed lifecycle | `drivers/yam.py`, `drivers/mock_yam.py`, `drivers/real_yam.py` |
 | Recording service | Teleop, camera capture, FFmpeg lifecycle, and synchronized samples | `recording.py`, `camera.py` |
@@ -167,9 +168,10 @@ LeRobot chunk files remain within the documented budget.
 
 ### Training
 
-Training never executes inside ctrl-π. External scripts use the REST API or
-the synchronous `ctrl_pi.trainer.Client` to create runs, report bounded scalar
-curves and sanitized console lines, and register model repository revisions.
+Training never executes inside ctrl-π. External scripts use the REST API,
+the synchronous universal `ctrl_pi.CtrlPiClient`, or the compatible focused
+`ctrl_pi.trainer.Client` to create runs, report bounded scalar curves and
+sanitized console lines, and register model repository revisions.
 PostgreSQL stores bounded JSONB metric and console tails. The selected run is
 refreshed with non-overlapping, visibility-aware polling; the browser never
 attaches to a trainer or provider console. The external training process still

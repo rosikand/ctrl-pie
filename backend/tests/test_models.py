@@ -145,8 +145,8 @@ def test_model_discovery_resolves_sha_pins_card_and_degrades_one_item(
 ) -> None:
     app, api, tokens, _ = model_app
     with TestClient(app) as client:
-        response = client.get("/api/trainer/models")
-        cached = client.get("/api/trainer/models")
+        response = client.get("/api/models")
+        cached = client.get("/api/models")
 
     assert response.status_code == 200, response.text
     assert response.headers["cache-control"] == "private, max-age=30"
@@ -199,8 +199,8 @@ def test_model_refresh_bypasses_caches_and_unknown_visibility_is_private(
     app, api, _, _ = model_app
     delattr(api.items[1], "private")
     with TestClient(app) as client:
-        first = client.get("/api/trainer/models")
-        refreshed = client.get("/api/trainer/models?refresh=true")
+        first = client.get("/api/models")
+        refreshed = client.get("/api/models?refresh=true")
 
     assert first.status_code == refreshed.status_code == 200
     assert first.json()["models"][0]["private"] is True
@@ -221,7 +221,7 @@ def test_model_configuration_auth_namespace_and_hub_errors_are_safe(
             hf_namespace=None,
             hf_token=None,
         )
-        missing = client.get("/api/trainer/models")
+        missing = client.get("/api/models")
 
         config["value"] = AppConfig(
             _env_file=None,
@@ -230,21 +230,34 @@ def test_model_configuration_auth_namespace_and_hub_errors_are_safe(
             hf_token=secret,
         )
         api.whoami_error = FakeHubError(f"bad {secret}", 401)
-        unauthorized = client.get("/api/trainer/models?refresh=true")
+        unauthorized = client.get("/api/models?refresh=true")
 
         api.whoami_error = None
         api.identity = {"name": "different", "orgs": []}
-        wrong_namespace = client.get("/api/trainer/models?refresh=true")
+        wrong_namespace = client.get("/api/models?refresh=true")
 
         api.identity = {"name": "test-user", "orgs": [{"name": "acme"}]}
         api.list_error = RuntimeError(f"network {secret}")
-        hub_error = client.get("/api/trainer/models?refresh=true")
+        hub_error = client.get("/api/models?refresh=true")
 
     assert missing.status_code == 503
     assert unauthorized.status_code == wrong_namespace.status_code == 403
     assert hub_error.status_code == 502
     assert hub_error.json()["detail"] == "Hugging Face model discovery failed."
     assert secret not in hub_error.text
+
+
+def test_legacy_trainer_models_route_reuses_the_first_class_model_service(
+    model_app,
+) -> None:
+    app, api, _, _ = model_app
+    with TestClient(app) as client:
+        canonical = client.get("/api/models")
+        legacy = client.get("/api/trainer/models")
+
+    assert canonical.status_code == legacy.status_code == 200
+    assert canonical.json() == legacy.json()
+    assert len(api.list_calls) == 1
 
 
 def test_checkpoint_path_filter_rejects_unsafe_and_irrelevant_paths() -> None:

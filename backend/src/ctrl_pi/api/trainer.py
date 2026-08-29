@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import copy
 import json
 import math
@@ -10,19 +9,13 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from ctrl_pi.config import AppConfig, get_config
 from ctrl_pi.db import get_db
-from ctrl_pi.hf_models import (
-    HFModelBrowser,
-    ModelAuthenticationError,
-    ModelHubError,
-)
 from ctrl_pi.models import TrainingRun
 
 router = APIRouter(prefix="/api/trainer", tags=["trainer"])
@@ -362,44 +355,6 @@ class ConsoleLogCreate(BaseModel):
         if _contains_secret_assignment(value) or _SECRET_TOKEN.search(value):
             raise ValueError("console line must not contain secret-like values")
         return value
-
-class ModelCardRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    description: str | None
-    base_model: list[str]
-    datasets: list[str]
-
-
-class ModelRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    repo_id: str
-    name: str
-    revision: str | None
-    hub_url: str
-    private: bool
-    gated: bool
-    last_modified: datetime | None
-    pipeline_tag: str | None
-    library_name: str | None
-    tags: list[str]
-    card: ModelCardRead | None
-    checkpoints: list[str]
-
-
-class ModelsRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    namespace: str
-    models: list[ModelRead]
-    total: int
-    fetched_at: datetime
-
-
-def get_model_browser(request: Request) -> HFModelBrowser:
-    return request.app.state.hf_model_browser
-
 
 def _optional_text(value: str | None) -> str | None:
     if value is None:
@@ -813,39 +768,3 @@ def log_console(
         run.current_step = max(run.current_step, payload.step)
     _commit(db)
     return ConsoleLogRead.model_validate(entry)
-
-
-@router.get("/models", response_model=ModelsRead)
-async def list_models(
-    response: Response,
-    refresh: bool = False,
-    config: AppConfig = Depends(get_config),
-    browser: HFModelBrowser = Depends(get_model_browser),
-) -> ModelsRead:
-    namespace = (config.hf_namespace or "").strip()
-    if not namespace:
-        raise HTTPException(
-            status_code=503,
-            detail="Set HF_NAMESPACE before browsing models.",
-        )
-    if config.hf_token is None or not config.hf_token.get_secret_value().strip():
-        raise HTTPException(
-            status_code=503,
-            detail="Set HF_TOKEN before browsing models.",
-        )
-    token = config.hf_token.get_secret_value().strip()
-    try:
-        page = await asyncio.to_thread(
-            browser.list_namespace,
-            namespace=namespace,
-            token=token,
-            refresh=refresh,
-        )
-    except ModelAuthenticationError as error:
-        raise HTTPException(status_code=403, detail=str(error)) from error
-    except ModelHubError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
-    response.headers["Cache-Control"] = (
-        "private, no-store" if refresh else "private, max-age=30"
-    )
-    return ModelsRead.model_validate(page)
