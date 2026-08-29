@@ -1,6 +1,6 @@
 ---
 title: "Trainer API"
-description: "Report external training runs, metrics, logs, and Hugging Face checkpoints."
+description: "Report external runs or launch and observe bounded managed Modal training."
 icon: "braces"
 ---
 
@@ -10,13 +10,15 @@ datasets, models, or inference can use the universal
 [`ctrl_pi.CtrlPiClient`](python-sdk.md), which calls the same Trainer REST
 routes for run reporting.
 
-ctrl-π does not run training. The Trainer API is a small, local control-plane
-API that lets an external LeRobot, OpenPI, or custom training script report
-run status, scalar metrics, bounded console lines, and Hugging Face checkpoint
-revisions. Observability metadata lives in PostgreSQL; model weights stay on
-Hugging Face.
+The Trainer API has two deliberately separate paths. External LeRobot, OpenPI,
+or custom scripts can report run status, scalar metrics, bounded console
+lines, and Hugging Face checkpoint revisions. The managed path launches one
+fixed, validated SmolVLA workload through LeRobot 0.4.4 in the user's Modal
+account and feeds its bounded
+events into the same run representation. Observability metadata lives in
+PostgreSQL; model weights stay on Hugging Face.
 
-There is no ctrl-π authentication in V1. Run the backend on a trusted network
+There is no ctrl-π authentication in V1.1. Run the backend on a trusted network
 and use its LAN URL from the training machine. Never put Hugging Face tokens,
 database URLs, passwords, private keys, or other credentials in a run config.
 
@@ -157,9 +159,9 @@ trainer.log_console(
 
 The client cannot know every credential format. Scrub output before calling
 this method and never forward environment dumps, command arguments, request
-headers, URLs with credentials, tokens, or passwords. A future external Modal
-training worker may use the same reporting call, but ctrl-π does not attach to
-Modal job consoles or launch managed training in V1.
+headers, URLs with credentials, tokens, or passwords. ctrl-π's managed worker
+uses a separate exact-prefix structured event boundary; it never attaches to
+an arbitrary Modal console or forwards an unbounded raw log stream.
 
 ### `register_checkpoint(run_id, *, repo_id, revision, step)`
 
@@ -193,6 +195,32 @@ try:
 except TrainerClientError as error:
     print(error.status_code, str(error))
 ```
+
+## Managed training methods
+
+Both `ctrl_pi.CtrlPiClient` and this compatibility client expose:
+
+- `launch_managed_training(...)`;
+- `list_managed_training_jobs(...)` and `get_managed_training_job(job_id)`;
+- `cancel_managed_training_job(job_id)`;
+- `list_managed_training_logs(job_id, ...)`;
+- `get_managed_training_metrics(job_id)`; and
+- `list_managed_training_checkpoints(job_id)`.
+
+Launch accepts a bounded declarative built-in SmolVLA request rather than arbitrary
+code or shell arguments. It is asynchronous and idempotent: retain the caller-
+generated UUID and reuse it only for the exact same request. A different body
+with the same key returns `409`. The output model repository is created in the
+configured Hugging Face namespace before compute, is private by default, and
+must be a new repository. Every request acknowledges compute cost; public
+output also requires a separate risk acknowledgement.
+ACT and other LeRobot families remain supported by the external reporting
+path, not the V1.1 managed worker.
+
+Only one managed job can be nonterminal at a time. Terminal status means the
+exact owned Modal App has been stopped or proven absent with zero running
+tasks. See [Managed training](/managed-training) for the complete request,
+compute labels, restart and cancellation behavior, and a safe Python example.
 
 ## REST representation
 
@@ -261,7 +289,14 @@ All endpoints are under the backend URL; there is no `/v1` prefix.
 | `POST` | `/api/trainer/runs/{id}/logs` | `{"source", "line", "step"}` | accepted record, HTTP 201 |
 | `GET` | `/api/trainer/runs/{id}/logs?after_sequence=42&limit=200` | optional cursor and limit | bounded console page |
 | `POST` | `/api/trainer/runs/{id}/checkpoints` | `{"repo_id", "revision", "step"}` | updated run |
-| `GET` | `/api/trainer/models?refresh=false` | optional refresh query | namespace model listing |
+| `POST` | `/api/trainer/jobs` | bounded managed launch with idempotency/cost acknowledgement | durable job, HTTP 202 |
+| `GET` | `/api/trainer/jobs` | optional `limit` and cursor | managed job page |
+| `GET` | `/api/trainer/jobs/{id}` | — | managed job |
+| `POST` | `/api/trainer/jobs/{id}/cancel` | — | updated managed job, HTTP 202 |
+| `GET` | `/api/trainer/jobs/{id}/logs` | optional cursor and limit | bounded console page |
+| `GET` | `/api/trainer/jobs/{id}/metrics` | — | bounded metric series |
+| `GET` | `/api/trainer/jobs/{id}/checkpoints` | — | bounded checkpoint list |
+| `GET` | `/api/models?refresh=false` | optional refresh query | namespace model listing |
 
 Create and capture a run ID:
 
@@ -317,7 +352,7 @@ Model discovery always uses the backend's configured `HF_NAMESPACE` and an
 explicit backend-only `HF_TOKEN`; neither can be supplied by the browser:
 
 ```bash
-curl --fail 'http://127.0.0.1:8000/api/trainer/models'
+curl --fail 'http://127.0.0.1:8000/api/models'
 curl --fail 'http://127.0.0.1:8000/api/trainer/models?refresh=true'
 ```
 

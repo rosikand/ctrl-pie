@@ -19,7 +19,7 @@ FastAPI control plane ───────────────► PostgreSQ
   │       │       └──────────────────► Hugging Face Hub
   │       │                            datasets and model artifacts
   │       └──────────────────────────► Modal
-  │                                    inference workloads only
+  │                                    inference + managed SmolVLA training
   ▼
 YAMDriver (mock or real standard-YAM adapter) + V1 MockCamera
   │
@@ -41,7 +41,8 @@ and [Docker deployment](docker-deployment.md) for the two launch paths.
 | Hardware boundary | Typed cached arm snapshots, bounded jogs/actions, and fail-closed lifecycle | `drivers/yam.py`, `drivers/mock_yam.py`, `drivers/real_yam.py` |
 | Recording service | Teleop, camera capture, FFmpeg lifecycle, and synchronized samples | `recording.py`, `camera.py` |
 | Hub services | LeRobot conversion/upload and SHA-pinned dataset/model browsing | `hf.py`, `hf_datasets.py`, `hf_episodes.py`, `hf_models.py` |
-| Training tracker | PostgreSQL run metadata plus the synchronous reporting client | `api/trainer.py`, `trainer.py` |
+| Training control plane | External run reporting plus durable managed-job supervision and bounded event ingestion | `api/trainer.py`, `api/managed_training.py`, `managed_training.py`, `training_store.py` |
+| Training compute boundary | Exact owned Stub/Modal job identity, fixed SmolVLA/LeRobot worker, provider inspection, cancellation, and verified stop | `training_compute.py`, `training_compute_stub.py`, `training_compute_modal.py`, `modal_training_workload.py` |
 | Compute boundary | Provider-neutral deployment identity, health, inspection, and verified stop | `compute.py`, `compute_stub.py`, `compute_modal.py` |
 | Runtime boundary | Strict observation/action envelopes and LeRobot policy execution | `inference_runtime.py`, `runtime_lerobot.py`, `inference_transport.py` |
 | Inference orchestration | Arm loop, live metrics, passive recording, and teardown ordering | `robot_inference.py`, `inference_sessions.py` |
@@ -57,8 +58,9 @@ ctrl-π deliberately separates four kinds of state.
 ### PostgreSQL: durable control-plane metadata
 
 PostgreSQL stores robots, the one non-secret physical `yam_setups` record,
-recording summaries, training runs and their bounded metric/checkpoint
-metadata, inference endpoints/deployments, and non-secret settings. Alembic
+recording summaries, training runs and their bounded metric/checkpoint/log
+metadata, durable managed-training lifecycle/identity/deadline state, inference
+endpoints/deployments, and non-secret settings. Alembic
 owns the schema. Robot rows use a database UUID internally
 and a stable hardware-facing `driver_id` such as `yam-follower` at API and
 driver boundaries.
@@ -70,8 +72,10 @@ files.
 ### Hugging Face Hub: durable artifact storage
 
 Uploaded demonstrations are canonical LeRobot v3 dataset repositories. Model
-weights and cards remain model repositories produced by external training
-tools. Discovery is restricted to the configured `HF_NAMESPACE`; private
+weights and cards remain model repositories produced by external tools or the
+fixed managed SmolVLA/LeRobot worker. Managed output repositories are new, marked,
+namespace-confined, and private by default; ctrl-π does not choose a model
+license. Discovery is restricted to the configured `HF_NAMESPACE`; private
 media is fetched and byte-range proxied by the backend at an immutable Hub
 revision, so `HF_TOKEN` never enters browser code.
 
@@ -99,9 +103,10 @@ only in one backend process. A restart resets these values and never resumes
 motion. This is why ctrl-π must run with exactly one Uvicorn worker and must
 not be horizontally scaled.
 
-Modal Apps are external ephemeral resources. Their identity and lifecycle are
-represented in PostgreSQL, but a stopped deployment must also be proven
-stopped at the provider with zero running tasks.
+Modal Apps are external ephemeral resources. Inference deployments and managed
+training jobs use disjoint deterministic names and ownership tags. Their
+identity and lifecycle are represented in PostgreSQL, but a terminal state is
+not safe until the exact App is stopped or absent with zero running tasks.
 
 ## Control flows
 
@@ -172,21 +177,29 @@ LeRobot chunk files remain within the documented budget.
 
 ### Training
 
-Training never executes inside ctrl-π. External scripts use the REST API,
-the synchronous universal `ctrl_pi.CtrlPiClient`, or the compatible focused
-`ctrl_pi.trainer.Client` to create runs, report bounded scalar curves and
-sanitized console lines, and register model repository revisions.
-PostgreSQL stores bounded JSONB metric and console tails. The selected run is
-refreshed with non-overlapping, visibility-aware polling; the browser never
-attaches to a trainer or provider console. The external training process still
-owns execution and uploads weights to Hub. See the [Trainer API](trainer-api.md).
+External scripts use the REST API, the synchronous universal
+`ctrl_pi.CtrlPiClient`, or the compatible focused `ctrl_pi.trainer.Client` to
+create runs, report bounded scalar curves and sanitized console lines, and
+register model revisions. Separately, the SDK may create one durable managed
+job for a fixed validated SmolVLA workload through LeRobot 0.4.4 on exactly owned Modal compute. It has
+no arbitrary code, command, callback, Lambda, Auto-sizing, or OpenPI surface.
+Both paths feed the same bounded PostgreSQL stores, and the Training tab
+observes rather than launches or attaches to a raw provider console.
+
+Managed launch resolves dataset/base refs to immutable commits, creates and
+verifies a new marked output repository, commits the job before provider
+mutation, and supervises structured bounded events. A caller UUID makes an
+uncertain POST idempotent. Only one job may be nonterminal. Natural outcome,
+cancellation, and hard deadline all converge through exact App stop/absence
+and zero-task proof before the job becomes terminal. See [Managed training]
+(/managed-training) and the [Trainer API](/trainer-api).
 
 ### Models
 
 The first-class Models route reads repository, immutable revision, checkpoint,
 and card metadata from the configured Hugging Face namespace through the
 backend. The browser receives no Hub token and never uploads or mutates model
-artifacts; external training tooling remains responsible for weights.
+artifacts; external tooling or the fixed managed worker publishes weights.
 
 ### Inference
 
@@ -219,7 +232,9 @@ FastAPI lifespan startup performs these ordered operations:
 3. tear down unattended resources through the provider adapter named by each
    row's persisted target kind, including rows left by a mock/hardware mode
    switch, without calling a runtime web endpoint;
-4. start the deployment-lifetime watchdog while the setup manager passively
+4. reattach an exact persisted managed-training FunctionCall or fail closed
+   and clean its exact App; never relaunch an ambiguous attempt or orphan;
+5. start the deployment-lifetime watchdog while the setup manager passively
    watches a missing saved rig for prerequisites to appear.
 
 Real-driver construction and imports are lazy. Hardware discovery and preflight
@@ -242,8 +257,12 @@ directories are removed. A valid manifest under a recording root unknown to
 the connected database is preserved, as is unrelated content if the staging
 path was accidentally pointed at a shared directory.
 
-Shutdown first asks the inference session manager to stop arm writes and
-verify compute teardown. It then joins or aborts recording work, closes
+Shutdown stops local managed-training supervisors but preserves a healthy
+running provider job, bounded by its immutable provider/deployment deadline,
+for exact restart reattachment. A job already cancelling or finalizing still
+receives an exact cleanup attempt. Shutdown then asks the inference session
+manager to stop arm writes and verify inference compute teardown, joins or
+aborts recording work, closes
 FFmpeg, and releases rig ownership before driver shutdown rejects commands,
 stops sampling, asks the follower plugin for its safe mode, and closes both
 devices. That plugin call is not an electrical torque-free guarantee; physical
@@ -267,7 +286,7 @@ in [YAM driver interface](yam-driver.md).
 
 ## Trust and security boundary
 
-V1 has no ctrl-π login, API key, or multi-user authorization. Run it only on a
+V1.1 has no ctrl-π login, API key, or multi-user authorization. Run it only on a
 trusted, firewalled host or LAN; do not publish port 8000 or the Vite
 development server directly to the Internet.
 
@@ -289,11 +308,14 @@ claiming a live provider connection.
 Private Hub videos use a same-origin backend proxy. Modal inference endpoints
 require provider-native proxy authentication and accept only canonical HTTPS
 `.modal.run` roots. Strict bounded JSON envelopes replace native pickle/gRPC
-transport at the network boundary.
+transport at the network boundary. Managed training uses Modal lifecycle API
+credentials and a token-bearing trusted workload wrapper; tokens never enter
+the public launch payload, job row, provider name/tag, LeRobot child process,
+worker event, browser value, or log line.
 
 This boundary assumes the machine and configured external accounts belong to
 one operator. Authentication, multi-user collaboration, message queues,
-Kubernetes, and additional compute providers are intentionally outside V1.
+Kubernetes, and additional compute providers are intentionally outside V1.1.
 
 ## Further reading
 
@@ -302,6 +324,7 @@ Kubernetes, and additional compute providers are intentionally outside V1.
 - [YAM driver interface](yam-driver.md)
 - [Recording and teleoperation](recording.md)
 - [Compute and inference](inference.md)
+- [Managed training](managed-training.md)
 - [Trainer API](trainer-api.md)
 - [Docker deployment](docker-deployment.md)
 - [Full mock smoke gate](smoke-test.md)

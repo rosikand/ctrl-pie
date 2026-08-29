@@ -52,6 +52,7 @@
           "recording",
           "datasets",
           "training",
+          "managed-training",
           "models",
           "inference"
         ]

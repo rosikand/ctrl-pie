@@ -5,6 +5,48 @@ export type TrainingRunStatus =
   | "failed"
   | "cancelled";
 
+export type ManagedTrainingJobStatus =
+  | "created"
+  | "launching"
+  | "running"
+  | "finalizing"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type ManagedTrainingOutcome =
+  | "pending"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export type ManagedTrainingProviderState =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "stopping"
+  | "stopped"
+  | "unknown";
+
+export type ManagedTrainingJobSummary = {
+  id: string;
+  status: ManagedTrainingJobStatus;
+  outcome: ManagedTrainingOutcome;
+  target_kind: "stub" | "modal";
+  compute_size: string;
+  deadline_at: string;
+  provider_state: ManagedTrainingProviderState;
+  teardown_verified: boolean;
+  output_model_repo: string;
+  output_marker_revision: string | null;
+  output_revision: string | null;
+  last_error: string | null;
+  event_gap: boolean;
+};
+
 export type MetricPoint = {
   step: number;
   value: number;
@@ -49,6 +91,7 @@ export type TrainingRun = {
   config: Record<string, unknown>;
   metrics: Record<string, MetricPoint[]>;
   checkpoints: TrainingCheckpoint[];
+  managed_job: ManagedTrainingJobSummary | null;
   created_at: string;
   updated_at: string;
 };

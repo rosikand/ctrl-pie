@@ -57,9 +57,11 @@ visible in the catalog while leaving it undeployable. Upload the contents of
 the final `pretrained_model` directory to the model repository root, then
 register the returned commit SHA with ctrl-π.
 
-The executable example in [Trainer API](/trainer-api#end-to-end-lerobot-fine-tune-and-checkpoint-flow)
+The executable external example in [Trainer API](/trainer-api#end-to-end-lerobot-fine-tune-and-checkpoint-flow)
 creates a new private model repository, uploads exactly that root layout, and
-registers the immutable revision.
+registers the immutable revision. [Managed training](/managed-training)
+creates a separate, exactly marked output repository and publishes the same
+deployable root only after the fixed worker finishes successfully.
 
 ## Inference identity
 

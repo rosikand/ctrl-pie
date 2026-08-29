@@ -76,8 +76,7 @@ never reaches browser code.
 
 ### 4. Training
 
-ctrl-π does **not** run training in V1. Users train on their own compute with
-their own LeRobot/OpenPI/custom scripts. ctrl-π provides:
+ctrl-π supports two complementary training paths:
 
 **Trainer API** — a small reporting surface in the universal Python SDK and
 REST API (with the legacy `ctrl_pi.trainer.Client` kept compatible) that
@@ -90,12 +89,52 @@ external training scripts call to:
 
 Run state goes to Postgres; weights go to HF Hub via the user's normal tooling.
 
-The Training tab is a minimal experiment-tracking surface for reported runs:
-current/past status and step, dataset, base model, runtime/framework, config,
-live-polled metric curves and trainer-reported console output, output model
-repo, and registered checkpoints.
+**Managed Modal training** — the universal SDK and REST API can launch a
+strictly validated SmolVLA job through LeRobot 0.4.4 on the user's Modal
+account. A managed job is
+durable control-plane state linked one-to-one with its Training run; it owns a
+deterministically named and tagged Modal App and a newly marked Hugging Face
+model repository. The public request selects only pinned dataset/base-model
+revisions, bounded training parameters, an exact output repo, a hard deadline,
+and one of these cost-acknowledged compute sizes:
 
-V2 (do not build): buttonized plug-and-play training on managed compute.
+- `Modal: A10G`
+- `Modal: A100`, `Modal: 2xA100`, `Modal: 4xA100`, `Modal: 8xA100`
+- `Modal: H100`, `Modal: 2xH100`, `Modal: 4xH100`, `Modal: 8xH100`
+
+Launch is idempotent and asynchronous. The worker snapshots immutable inputs,
+accepts only the built-in SmolVLA policy/configuration and registry-backed
+processor pipeline, runs the pinned LeRobot training entry point (including
+Accelerate for multi-GPU jobs), reports bounded structured events into the existing run
+metrics/console/checkpoint stores, and explicitly uploads checkpoint folders
+and one inference-compatible final root to HF. It never accepts user code,
+shell commands, environment variables, secrets, or a callback URL. LeRobot's
+implicit Hub uploader is disabled so ctrl-π can verify the exact output repo,
+ownership marker, visibility, and immutable commit without choosing a license
+for the user's model.
+
+V1.1 permits exactly one nonterminal managed job per ctrl-π instance. This is
+a hard cost guard, not a queue; a concurrent launch returns 409.
+
+Completion, failure, cancellation, and deadline expiry all converge through
+the same ownership-verified Modal teardown. A managed job cannot be reported as
+terminal until App stop and zero running tasks are provider-verified. Cleanup
+uncertainty remains visible and retryable. Backend restart reattaches an exact
+persisted FunctionCall when it can prove the identity, never relaunches an
+ambiguous job, and cleans up exact owned orphans. Graceful backend shutdown does
+not cancel an intentionally running long-lived job; the provider deadline is
+the independent backstop and startup reconciliation resumes supervision.
+
+The Training tab is an experiment-tracking surface for both kinds of run:
+current/past status and step, dataset, base model, runtime/framework, config,
+live-polled metric curves and bounded console output, output model repo, and
+registered checkpoints. Managed runs additionally show compute, provider and
+execution state, deadline, event-gap truth, final artifact revision, and
+provider-verified teardown. There is no browser launch form or one-click
+training button.
+
+Future work (do not build): Lambda Labs, Auto compute sizing, user-supplied
+training code, and buttonized/agentic research workflows.
 
 ### 5. Models
 
@@ -106,9 +145,10 @@ namespace.
 - immutable revisions and checkpoint files
 - direct links to the corresponding Hub artifacts
 
-Discovery is read-only. Training scripts remain responsible for producing and
-uploading weights. REST and the universal SDK can select one of those immutable
-artifacts for inference, but do not provide a raw model-file upload backdoor.
+Discovery is read-only. External training scripts or the fixed managed worker
+remain responsible for producing and uploading weights. REST and the universal
+SDK can select one of those immutable artifacts for inference, but do not
+provide a raw model-file upload backdoor.
 
 ### 6. Inference
 
@@ -188,7 +228,7 @@ Browser / Python SDK ── LAN ──► ctrl-π backend (Ubuntu box) ── CA
                                       │
                                       ├── PostgreSQL (user's; Supabase recommended)
                                       ├── Hugging Face Hub (user's namespace)
-                                      └── Modal (user's account; inference only)
+                                      └── Modal (user's account; inference and managed training)
 ```
 
 Key interfaces/components:
@@ -196,6 +236,8 @@ Key interfaces/components:
 - `YAMDriver` / `MockYAMDriver` plus the single-rig `YAMSetupManager`
 - `LeRobotRuntime`, `OpenPIRuntime` (runtime adapters)
 - `ModalComputeTarget` (behind a generic `ComputeTarget` abstraction)
+- `ManagedTrainingManager` / `ManagedTrainingTarget` (Modal plus a complete
+  credential-free stub)
 - universal typed REST/Python SDK (`ctrl_pi.CtrlPiClient`), with the Trainer
   reporting client retained as a compatibility facade
 
@@ -209,9 +251,10 @@ Three categories:
 
 1. **PostgreSQL** — source of truth for small mutable control-plane state:
    robots/arms config, the one persisted physical YAM setup, recording
-   metadata, training runs, inference endpoints/deployments, settings.
+   metadata, training runs and managed-job lifecycle, inference
+   endpoints/deployments, settings.
    Suggested tables: `robots`, `yam_setups`, `recordings`, `training_runs`,
-   `inference_endpoints`, `deployments`, `settings`.
+   `managed_training_jobs`, `inference_endpoints`, `deployments`, `settings`.
    SQLAlchemy + Alembic; depend only on standard Postgres via `DATABASE_URL`
    (Supabase is just the recommended host).
 2. **Hugging Face Hub** — source of truth for artifacts: LeRobot datasets,
@@ -259,10 +302,10 @@ Three categories:
 ## Non-goals for V1
 
 Kubernetes, Redis, message queues, auth, multi-user collaboration, fleet
-management, hosted ctrl-π, buttonized training, BYOC/Lambda compute, automated
-VM provisioning, elaborate dashboards, reimplementing LeRobot/OpenPI
-protocols, unnecessary abstractions. Prefer boring, understandable,
-low-latency implementations.
+management, hosted ctrl-π, browser-buttonized or arbitrary-code training,
+Auto sizing, BYOC/Lambda compute, automated VM provisioning, elaborate
+dashboards, reimplementing LeRobot/OpenPI protocols, unnecessary abstractions.
+Prefer boring, understandable, low-latency implementations.
 
 ## Naming
 
@@ -337,10 +380,13 @@ V1.1 builds on the completed V1 in this order:
    documentation site, with a concise README, complete current-product
    navigation, validated examples and links, a screenshot gallery, and a
    changelog.
+5. Managed, artifact-backed LeRobot training runs on the user's Modal account
+   through the Trainer REST/Python API with bounded observability and verified
+   teardown; Lambda, Auto sizing, arbitrary code, and a browser launch flow are
+   deferred.
 
-Managed training and user-facing AI-agent guidance are specified when their
-later accepted V1.1 issues are implemented; they are not implied by the
-universal client or documentation milestones alone.
+User-facing AI-agent guidance is specified when its final accepted V1.1 issue
+is implemented; it is not implied by the universal client alone.
 
 ## Decisions
 
@@ -530,3 +576,37 @@ universal client or documentation milestones alone.
   The top-level README remains a concise entry point rather than a duplicate
   manual. Documentation describes only behavior present in the current tree;
   managed training remains out of scope until its accepted issue is built.
+- 2026-08-29 — V1.1 managed training is an SDK/REST-launched, artifact-backed
+  SmolVLA job through LeRobot 0.4.4 on the operator's Modal account, linked one-to-one with the
+  existing Training run rather than replacing external reporting. The request
+  is a bounded declarative specification with a caller-owned idempotency UUID,
+  immutable Hub inputs, an exact configured-namespace output repo, explicit
+  visibility and compute-cost acknowledgements, one fixed GPU choice, and a
+  persisted hard deadline; arbitrary code, shell arguments, environment,
+  Lambda, Auto sizing, and a browser launch form are excluded. ctrl-π creates
+  the output repo private by default, writes and verifies an exact job marker,
+  disables LeRobot's implicit Hub uploader, and explicitly publishes
+  checkpoint folders plus a deployable final root without inferring a model
+  license. Each job owns `ctrl-pi-training-<job UUID>` with the exact
+  `ctrl-pi-training-job=<job UUID>` Modal tag and retains App/FunctionCall
+  identity. Execution outcome remains separate from cleanup state: no job is
+  terminal until exact App stop and zero tasks are verified, while gaps in the
+  bounded provider event tail remain visible without invalidating an otherwise
+  verified final artifact. Graceful backend shutdown preserves intentionally
+  running training; deadline, explicit cancel, failure, startup reconciliation,
+  and `make modal-panic` all use the same fail-closed ownership boundary.
+  A partial unique database index enforces one nonterminal job, so this cost
+  guard remains race-safe without introducing a queue. A possibly created
+  output repo and its ownership marker are retained after every failed,
+  cancelled, or ambiguous attempt; the idempotency row and output slug remain
+  reserved so recovery never destroys evidence or silently reuses an artifact
+  boundary.
+  V1.1 managed training deliberately supports only a bounded, built-in
+  SmolVLA checkpoint shape. Before the child starts, ctrl-π rejects dynamic
+  processor classes, remote-code and adapter/PEFT indirection, seals device and
+  Hub behavior, and pins the fixed SmolVLM configuration/tokenizer dependency
+  at `7b375e1b73b11138ff12fe22c8f2822d8fe03467`. That non-weight
+  dependency is bundled into each published checkpoint so the existing
+  inference runtime can load the final artifact locally with Hub access
+  disabled. Other LeRobot policy families remain available through the
+  external reporting path, not this managed worker.

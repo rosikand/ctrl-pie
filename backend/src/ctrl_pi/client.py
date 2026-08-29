@@ -31,6 +31,11 @@ from ctrl_pi.sdk_models import (
     Deployment,
     HealthStatus,
     InferenceState,
+    ManagedTrainingCheckpoints,
+    ManagedTrainingComputeSize,
+    ManagedTrainingJob,
+    ManagedTrainingJobPage,
+    ManagedTrainingMetrics,
     ModelPage,
     PublicSettings,
     Recording,
@@ -155,6 +160,83 @@ class _MetricLog(_InputModel):
             if not math.isfinite(number):
                 raise ValueError("metric value must be finite")
         return value
+
+
+class _ManagedTrainingLaunch(_InputModel):
+    idempotency_key: UUID
+    name: str = Field(min_length=1, max_length=160)
+    dataset_repo: str = Field(min_length=3, max_length=255)
+    dataset_revision: str | None = Field(default=None, min_length=1, max_length=128)
+    base_model: str = Field(min_length=3, max_length=255)
+    base_model_revision: str | None = Field(default=None, min_length=1, max_length=128)
+    output_model_repo: str = Field(min_length=3, max_length=255)
+    output_private: bool = True
+    acknowledge_public_model_risk: bool = False
+    acknowledge_compute_cost: bool
+    runtime: Literal["lerobot"] = "lerobot"
+    compute_size: ManagedTrainingComputeSize
+    max_steps: int = Field(ge=1, le=2_147_483_647)
+    batch_size: int = Field(default=8, ge=1, le=4_096)
+    log_every: int = Field(default=10, ge=1, le=2_147_483_647)
+    save_every: int = Field(default=1_000, ge=1, le=2_147_483_647)
+    seed: int = Field(default=42, ge=0, le=2_147_483_647)
+    num_workers: int = Field(default=4, ge=0, le=64)
+    timeout_minutes: int = Field(default=60, ge=1, le=1_440)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("managed training name is blank")
+        return value
+
+    @field_validator("dataset_repo", "base_model", "output_model_repo")
+    @classmethod
+    def validate_repo(cls, value: str) -> str:
+        if (
+            value.strip() != value
+            or value.count("/") != 1
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+            or "--" in value
+        ):
+            raise ValueError("managed training repository is invalid")
+        return value
+
+    @field_validator("dataset_revision", "base_model_revision")
+    @classmethod
+    def validate_revision(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if (
+            re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?", value
+            )
+            is None
+            or ".." in value
+            or "//" in value
+            or "--" in value
+        ):
+            raise ValueError("managed training revision is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def validate_safety_bounds(self) -> _ManagedTrainingLaunch:
+        if not self.acknowledge_compute_cost:
+            raise ValueError("managed training compute cost must be acknowledged")
+        if not self.output_private and not self.acknowledge_public_model_risk:
+            raise ValueError("public model risk must be acknowledged")
+        if (
+            self.log_every > self.max_steps
+            or math.ceil(self.max_steps / self.log_every) * 64 > 10_000
+        ):
+            raise ValueError("managed training log interval is invalid")
+        if (
+            self.save_every > self.max_steps
+            or math.ceil(self.max_steps / self.save_every) > 512
+        ):
+            raise ValueError("managed training checkpoint interval is invalid")
+        return self
 
 
 class _DeploymentCreate(_InputModel):
@@ -617,6 +699,130 @@ class CtrlPiClient:
             TrainingRun,
             f"/api/trainer/runs/{self._uuid(run_id, 'Training run')}/checkpoints",
             json={"repo_id": repo_id, "revision": revision, "step": step},
+        )
+
+    # Managed Modal training. The caller owns the idempotency key so an
+    # uncertain POST can be retried without ever creating duplicate compute.
+    def launch_managed_training(
+        self,
+        name: str,
+        *,
+        idempotency_key: UUID | str,
+        dataset_repo: str,
+        base_model: str,
+        output_model_repo: str,
+        compute_size: ManagedTrainingComputeSize,
+        max_steps: int,
+        acknowledge_compute_cost: bool,
+        dataset_revision: str | None = None,
+        base_model_revision: str | None = None,
+        output_private: bool = True,
+        acknowledge_public_model_risk: bool = False,
+        batch_size: int = 8,
+        log_every: int = 10,
+        save_every: int = 1_000,
+        seed: int = 42,
+        num_workers: int = 4,
+        timeout_minutes: int = 60,
+    ) -> ManagedTrainingJob:
+        parsed_key = UUID(self._uuid(idempotency_key, "Managed training idempotency"))
+        return self._send_model(
+            ManagedTrainingJob,
+            "POST",
+            "/api/trainer/jobs",
+            _ManagedTrainingLaunch,
+            {
+                "idempotency_key": parsed_key,
+                "name": name,
+                "dataset_repo": dataset_repo,
+                "dataset_revision": dataset_revision,
+                "base_model": base_model,
+                "base_model_revision": base_model_revision,
+                "output_model_repo": output_model_repo,
+                "output_private": output_private,
+                "acknowledge_public_model_risk": acknowledge_public_model_risk,
+                "acknowledge_compute_cost": acknowledge_compute_cost,
+                "runtime": "lerobot",
+                "compute_size": compute_size,
+                "max_steps": max_steps,
+                "batch_size": batch_size,
+                "log_every": log_every,
+                "save_every": save_every,
+                "seed": seed,
+                "num_workers": num_workers,
+                "timeout_minutes": timeout_minutes,
+            },
+        )
+
+    def list_managed_training_jobs(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> ManagedTrainingJobPage:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise CtrlPiError("Managed training page limit is invalid.") from None
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = self._bounded_query(
+                cursor, "Managed training cursor", 128
+            )
+        return self._get(ManagedTrainingJobPage, "/api/trainer/jobs", params=params)
+
+    def get_managed_training_job(
+        self, job_id: UUID | str
+    ) -> ManagedTrainingJob:
+        return self._get(
+            ManagedTrainingJob,
+            f"/api/trainer/jobs/{self._uuid(job_id, 'Managed training job')}",
+        )
+
+    def cancel_managed_training_job(
+        self, job_id: UUID | str
+    ) -> ManagedTrainingJob:
+        return self._post(
+            ManagedTrainingJob,
+            f"/api/trainer/jobs/{self._uuid(job_id, 'Managed training job')}/cancel",
+        )
+
+    def list_managed_training_logs(
+        self,
+        job_id: UUID | str,
+        *,
+        after_sequence: int | None = None,
+        limit: int = 200,
+    ) -> ConsoleLogPage:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise CtrlPiError("Managed training log page limit is invalid.") from None
+        params: dict[str, Any] = {"limit": limit}
+        if after_sequence is not None:
+            if (
+                isinstance(after_sequence, bool)
+                or not isinstance(after_sequence, int)
+                or not 0 <= after_sequence <= 9_007_199_254_740_991
+            ):
+                raise CtrlPiError("Managed training log sequence is invalid.") from None
+            params["after_sequence"] = after_sequence
+        return self._get(
+            ConsoleLogPage,
+            f"/api/trainer/jobs/{self._uuid(job_id, 'Managed training job')}/logs",
+            params=params,
+        )
+
+    def get_managed_training_metrics(
+        self, job_id: UUID | str
+    ) -> ManagedTrainingMetrics:
+        return self._get(
+            ManagedTrainingMetrics,
+            f"/api/trainer/jobs/{self._uuid(job_id, 'Managed training job')}/metrics",
+        )
+
+    def list_managed_training_checkpoints(
+        self, job_id: UUID | str
+    ) -> ManagedTrainingCheckpoints:
+        return self._get(
+            ManagedTrainingCheckpoints,
+            f"/api/trainer/jobs/{self._uuid(job_id, 'Managed training job')}/checkpoints",
         )
 
     # Inference

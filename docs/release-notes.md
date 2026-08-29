@@ -20,23 +20,25 @@ the detailed engineering record.
   physical rig.
 - Added `ctrl_pi.CtrlPiClient`, a typed synchronous SDK over the same REST
   services as the UI, covering system/settings, YAM setup and arms, recording,
-  datasets, models, externally reported training, and inference.
+  datasets, models, external and managed training, and inference.
 - Added canonical `GET /api/models`; the legacy Trainer model route remains a
   deprecated compatibility alias backed by the same service.
 - Added bounded, sequenced training console records while preserving the
   legacy `ctrl_pi.trainer.Client` API.
+- Added SDK/REST-launched managed SmolVLA training through LeRobot 0.4.4 on exact owned Modal Apps,
+  all supported A10G/A100/H100 allocations, durable reconciliation, bounded
+  observability, Hugging Face artifact ownership, cancellation, deadlines, and
+  teardown verification. The Training UI observes but does not launch jobs.
 
-Managed training is not part of this release: external processes still train
-and upload artifacts to Hugging Face, then report metadata to ctrl-π. Physical
-YAM behavior remains unvalidated until the target Ubuntu/YAM checklist is
-completed.
+Physical YAM behavior remains unvalidated until the target Ubuntu/YAM
+checklist is completed.
 
 ### Documentation
 
 - Added the repository-hosted Mintlify site and production navigation.
 - Split installation, quickstart, first-run setup, credentials, YAM onboarding,
   and product workflows into focused guides.
-- Added dedicated Arms, Datasets, Training, Models, troubleshooting,
+- Added dedicated Arms, Datasets, Training, Managed training, Models, troubleshooting,
   screenshots, and changelog pages.
 - Added a product-wide REST/Python SDK guide and current YAM onboarding and
   restoration procedures.

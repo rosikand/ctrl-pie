@@ -16,7 +16,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ctrl_pi.db import get_db
-from ctrl_pi.models import TrainingRun
+from ctrl_pi.models import ManagedTrainingJob, TrainingRun
+from ctrl_pi.training_compute import ManagedTrainingComputeSize
+from ctrl_pi.training_store import (
+    ManagedTrainingRunMutationError,
+    TrainingStoreCorruptError,
+    TrainingStoreError,
+    append_checkpoint,
+    append_console_log,
+    append_metrics,
+    assert_external_run_mutable,
+)
 
 router = APIRouter(prefix="/api/trainer", tags=["trainer"])
 
@@ -121,6 +131,7 @@ _MAX_CONSOLE_LOGS = 1_000
 _MAX_CONSOLE_LOG_BYTES = 512 * 1024
 _MAX_CONSOLE_LINE_BYTES = 4 * 1024
 _MAX_CONSOLE_SEQUENCE = 9_007_199_254_740_991
+_IMMUTABLE_SHA = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
 
 
 def _contains_secret_assignment(value: str) -> bool:
@@ -168,6 +179,42 @@ class ConsoleLogRead(BaseModel):
         return value.astimezone(UTC)
 
 
+class ManagedTrainingJobSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    id: str
+    status: Literal[
+        "created",
+        "launching",
+        "running",
+        "finalizing",
+        "cancelling",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    outcome: Literal["pending", "succeeded", "failed", "cancelled"]
+    target_kind: Literal["stub", "modal"]
+    compute_size: ManagedTrainingComputeSize
+    deadline_at: datetime
+    provider_state: Literal[
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "stopping",
+        "stopped",
+        "unknown",
+    ]
+    teardown_verified: bool
+    output_model_repo: str
+    output_marker_revision: _IMMUTABLE_SHA | None
+    output_revision: _IMMUTABLE_SHA | None
+    last_error: str | None = Field(max_length=240)
+    event_gap: bool
+
+
 class TrainingRunRead(BaseModel):
     id: str
     name: str
@@ -182,6 +229,7 @@ class TrainingRunRead(BaseModel):
     config: dict[str, Any]
     metrics: dict[str, list[MetricPointRead]]
     checkpoints: list[CheckpointRead]
+    managed_job: ManagedTrainingJobSummary | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -527,7 +575,32 @@ def _run_or_404(db: Session, run_id: uuid.UUID, *, lock: bool) -> TrainingRun:
     return run
 
 
-def _run_read(run: TrainingRun) -> TrainingRunRead:
+def _managed_summary(job: ManagedTrainingJob | None) -> ManagedTrainingJobSummary | None:
+    if job is None:
+        return None
+    deadline = job.deadline_at
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    return ManagedTrainingJobSummary(
+        id=str(job.id),
+        status=job.status,
+        outcome=job.outcome,
+        target_kind=job.target_kind,
+        compute_size=job.compute_size,
+        deadline_at=deadline,
+        provider_state=job.provider_state,
+        teardown_verified=job.teardown_verified_at is not None,
+        output_model_repo=job.output_model_repo,
+        output_marker_revision=job.output_marker_revision,
+        output_revision=job.output_revision,
+        last_error=job.last_error,
+        event_gap=job.event_gap,
+    )
+
+
+def _run_read(
+    run: TrainingRun, managed_job: ManagedTrainingJob | None = None
+) -> TrainingRunRead:
     return TrainingRunRead(
         id=str(run.id),
         name=run.name,
@@ -542,6 +615,7 @@ def _run_read(run: TrainingRun) -> TrainingRunRead:
         config=copy.deepcopy(run.config or {}),
         metrics=copy.deepcopy(run.metrics or {}),
         checkpoints=copy.deepcopy(run.checkpoints or []),
+        managed_job=_managed_summary(managed_job),
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
@@ -556,6 +630,22 @@ def _commit(db: Session) -> None:
             status_code=503,
             detail="PostgreSQL could not persist the training run.",
         ) from error
+
+
+def _assert_external_mutation(db: Session, run_id: uuid.UUID) -> None:
+    try:
+        assert_external_run_mutable(db, run_id)
+    except ManagedTrainingRunMutationError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+def _store_or_http(operation: Any) -> Any:
+    try:
+        return operation()
+    except TrainingStoreCorruptError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from None
+    except TrainingStoreError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
 
 
 @router.post("/runs", response_model=TrainingRunRead, status_code=201)
@@ -578,7 +668,7 @@ def create_run(payload: RunCreate, db: Session = Depends(get_db)) -> TrainingRun
     db.add(run)
     _commit(db)
     db.refresh(run)
-    return _run_read(run)
+    return _run_read(run, None)
 
 
 @router.get("/runs", response_model=TrainingRunsRead)
@@ -591,7 +681,22 @@ def list_runs(
         statement = statement.where(TrainingRun.status == status)
     statement = statement.order_by(TrainingRun.created_at.desc(), TrainingRun.id.desc())
     runs = db.scalars(statement).all()
-    return TrainingRunsRead(runs=[_run_read(run) for run in runs])
+    run_ids = [run.id for run in runs]
+    managed = {
+        job.training_run_id: job
+        for job in (
+            db.scalars(
+                select(ManagedTrainingJob).where(
+                    ManagedTrainingJob.training_run_id.in_(run_ids)
+                )
+            ).all()
+            if run_ids
+            else []
+        )
+    }
+    return TrainingRunsRead(
+        runs=[_run_read(run, managed.get(run.id)) for run in runs]
+    )
 
 
 @router.get("/runs/{run_id}", response_model=TrainingRunRead)
@@ -601,7 +706,13 @@ def get_run(
     db: Session = Depends(get_db),
 ) -> TrainingRunRead:
     response.headers["Cache-Control"] = "private, no-store"
-    return _run_read(_run_or_404(db, run_id, lock=False))
+    run = _run_or_404(db, run_id, lock=False)
+    job = db.scalar(
+        select(ManagedTrainingJob).where(
+            ManagedTrainingJob.training_run_id == run.id
+        )
+    )
+    return _run_read(run, job)
 
 
 @router.patch("/runs/{run_id}", response_model=TrainingRunRead)
@@ -613,6 +724,7 @@ def update_run(
     if not payload.model_fields_set:
         raise HTTPException(status_code=422, detail="At least one update field is required.")
     run = _run_or_404(db, run_id, lock=True)
+    _assert_external_mutation(db, run_id)
     if (
         "current_step" in payload.model_fields_set
         and payload.current_step is not None
@@ -637,7 +749,7 @@ def update_run(
             setattr(run, field, copy.deepcopy(getattr(payload, field)))
     _commit(db)
     db.refresh(run)
-    return _run_read(run)
+    return _run_read(run, None)
 
 
 @router.post("/runs/{run_id}/metrics", response_model=TrainingRunRead)
@@ -647,23 +759,13 @@ def log_metrics(
     db: Session = Depends(get_db),
 ) -> TrainingRunRead:
     run = _run_or_404(db, run_id, lock=True)
-    metrics = copy.deepcopy(run.metrics or {})
-    for name, value in payload.metrics.items():
-        existing = metrics.get(name, [])
-        series = [point for point in existing if point.get("step") != payload.step]
-        series.append({"step": payload.step, "value": value})
-        series.sort(key=lambda point: point["step"])
-        metrics[name] = series
-    if len(metrics) > _MAX_METRIC_NAMES or sum(map(len, metrics.values())) > _MAX_METRIC_POINTS:
-        raise HTTPException(
-            status_code=409,
-            detail="Training run metric storage limit was reached.",
-        )
-    run.metrics = metrics
-    run.current_step = max(run.current_step, payload.step)
+    _assert_external_mutation(db, run_id)
+    _store_or_http(
+        lambda: append_metrics(run, step=payload.step, metrics=payload.metrics)
+    )
     _commit(db)
     db.refresh(run)
-    return _run_read(run)
+    return _run_read(run, None)
 
 
 @router.post("/runs/{run_id}/checkpoints", response_model=TrainingRunRead)
@@ -673,25 +775,18 @@ def register_checkpoint(
     db: Session = Depends(get_db),
 ) -> TrainingRunRead:
     run = _run_or_404(db, run_id, lock=True)
-    checkpoints = copy.deepcopy(run.checkpoints or [])
-    checkpoint = payload.model_dump()
-    if checkpoint not in checkpoints:
-        if len(checkpoints) >= _MAX_CHECKPOINTS:
-            raise HTTPException(
-                status_code=409,
-                detail="Training run checkpoint storage limit was reached.",
-            )
-        checkpoints.append(checkpoint)
-        checkpoints.sort(
-            key=lambda item: (item["step"], item["repo_id"], item["revision"])
+    _assert_external_mutation(db, run_id)
+    _store_or_http(
+        lambda: append_checkpoint(
+            run,
+            repo_id=payload.repo_id,
+            revision=payload.revision,
+            step=payload.step,
         )
-    run.checkpoints = checkpoints
-    run.output_model_repo = payload.repo_id
-    run.checkpoint_revision = payload.revision
-    run.current_step = max(run.current_step, payload.step)
+    )
     _commit(db)
     db.refresh(run)
-    return _run_read(run)
+    return _run_read(run, None)
 
 
 @router.get("/runs/{run_id}/logs", response_model=ConsoleLogsRead)
@@ -762,8 +857,17 @@ def log_console(
     db: Session = Depends(get_db),
 ) -> ConsoleLogRead:
     run = _run_or_404(db, run_id, lock=True)
-    logs, entry = _append_console_log(run.console_logs or [], payload)
-    run.console_logs = logs
+    _assert_external_mutation(db, run_id)
+    entry = _store_or_http(
+        lambda: append_console_log(
+            run,
+            source=payload.source,
+            line=payload.line,
+            step=payload.step,
+            max_logs=_MAX_CONSOLE_LOGS,
+            max_bytes=_MAX_CONSOLE_LOG_BYTES,
+        )
+    )
     if payload.step is not None:
         run.current_step = max(run.current_step, payload.step)
     _commit(db)

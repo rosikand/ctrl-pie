@@ -11,6 +11,7 @@ from ctrl_pi.api.arms import router as arms_router
 from ctrl_pi.api.camera import router as camera_router
 from ctrl_pi.api.datasets import router as datasets_router
 from ctrl_pi.api.inference import router as inference_router
+from ctrl_pi.api.managed_training import router as managed_training_router
 from ctrl_pi.api.models import legacy_router as legacy_models_router
 from ctrl_pi.api.models import router as models_router
 from ctrl_pi.api.recordings import (
@@ -42,9 +43,17 @@ from ctrl_pi.inference_transport import (
     InProcessInferenceTransport,
     ModalInferenceTransport,
 )
+from ctrl_pi.managed_training import ManagedTrainingManager
+from ctrl_pi.managed_training_artifacts import (
+    HFManagedTrainingArtifactService,
+    ManagedTrainingArtifactService,
+    StubManagedTrainingArtifactService,
+)
 from ctrl_pi.recording import RecordingManager
 from ctrl_pi.rig import RigLease
 from ctrl_pi.spa import install_spa
+from ctrl_pi.training_compute import ManagedTrainingTarget, TrainingTargetKind
+from ctrl_pi.training_compute_stub import StubManagedTrainingTarget
 from ctrl_pi.yam_setup import YAMSetupManager
 
 
@@ -63,6 +72,9 @@ def create_app(
     inference_transport_factory: TransportFactory | None = None,
     frontend_dist_dir: Path | None = None,
     yam_setup_manager: YAMSetupManager | None = None,
+    managed_training_target: ManagedTrainingTarget | None = None,
+    managed_training_artifact_service: ManagedTrainingArtifactService | None = None,
+    managed_training_manager: ManagedTrainingManager | None = None,
 ) -> FastAPI:
     config = get_config()
     driver = yam_driver if yam_driver is not None else create_yam_driver(config)
@@ -124,6 +136,64 @@ def create_app(
             session_factory=application_session_factory,
         )
     orchestration_session_factory = deployment_service.session_factory
+
+    if managed_training_manager is None and orchestration_session_factory is not None:
+        if managed_training_target is not None:
+            training_target = managed_training_target
+        elif config.mock_mode:
+            training_target = StubManagedTrainingTarget()
+        else:
+            from ctrl_pi.training_compute_modal import ModalTrainingTarget
+
+            training_target = ModalTrainingTarget.from_config(config)
+        if managed_training_artifact_service is not None:
+            training_artifacts = managed_training_artifact_service
+        elif training_target.kind == "stub":
+            training_artifacts = StubManagedTrainingArtifactService()
+        else:
+            training_artifacts = HFManagedTrainingArtifactService(
+                config.hf_token.get_secret_value()
+                if config.hf_token is not None
+                else None,
+                config.hf_namespace,
+            )
+
+        def training_target_factory(
+            kind: TrainingTargetKind,
+        ) -> ManagedTrainingTarget | None:
+            if kind == training_target.kind:
+                return training_target
+            if kind == "stub":
+                return StubManagedTrainingTarget()
+            if kind == "modal":
+                from ctrl_pi.training_compute_modal import ModalTrainingTarget
+
+                return ModalTrainingTarget.from_config(config)
+            return None
+
+        def training_artifact_factory(
+            kind: TrainingTargetKind,
+        ) -> ManagedTrainingArtifactService | None:
+            if kind == training_target.kind:
+                return training_artifacts
+            if kind == "stub":
+                return StubManagedTrainingArtifactService()
+            if kind == "modal":
+                return HFManagedTrainingArtifactService(
+                    config.hf_token.get_secret_value()
+                    if config.hf_token is not None
+                    else None,
+                    config.hf_namespace,
+                )
+            return None
+
+        managed_training_manager = ManagedTrainingManager(
+            training_target,
+            training_artifacts,
+            session_factory=orchestration_session_factory,
+            target_factory=training_target_factory,
+            artifact_service_factory=training_artifact_factory,
+        )
 
     def cleanup_service_factory(
         target_kind: TargetKind,
@@ -187,6 +257,7 @@ def create_app(
     async def lifespan(application: FastAPI):
         setup_started = False
         recording_started = False
+        managed_training_started = False
         try:
             setup_started = True
             await application.state.yam_setup_manager.startup()
@@ -204,17 +275,24 @@ def create_app(
                     application.state.recording_manager,
                 )
             await application.state.inference_session_manager.startup()
+            if application.state.managed_training_manager is not None:
+                managed_training_started = True
+                await application.state.managed_training_manager.startup()
             yield
         finally:
             try:
-                await application.state.inference_session_manager.shutdown()
+                if managed_training_started:
+                    await application.state.managed_training_manager.shutdown()
             finally:
                 try:
-                    if recording_started:
-                        await application.state.recording_manager.shutdown()
+                    await application.state.inference_session_manager.shutdown()
                 finally:
-                    if setup_started:
-                        await application.state.yam_setup_manager.shutdown()
+                    try:
+                        if recording_started:
+                            await application.state.recording_manager.shutdown()
+                    finally:
+                        if setup_started:
+                            await application.state.yam_setup_manager.shutdown()
 
     application = FastAPI(
         title="ctrl-π API",
@@ -251,6 +329,7 @@ def create_app(
     application.state.hf_model_browser = model_browser
     application.state.deployment_service = deployment_service
     application.state.inference_session_manager = session_manager
+    application.state.managed_training_manager = managed_training_manager
     application.include_router(settings_router)
     application.include_router(yam_setup_router)
     application.include_router(arms_router)
@@ -260,6 +339,7 @@ def create_app(
     application.include_router(models_router)
     application.include_router(legacy_models_router)
     application.include_router(trainer_router)
+    application.include_router(managed_training_router)
     application.include_router(inference_router)
 
     @application.get("/api/health", tags=["system"])

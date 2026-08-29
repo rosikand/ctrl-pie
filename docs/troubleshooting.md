@@ -149,6 +149,31 @@ must contain a deployable LeRobot policy at the repository root. Review
 
 ## Inference and Modal
 
+### A managed training launch returns 409
+
+V1.1 permits exactly one nonterminal managed job and has no queue. Inspect
+`list_managed_training_jobs()` or the Training page. Reusing the same
+idempotency key with an identical request returns the original job; reusing it
+with different fields also returns `409`. Do not change keys and retry until
+the original response/job state is authoritative.
+
+### A managed job is finalizing or cancelling for a long time
+
+Execution outcome and provider cleanup are separate. The job remains
+nonterminal until the exact owned Modal App is stopped or absent with zero
+tasks. Keep the original Modal account/profile configured and let
+reconciliation retry. If cleanup cannot converge, run `make modal-panic`,
+require zero active inference and training Apps, then restart ctrl-π and
+inspect the job. Do not treat a final Hugging Face revision alone as proof that
+GPU billing stopped.
+
+### Managed history reports an event gap
+
+Modal event tails and PostgreSQL observability are bounded. A gap means some
+console/metric history was unavailable after restart or retention; it does not
+by itself invalidate an exact verified final model revision. Review the final
+status, step, output repo/revision, and teardown result together.
+
 ### Deploy is disabled in hardware mode
 
 All three provider checks must be ready: Hugging Face namespace access, Modal

@@ -50,10 +50,11 @@ Start ctrl-π and open its browser URL.
     repository, and scrub the episode timeline. Video, observation state, and
     actions remain pinned to the same immutable Hub revision.
   </Step>
-  <Step title="Inspect reported training">
-    Open **Training**. It displays runs, metrics, bounded console records, and
-    checkpoint metadata reported through the Trainer API. ctrl-π tracks
-    external training in this release but does not launch it.
+  <Step title="Inspect training">
+    Open **Training**. It displays external reports and managed jobs through
+    the same bounded metrics, console, checkpoint, and cleanup-status views.
+    Launch is intentionally SDK/REST-only. In mock mode a managed launch is a
+    deterministic simulation with no Hugging Face or Modal calls.
   </Step>
   <Step title="Browse model artifacts">
     Open **Models**. It lists repositories from the configured Hugging Face

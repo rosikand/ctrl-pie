@@ -6,7 +6,7 @@ icon: "house"
 
 ctrl-π is an engineering console and typed Python API for the YAM
 robot-learning loop. It brings arm telemetry, demonstration capture, LeRobot
-datasets, external training reports, model artifacts, and policy execution
+datasets, external and managed training, model artifacts, and policy execution
 into one control plane.
 
 You run ctrl-π on the Linux machine connected to the arms. PostgreSQL,
@@ -73,6 +73,7 @@ a seventh primary workflow tab.
 | Pre-upload recordings | The ctrl-π host or Docker volume | Finalized MP4, synchronized JSONL, durable episode manifest |
 | Live state | One ctrl-π backend process | Telemetry, camera frames, rig leases, action queues, latency |
 | Inference compute | Your Modal account | One ephemeral, exactly owned App per real deployment |
+| Managed training compute | Your Modal account | At most one nonterminal, exactly owned SmolVLA job; artifacts remain on Hugging Face |
 
 The backend is the only component that talks to hardware or receives service
 credentials. Private Hub media is proxied at an immutable revision, and Modal

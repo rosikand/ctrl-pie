@@ -14,8 +14,8 @@ one web console or typed Python client.
 
 ctrl-π runs on the Linux machine attached to the robot. PostgreSQL stores
 small control-plane records, Hugging Face remains the source of truth for
-datasets and model artifacts, and Modal runs real inference workloads. There
-is no hosted ctrl-π service.
+datasets and model artifacts, and Modal runs real inference and managed
+LeRobot training workloads. There is no hosted ctrl-π service.
 
 The interface has six first-class workflows:
 
@@ -25,9 +25,9 @@ The interface has six first-class workflows:
   and publish LeRobot v3 datasets.
 - **Datasets** — browse namespace-scoped repositories and inspect immutable
   episodes, synchronized state/actions, and proxied video.
-- **Training** — monitor metrics, bounded console output, configuration, and
-  checkpoints reported by external trainer clients. This release does not
-  launch managed training.
+- **Training** — observe externally reported runs and SDK-launched managed
+  Modal jobs through the same bounded metrics, console, configuration, and
+  checkpoint surfaces.
 - **Models** — browse Hugging Face model cards, immutable revisions, and
   checkpoint metadata in a separate read-only catalog.
 - **Inference** — deploy one pinned policy revision, explicitly start robot
@@ -78,7 +78,7 @@ with CtrlPiClient("http://127.0.0.1:8000") as ctrl:
 ```
 
 The typed client covers system status, YAM setup and bounded control,
-recording, datasets, models, externally reported training, and inference. See
+recording, datasets, models, external and managed training, and inference. See
 the [REST and Python SDK guide](docs/python-sdk.md) for lifecycle and cleanup
 examples.
 
@@ -96,6 +96,10 @@ examples.
   available in this workspace. Directions, offsets, limits, calibration,
   model fidelity, bus behavior, E-stop response, and disconnect recovery still
   require validation on the target Ubuntu/YAM box before motion.
+- Managed training can allocate up to eight A100 or H100 GPUs in the user's
+  Modal account. It is SDK-only, cost-acknowledged, limited to one nonterminal
+  job, and terminal only after provider teardown is verified. Use
+  `make modal-panic` if normal cleanup cannot converge.
 - The V1 camera remains synthetic. Real OpenPI serving is unavailable and
   fails before provider deployment; real LeRobot policy serving on Modal is
   supported.
@@ -106,7 +110,8 @@ examples.
 - [Installation](docs/installation.mdx) and [mock quickstart](docs/quickstart.mdx)
 - [YAM setup](docs/yam-setup.md) and [Arms](docs/arms.md)
 - [Recording](docs/recording.md), [Datasets](docs/datasets.md),
-  [Training](docs/training.md), [Models](docs/models.md), and
+  [Training](docs/training.md), [managed training](docs/managed-training.md),
+  [Models](docs/models.md), and
   [Inference](docs/inference.md)
 - [REST and Python SDK](docs/python-sdk.md)
 - [Architecture](docs/architecture.md),

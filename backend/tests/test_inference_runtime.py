@@ -29,6 +29,10 @@ from ctrl_pi.inference_runtime import (
     validate_action_chunk,
 )
 from ctrl_pi.runtime_lerobot import LeRobotRuntime
+from ctrl_pi.training_compute import (
+    MANAGED_SMOLVLA_DEPENDENCY_DIR,
+    MANAGED_SMOLVLA_DEPENDENCY_FILES,
+)
 
 REPO_ID = "acme/tiny-act"
 REVISION = "a" * 40
@@ -318,6 +322,140 @@ def test_lerobot_runtime_loads_and_runs_real_tiny_act_snapshot(
     assert runtime.describe() == descriptor
     runtime.reset_session()
     runtime.close()
+
+
+def test_managed_smolvla_runtime_uses_only_embedded_offline_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lerobot.policies import factory as policy_factory
+    from lerobot.processor import tokenizer_processor
+
+    dependency = tmp_path / MANAGED_SMOLVLA_DEPENDENCY_DIR
+    dependency.mkdir()
+    for filename in MANAGED_SMOLVLA_DEPENDENCY_FILES:
+        (dependency / filename).write_text("fixed dependency", encoding="utf-8")
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "type": "smolvla",
+                "device": "cpu",
+                "use_peft": False,
+                "vlm_model_name": "remote/should-not-be-used",
+                "load_vlm_weights": False,
+                "chunk_size": 2,
+                "n_action_steps": 2,
+                "input_features": {
+                    "observation.state": {"type": "STATE", "shape": [2]}
+                },
+                "output_features": {
+                    "action": {"type": "ACTION", "shape": [2]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "policy_preprocessor.json").write_text(
+        json.dumps(
+            {
+                "name": "policy_preprocessor",
+                "steps": [
+                    {
+                        "registry_name": "rename_observations_processor",
+                        "config": {"rename_map": {}},
+                    },
+                    {"registry_name": "to_batch_processor", "config": {}},
+                    {"registry_name": "smolvla_new_line_processor", "config": {}},
+                    {
+                        "registry_name": "tokenizer_processor",
+                        "config": {
+                            "tokenizer_name": "remote/should-not-be-used",
+                            "max_length": 48,
+                        },
+                    },
+                    {
+                        "registry_name": "device_processor",
+                        "config": {"device": "cpu", "float_dtype": None},
+                    },
+                    {
+                        "registry_name": "normalizer_processor",
+                        "config": {"features": {}, "norm_map": {}, "eps": 1e-8},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "policy_postprocessor.json").write_text(
+        json.dumps(
+            {
+                "name": "policy_postprocessor",
+                "steps": [
+                    {
+                        "registry_name": "unnormalizer_processor",
+                        "config": {"features": {}, "norm_map": {}, "eps": 1e-8},
+                    },
+                    {
+                        "registry_name": "device_processor",
+                        "config": {"device": "cpu", "float_dtype": None},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    observed: dict[str, object] = {}
+
+    class FakeTokenizer:
+        pass
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(path: str) -> FakeTokenizer:
+            observed.setdefault("tokenizer_paths", []).append(path)  # type: ignore[union-attr]
+            return FakeTokenizer()
+
+    class FakePolicy:
+        def to(self, device: str) -> None:
+            observed["device"] = device
+
+        def eval(self) -> None:
+            return None
+
+        def reset(self) -> None:
+            return None
+
+    class FakePolicyClass:
+        @staticmethod
+        def from_pretrained(path: Path, **kwargs: object) -> FakePolicy:
+            observed["policy_path"] = path
+            observed["policy_vlm"] = kwargs["config"].vlm_model_name  # type: ignore[union-attr]
+            assert kwargs["local_files_only"] is True
+            return FakePolicy()
+
+    monkeypatch.setattr(policy_factory, "get_policy_class", lambda name: FakePolicyClass)
+    monkeypatch.setattr(tokenizer_processor, "_transformers_available", True)
+    monkeypatch.setattr(tokenizer_processor, "AutoTokenizer", FakeAutoTokenizer)
+    monkeypatch.setattr(
+        "huggingface_hub.hf_hub_download",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network access")),
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network access")),
+    )
+
+    _policy, preprocessor, _postprocessor, descriptor = LeRobotRuntime._load_local_policy(
+        _spec(tmp_path, actions_per_chunk=2), tmp_path.resolve()
+    )
+
+    local_dependency = str(dependency.resolve())
+    assert observed["policy_vlm"] == local_dependency
+    assert observed["tokenizer_paths"] == [local_dependency]
+    tokenizer_step = next(
+        step for step in preprocessor.steps if step.__class__.__name__ == "TokenizerProcessorStep"
+    )
+    assert tokenizer_step.tokenizer_name == local_dependency
+    assert descriptor.policy_type == "smolvla"
 
 
 def test_lerobot_runtime_rejects_mismatched_marker_without_raw_context(

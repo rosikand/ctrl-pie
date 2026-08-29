@@ -31,6 +31,10 @@ from ctrl_pi.inference_runtime import (
     validate_action_chunk,
     validate_observation,
 )
+from ctrl_pi.training_compute import (
+    MANAGED_SMOLVLA_DEPENDENCY_DIR,
+    MANAGED_SMOLVLA_DEPENDENCY_FILES,
+)
 
 _MARKER_NAME = ".ctrl-pi-runtime.json"
 _MARKER_MAX_BYTES = 4096
@@ -41,6 +45,7 @@ _REQUIRED_POLICY_FILES = (
     "policy_preprocessor.json",
     "policy_postprocessor.json",
 )
+_MAX_SMOLVLA_DEPENDENCY_FILE_BYTES = 8 * 1024 * 1024
 
 
 class LeRobotRuntime:
@@ -233,6 +238,12 @@ class LeRobotRuntime:
             local_files_only=True,
         )
         policy_type = str(config.type)
+        smolvlm_path: Path | None = None
+        if policy_type == "smolvla":
+            smolvlm_path = LeRobotRuntime._verified_smolvlm_dependency(model_path)
+            config.vlm_model_name = str(smolvlm_path)
+            config.load_vlm_weights = False
+            config.use_peft = False
         policy_class = get_policy_class(policy_type)
         policy = policy_class.from_pretrained(
             model_path,
@@ -244,12 +255,17 @@ class LeRobotRuntime:
         policy.eval()
         policy.reset()
         device_override = {"device": spec.device}
+        preprocessor_overrides: dict[str, dict[str, str]] = {
+            "device_processor": device_override,
+        }
+        if smolvlm_path is not None:
+            preprocessor_overrides["tokenizer_processor"] = {
+                "tokenizer_name": str(smolvlm_path),
+            }
         preprocessor, postprocessor = make_pre_post_processors(
             config,
             pretrained_path=str(model_path),
-            preprocessor_overrides={
-                "device_processor": device_override,
-            },
+            preprocessor_overrides=preprocessor_overrides,
             postprocessor_overrides={
                 "device_processor": device_override,
             },
@@ -304,6 +320,47 @@ class LeRobotRuntime:
             actions_per_chunk=actions_per_chunk,
         )
         return policy, preprocessor, postprocessor, descriptor
+
+    @staticmethod
+    def _verified_smolvlm_dependency(model_path: Path) -> Path:
+        dependency = model_path / MANAGED_SMOLVLA_DEPENDENCY_DIR
+        try:
+            if dependency.is_symlink():
+                raise OSError
+            resolved_dependency = dependency.resolve(strict=True)
+            if not resolved_dependency.is_dir() or not resolved_dependency.is_relative_to(
+                model_path
+            ):
+                raise OSError
+            children = list(resolved_dependency.iterdir())
+        except (OSError, RuntimeError):
+            raise RuntimeConfigurationError(
+                "The local SmolVLA dependency bundle is unavailable."
+            ) from None
+        if {child.name for child in children} != set(MANAGED_SMOLVLA_DEPENDENCY_FILES):
+            raise RuntimeConfigurationError(
+                "The local SmolVLA dependency bundle is invalid."
+            )
+        for filename in MANAGED_SMOLVLA_DEPENDENCY_FILES:
+            candidate = resolved_dependency / filename
+            try:
+                if candidate.is_symlink():
+                    raise OSError
+                resolved = candidate.resolve(strict=True)
+                metadata = resolved.stat()
+            except (OSError, RuntimeError):
+                raise RuntimeConfigurationError(
+                    "The local SmolVLA dependency bundle is invalid."
+                ) from None
+            if (
+                not resolved.is_file()
+                or not resolved.is_relative_to(resolved_dependency)
+                or not 0 < metadata.st_size <= _MAX_SMOLVLA_DEPENDENCY_FILE_BYTES
+            ):
+                raise RuntimeConfigurationError(
+                    "The local SmolVLA dependency bundle is invalid."
+                )
+        return resolved_dependency
 
     def _prepare_observation(
         self,

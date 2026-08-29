@@ -1,23 +1,27 @@
 ---
 title: "Training"
-description: "Track external runs, metrics, bounded console output, configuration, and checkpoints."
+description: "Observe managed Modal jobs and external runs with bounded metrics, console output, and checkpoints."
 icon: "brain-circuit"
 ---
 
-**Training** is a first-class primary page. ctrl-π does not execute or fund
-training in this release. LeRobot, OpenPI, or custom scripts run
-on compute you operate and report small control-plane events to ctrl-π through
-the [Trainer API](/trainer-api).
+**Training** is a first-class primary page for two workflows:
+
+- managed SmolVLA jobs launched through LeRobot 0.4.4 from the Python SDK on
+  your Modal account; and
+- LeRobot, OpenPI, or custom scripts on compute you operate, reporting small
+  control-plane events through the [Trainer API](/trainer-api).
 
 ```text
-Training script ──► ctrl-π Trainer API ──► PostgreSQL
-       │
-       └──────────► Hugging Face model repository
+Python SDK / external trainer ──► ctrl-π Trainer API ──► PostgreSQL
+                                      │
+                                      ├──► Modal (managed SmolVLA only)
+                                      └──► Hugging Face model repository
 ```
 
-Model weights never pass through ctrl-π. The external script uploads them with
-its normal Hugging Face tooling, then registers only the repository ID,
-immutable revision, and step.
+Model weights never pass through the browser or PostgreSQL. External scripts
+upload with their normal Hugging Face tooling. A managed worker uploads
+directly from Modal to an exactly marked repo in `HF_NAMESPACE`; ctrl-π stores
+only repository IDs, immutable revisions, steps, and lifecycle metadata.
 
 ## Training page
 
@@ -29,8 +33,10 @@ past `completed`/`failed`/`cancelled` runs. Select one to inspect:
 - runtime and framework labels;
 - bounded JSON configuration;
 - one chart per reported scalar metric;
-- the bounded, incrementally polled console tail; and
-- output model plus registered checkpoint revisions.
+- the bounded, incrementally polled console tail;
+- output model plus registered checkpoint revisions; and
+- for managed jobs, compute/deadline, execution and provider state, event-gap
+  truth, final artifact revision, and verified teardown.
 
 Metric names may use letters, numbers, `.`, `_`, `-`, and `/`. Reporting the
 same metric name and step replaces that point deterministically. ctrl-π stores
@@ -41,9 +47,26 @@ Console records have a server-assigned sequence and timestamp plus a
 `stdout`, `stderr`, or `system` source. The server keeps only the newest 1,000
 records and trims to a compact 512 KiB ceiling; the UI shows a retention-gap
 notice when older sequences are unavailable. Logs are control-plane progress
-records, not a live attachment to an external process.
+records. External logs are reported by the trainer client; managed logs are
+parsed only from ctrl-π's versioned worker events rather than attaching to
+arbitrary Modal consoles.
 
-## Report a run
+## Managed Modal training
+
+Launch managed work with `CtrlPiClient`, not from the browser. The browser has
+no training form or one-click research control; it observes the same durable
+job and run that the SDK creates. See [Managed training](/managed-training)
+for the exact request, all nine GPU choices, lifecycle and cancellation,
+artifact ownership, mock behavior, and recovery procedure.
+
+Only one nonterminal managed job is allowed at a time in V1.1. This is a hard
+cost guard, not a queue. A second launch returns `409` until the first job has
+both an execution outcome and provider-verified teardown. Lambda Labs, Auto
+sizing, OpenPI managed training, and user-supplied code are not implemented.
+The managed worker accepts only its validated built-in SmolVLA checkpoint
+shape; report ACT and other policy-family training as external runs.
+
+## Report an external run
 
 Install the client from the same checkout as the backend:
 
@@ -81,15 +104,17 @@ with CtrlPiClient("http://ctrl-pi-box:8000") as trainer:
 
 `current_step` never decreases. An explicit regression returns HTTP 409,
 while metric and checkpoint calls retain the maximum observed step. Status can
-be corrected or resumed; this release intentionally does not impose a separate run
-state machine.
+be corrected or resumed for an external run; ctrl-π intentionally does not
+impose the managed-job state machine on external reporters. Managed runs reject
+external status, metric, log, and checkpoint mutation with `409` because only
+their verified worker/supervisor may advance them.
 
 Existing integrations can continue importing `Client` and
 `TrainerClientError` from `ctrl_pi.trainer`; that compatibility client shares
 the hardened HTTP transport and retains its established dictionary-returning
 methods. New integrations should use `CtrlPiClient` and its typed Pydantic
-responses. No managed-training job launch or cancellation API exists in this
-release.
+responses. Both clients also expose the managed-job launch, inspect, bounded
+logs/metrics/checkpoints, and cancellation methods added in V1.1.
 
 ## Security boundary
 

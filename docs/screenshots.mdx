@@ -50,10 +50,11 @@ The browser never receives the Hugging Face token. See [Datasets](/datasets).
 
 ## Training
 
-Training is a first-class view for runs reported by external trainer clients.
-It renders bounded metrics, checkpoints, and sanitized console lines; this
-version does not launch managed training. See [Training](/training) and the
-[Trainer API](/trainer-api).
+Training is a first-class observer for externally reported runs and managed
+jobs launched through the SDK/REST API. It renders bounded metrics,
+checkpoints, sanitized console lines, provider lifecycle, artifact identity,
+and teardown truth. See [Training](/training), [Managed training]
+(/managed-training), and the [Trainer API](/trainer-api).
 
 <Frame caption="Externally reported training run and scalar metrics">
   <img

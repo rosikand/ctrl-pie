@@ -6,7 +6,8 @@ icon: "list-checks"
 
 ctrl-π runs on a machine connected to the YAM arms and uses services in your
 own accounts. PostgreSQL stores small control-plane state, Hugging Face stores
-datasets and model artifacts, and Modal is used only for real inference.
+datasets and model artifacts, and Modal runs real inference and managed
+LeRobot training.
 Mock mode can exercise the entire local workflow without hardware or Modal.
 
 For a packaged installation, start with [Docker deployment](docker-deployment.md).
@@ -31,10 +32,10 @@ variable with a backend secret.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | Full control-plane use | PostgreSQL 14+ URL. Blank starts first-run mode, but database-backed APIs return 503. |
-| `HF_TOKEN` | Hub browsing/upload and real model deployment | Backend-only Hugging Face token. |
-| `HF_NAMESPACE` | Hub browsing/upload and real model deployment | Exact user or organization that ctrl-π is allowed to enumerate and mutate. |
-| `MODAL_TOKEN_ID` | Real Modal lifecycle, unless a local Modal profile is mounted | Modal API credential ID. Must be paired with `MODAL_TOKEN_SECRET`. |
-| `MODAL_TOKEN_SECRET` | Real Modal lifecycle, unless a local Modal profile is mounted | Modal API credential secret. |
+| `HF_TOKEN` | Hub browsing/upload, real model deployment, and managed-training artifacts | Backend-only Hugging Face token. |
+| `HF_NAMESPACE` | Hub browsing/upload, real model deployment, and managed-training artifacts | Exact user or organization that ctrl-π is allowed to enumerate and mutate. |
+| `MODAL_TOKEN_ID` | Real inference or managed-training lifecycle, unless a local Modal profile is mounted | Modal API credential ID. Must be paired with `MODAL_TOKEN_SECRET`. |
+| `MODAL_TOKEN_SECRET` | Real inference or managed-training lifecycle, unless a local Modal profile is mounted | Modal API credential secret. |
 | `MODAL_CONFIG_PATH` | No | Optional Modal profile file path; defaults to `~/.modal.toml`. |
 | `MODAL_PROFILE` | No | Explicit Modal profile name. Otherwise the pinned SDK selects the sole active profile or the literal `default` profile. |
 | `MODAL_PROXY_TOKEN_ID` | Real LeRobot endpoint traffic | Distinct Modal Proxy Token ID beginning `wk-`. |
@@ -137,7 +138,8 @@ repository instead of overwriting it.
 ## Modal
 
 No Modal credentials are needed in mock mode. Real compute requires a Modal
-account plus two distinct credential pairs.
+account. Inference needs lifecycle credentials plus a distinct endpoint Proxy
+Token pair; managed training needs lifecycle credentials but no Proxy Token.
 
 ### API credentials
 
@@ -174,11 +176,23 @@ then runs with Hub and Transformers offline mode enforced. Real OpenPI loading
 is explicitly unavailable in V1; selecting OpenPI is deterministic only in
 mock mode.
 
+Managed SmolVLA training through LeRobot uses the same lifecycle credentials and injects
+`HF_TOKEN` only into ctrl-π's trusted Modal wrapper. The public request and
+PostgreSQL job are secret-free, and the fixed SmolVLA/LeRobot child runs without the
+token. The wrapper may read only the resolved input commits and publish only
+to the pre-created, marker-verified output repo.
+
 Each deployment uses one container at most, no warm pool, an idle scaledown no
 longer than 60 seconds, and a hard timeout no longer than 30 minutes. Stop must
 verify zero provider tasks. If ordinary teardown is interrupted, follow
 [Modal operator cleanup](modal-operations.md). Real GPU work costs money;
 always stop a test deployment and verify teardown before leaving it.
+
+Managed jobs allow one nonterminal job, one training container, no warm/buffer
+pool or provider retry, and an immutable 1–1,440 minute deadline. All outcomes
+must also converge through zero-task teardown verification. Use the SDK rather
+than Settings or the browser to launch one; see [Managed training]
+(/managed-training).
 
 ## YAM first-time setup and automatic restoration
 

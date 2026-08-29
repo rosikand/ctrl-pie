@@ -6,14 +6,15 @@ icon: "code-xml"
 
 `CtrlPiClient` is the typed, synchronous Python interface to the same ctrl-π
 REST services used by the web console. It covers the current system, YAM setup,
-arm, recording, dataset, model, externally reported training, and inference
+arm, recording, dataset, model, external and managed training, and inference
 workflows. It does not create a second control plane and it never accepts Hugging
 Face, PostgreSQL, Modal, or hardware credentials.
 
-Managed training is not part of this version of the SDK. Training scripts run
-on user-managed compute, upload weights to Hugging Face, and report their run
-metadata through ctrl-π. The focused legacy `ctrl_pi.trainer.Client` remains
-compatible; see the [Trainer API](trainer-api.md).
+Managed LeRobot training is launched through the same client and runs on exact,
+owned Modal compute; Hugging Face remains the artifact source of truth. The
+focused legacy `ctrl_pi.trainer.Client` remains compatible and exposes the same
+managed-job methods alongside external reporting. See [Managed training]
+(/managed-training) and the [Trainer API](/trainer-api).
 
 ## Install and connect
 
@@ -256,6 +257,58 @@ Never forward environment dumps or raw subprocess output without scrubbing it.
 The backend rejects common credential shapes, but the caller remains
 responsible for removing secrets.
 
+## Managed Modal training
+
+`launch_managed_training` creates a durable Training run and schedules one
+fixed, validated SmolVLA workload through LeRobot 0.4.4. It returns quickly
+with a job record; it does not wait
+for image preparation, training, artifact upload, or cleanup. Supply a
+caller-owned UUID so an uncertain launch response can be reconciled without
+duplicating GPU compute:
+
+```python
+from uuid import uuid4
+
+from ctrl_pi import CtrlPiClient
+
+
+with CtrlPiClient("http://ctrl-pi-box:8000") as ctrl:
+    job = ctrl.launch_managed_training(
+        "SmolVLA block pickup",
+        idempotency_key=uuid4(),
+        dataset_repo="my-org/yam-block-pickup",
+        dataset_revision="0123456789abcdef0123456789abcdef01234567",
+        base_model="lerobot/smolvla_base",
+        base_model_revision="c83c3163b8ca9b7e67c509fffd9121e66cb96205",
+        output_model_repo="my-org/yam-block-pickup-smolvla-v1",
+        output_private=True,
+        acknowledge_public_model_risk=False,
+        compute_size="Modal: A10G",
+        max_steps=10_000,
+        acknowledge_compute_cost=True,
+        timeout_minutes=120,
+    )
+```
+
+The output repository must be new and inside the configured namespace. ctrl-π
+resolves both inputs to immutable commits, writes and verifies its ownership
+marker, and keeps the output private unless public-model risk is explicitly
+acknowledged. Only one managed job may be nonterminal; V1.1 has no queue. There is
+no arbitrary command, container, callback, Lambda, Auto sizing, or OpenPI
+managed-training input.
+Managed V1.1 also rejects ACT and other policy families, dynamic processor
+classes, remote-code metadata, and PEFT/adapters; use externally reported runs
+for those workflows.
+
+Use `get_managed_training_job`, `list_managed_training_logs`,
+`get_managed_training_metrics`, and `list_managed_training_checkpoints` for
+bounded observation. Use `cancel_managed_training_job` for an explicit stop.
+Terminal status is published only after the exact owned Modal App is absent or
+stopped with zero running tasks. Closing the client does not cancel a job.
+
+See [Managed training](/managed-training) for the full lifecycle, all nine GPU
+labels, restart behavior, mock simulation, and emergency cleanup.
+
 ## Complete method and REST map
 
 | Product surface | SDK methods | REST routes |
@@ -268,6 +321,7 @@ responsible for removing secrets.
 | Datasets | dataset methods above | `GET /api/datasets...` |
 | Models | `list_models` | `GET /api/models` |
 | Training | reported-training methods above | `/api/trainer/runs...` |
+| Managed training | `launch_managed_training`, `list_managed_training_jobs`, `get_managed_training_job`, `cancel_managed_training_job`, `list_managed_training_logs`, `get_managed_training_metrics`, `list_managed_training_checkpoints` | `/api/trainer/jobs...` |
 | Inference | `deploy`, `list_deployments`, `get_deployment`, `get_inference_state`, `start_inference`, `stop_inference` | `/api/inference/deployments...` |
 
 The public backend also exposes low-level streaming routes that the synchronous

@@ -1,5 +1,6 @@
 import {
   Activity,
+  Boxes,
   BrainCircuit,
   CheckCircle2,
   CircleDashed,
@@ -22,6 +23,7 @@ import {
 } from "../components/TrainerView";
 import { useTrainingRuns } from "../hooks/useTrainingRuns";
 import type {
+  ManagedTrainingJobSummary,
   MetricPoint,
   TrainingConsoleLog,
   TrainingLoadError,
@@ -36,6 +38,17 @@ const scalarFormatter = new Intl.NumberFormat(undefined, {
 const statusStyles: Record<TrainingRunStatus, string> = {
   created: "bg-slate-100 text-slate-600",
   running: "bg-blue-50 text-blue-700",
+  completed: "bg-emerald-50 text-emerald-700",
+  failed: "bg-rose-50 text-rose-700",
+  cancelled: "bg-amber-50 text-amber-700",
+};
+
+const managedStatusStyles: Record<ManagedTrainingJobSummary["status"], string> = {
+  created: "bg-slate-100 text-slate-600",
+  launching: "bg-blue-50 text-blue-700",
+  running: "bg-blue-50 text-blue-700",
+  finalizing: "bg-violet-50 text-violet-700",
+  cancelling: "bg-amber-50 text-amber-700",
   completed: "bg-emerald-50 text-emerald-700",
   failed: "bg-rose-50 text-rose-700",
   cancelled: "bg-amber-50 text-amber-700",
@@ -100,7 +113,7 @@ function RunButton({ run, selected, onSelect }: { run: TrainingRun; selected: bo
         <StatusBadge status={run.status} />
       </span>
       <span className="mt-2 flex items-center justify-between gap-2 text-[10px] text-slate-400">
-        <span>Step {countFormatter.format(run.current_step)}</span>
+        <span>{run.managed_job ? "Managed · " : ""}Step {countFormatter.format(run.current_step)}</span>
         <span>{formatTimestamp(run.updated_at, false)}</span>
       </span>
     </button>
@@ -244,7 +257,7 @@ function ConsoleOutput({
           ))}
         </ol>
       ) : (
-        <p className="px-5 py-12 text-center text-xs text-slate-500">No console lines reported by this trainer.</p>
+        <p className="px-5 py-12 text-center text-xs text-slate-500">No trainer output is available yet.</p>
       )}
     </section>
   );
@@ -259,6 +272,82 @@ function ArtifactLink({ repoId, kind = "model" }: { repoId: string | null; kind?
       <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
     </a>
   ) : <span className="break-all font-mono text-slate-600">{repoId}</span>;
+}
+
+function ManagedJobCard({ job }: { job: ManagedTrainingJobSummary }) {
+  const outputUrl = repoUrl(job.output_model_repo);
+  const verifiedRevision = job.output_revision ?? job.output_marker_revision;
+  const revisionUrl = outputUrl && verifiedRevision
+    ? appendHubPath(outputUrl, ["tree", verifiedRevision])
+    : null;
+  const terminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+
+  return (
+    <section className="rounded-xl border border-violet-200 bg-violet-50/40 shadow-panel">
+      <div className="flex flex-col gap-3 border-b border-violet-100 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-3">
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-violet-100 text-violet-700">
+            <Boxes className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">
+              {job.target_kind === "modal" ? "Managed Modal training" : "Managed training simulation"}
+            </h3>
+            <p className="mt-1 font-mono text-[10px] text-slate-400">{job.id}</p>
+          </div>
+        </div>
+        <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-[10px] font-semibold capitalize ${managedStatusStyles[job.status]}`}>
+          {job.status}
+        </span>
+      </div>
+      <dl className="grid gap-2 p-5 sm:grid-cols-2 xl:grid-cols-4">
+        <DetailValue label="Compute">{job.target_kind === "modal" ? job.compute_size : "Stub · no GPU"}</DetailValue>
+        <DetailValue label="Provider">{job.provider_state}</DetailValue>
+        <DetailValue label="Outcome">{job.outcome}</DetailValue>
+        <DetailValue label="Hard deadline">{formatTimestamp(job.deadline_at)}</DetailValue>
+      </dl>
+      <div className="grid gap-4 border-t border-violet-100 px-5 py-4 text-xs sm:grid-cols-2">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Output artifact</p>
+          <p className="mt-1.5 min-w-0">
+            {job.target_kind === "modal" && revisionUrl ? (
+              <a href={revisionUrl} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1.5 text-brand-600 hover:text-brand-700">
+                <span className="truncate font-mono" title={job.output_model_repo}>{job.output_model_repo}</span>
+                <span className="shrink-0 font-mono text-[10px] text-slate-400">@{verifiedRevision?.slice(0, 12)}</span>
+                <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              </a>
+            ) : job.target_kind === "modal" ? (
+              <span><span className="break-all font-mono text-slate-600">{job.output_model_repo}</span><span className="mt-1 block text-[10px] text-slate-400">Requested repo · existence not yet verified</span></span>
+            ) : (
+              <span className="text-slate-500">Simulated · no Hub artifact created</span>
+            )}
+          </p>
+        </div>
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Compute teardown</p>
+          <p className={`mt-1.5 font-semibold ${job.teardown_verified ? "text-emerald-700" : terminal ? "text-rose-700" : "text-slate-600"}`}>
+            {job.teardown_verified
+              ? job.target_kind === "stub"
+                ? "Simulation teardown complete · no provider tasks"
+                : "Provider-verified stopped · zero tasks"
+              : terminal
+                ? "Cleanup is not verified"
+                : "Cleanup verification pending"}
+          </p>
+        </div>
+      </div>
+      {job.event_gap && (
+        <p className="border-t border-amber-200 bg-amber-50 px-5 py-3 text-xs text-amber-800" role="status">
+          Part of the bounded provider event stream was unavailable after reconnect. Stored metrics, checkpoints, and output remain visible, but this history is incomplete.
+        </p>
+      )}
+      {job.last_error && (
+        <p className="border-t border-rose-200 bg-rose-50 px-5 py-3 text-xs text-rose-800" role="alert">
+          {job.last_error}
+        </p>
+      )}
+    </section>
+  );
 }
 
 function RunDetail({
@@ -283,6 +372,10 @@ function RunDetail({
   const metrics = Object.entries(run.metrics).sort(([left], [right]) => left.localeCompare(right));
   const configText = JSON.stringify(run.config, null, 2);
   const outputUrl = repoUrl(run.output_model_repo);
+  const managedArtifactRevision = run.managed_job?.output_revision ?? run.managed_job?.output_marker_revision;
+  const managedArtifactUrl = outputUrl && managedArtifactRevision
+    ? appendHubPath(outputUrl, ["tree", managedArtifactRevision])
+    : null;
   const checkpointUrl = outputUrl && run.checkpoint_revision
     ? appendHubPath(outputUrl, ["tree", run.checkpoint_revision])
     : null;
@@ -330,11 +423,13 @@ function RunDetail({
         </p>
       )}
 
+      {run.managed_job && <ManagedJobCard job={run.managed_job} />}
+
       <section>
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold text-slate-900">Scalar metrics</h3>
-            <p className="mt-1 text-xs text-slate-400">Values reported by the external training script.</p>
+            <p className="mt-1 text-xs text-slate-400">Values reported by a managed worker or external training script.</p>
           </div>
           <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500 ring-1 ring-slate-200">{countFormatter.format(metrics.length)} series</span>
         </div>
@@ -362,7 +457,22 @@ function RunDetail({
             <h3 className="text-sm font-semibold text-slate-900">Output and checkpoints</h3>
           </div>
           <dl className="space-y-4 p-5 text-xs">
-            <div><dt className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Output model</dt><dd className="mt-1.5"><ArtifactLink repoId={run.output_model_repo} /></dd></div>
+            <div>
+              <dt className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Output model</dt>
+              <dd className="mt-1.5">
+                {run.managed_job ? (
+                  managedArtifactUrl ? (
+                    <a href={managedArtifactUrl} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1.5 text-brand-600 hover:text-brand-700">
+                      <span className="truncate font-mono" title={run.output_model_repo ?? undefined}>{run.output_model_repo}</span>
+                      <span className="shrink-0 font-mono text-[10px] text-slate-400">@{managedArtifactRevision?.slice(0, 12)}</span>
+                      <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    </a>
+                  ) : (
+                    <span><span className="break-all font-mono text-slate-600">{run.output_model_repo}</span><span className="mt-1 block text-[10px] text-slate-400">Requested repo · existence not yet verified</span></span>
+                  )
+                ) : <ArtifactLink repoId={run.output_model_repo} />}
+              </dd>
+            </div>
             <div><dt className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Current revision</dt><dd className="mt-1.5">{run.checkpoint_revision ? (checkpointUrl ? <a href={checkpointUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 font-mono text-brand-600 hover:text-brand-700">{run.checkpoint_revision.slice(0, 12)}<ExternalLink className="h-3.5 w-3.5" aria-hidden="true" /></a> : <span className="font-mono">{run.checkpoint_revision}</span>) : <span className="text-slate-400">Not registered</span>}</dd></div>
           </dl>
           <div className="border-t border-slate-100 px-5 py-4">
@@ -405,11 +515,11 @@ function RunsView() {
     : retryDetail;
   return (
     <div>
-      <ViewHeader title="Reported runs" description="Runs are created and updated by external trainer clients; ctrl-π does not launch training." count={initialLoading ? null : runs.length} refreshing={refreshing || initialLoading} onRefresh={() => void refresh()} />
+      <ViewHeader title="Training runs" description="Observe managed training jobs and runs reported by external trainer clients." count={initialLoading ? null : runs.length} refreshing={refreshing || initialLoading} onRefresh={() => void refresh()} />
       {initialLoading && <RunsLoading />}
       {!initialLoading && listError && runs.length === 0 && <ErrorPanel error={listError} context="runs" onRetry={() => void retryList()} loading={initialLoading} />}
       {!initialLoading && !listError && runs.length === 0 && (
-        <section className="grid min-h-[20rem] place-items-center rounded-xl border border-slate-200 bg-white px-6 text-center shadow-panel"><div className="max-w-md"><BrainCircuit className="mx-auto h-7 w-7 text-slate-300" aria-hidden="true" /><h2 className="mt-3 text-sm font-semibold text-slate-900">No training runs reported</h2><p className="mt-2 text-sm leading-6 text-slate-500">External scripts will appear here after they create a run through the Trainer API.</p></div></section>
+        <section className="grid min-h-[20rem] place-items-center rounded-xl border border-slate-200 bg-white px-6 text-center shadow-panel"><div className="max-w-md"><BrainCircuit className="mx-auto h-7 w-7 text-slate-300" aria-hidden="true" /><h2 className="mt-3 text-sm font-semibold text-slate-900">No training runs yet</h2><p className="mt-2 text-sm leading-6 text-slate-500">Launch a managed job from the Python SDK or report an external run through the Trainer API. Mock mode simulates managed compute without Modal or Hugging Face.</p></div></section>
       )}
       {!initialLoading && runs.length > 0 && selectedRunId && (
         <>
@@ -432,9 +542,9 @@ export function TrainingPage() {
   return (
     <div className="mx-auto max-w-7xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
       <header>
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-600">External training</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-600">Managed and external training</p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">Training</h1>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Monitor live experiment metrics and sanitized console lines reported through the Trainer API. ctrl-π does not launch training.</p>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Monitor managed training jobs and externally reported experiments with bounded metrics, checkpoints, and sanitized console output.</p>
       </header>
       <section className="mt-7">
         <RunsView />

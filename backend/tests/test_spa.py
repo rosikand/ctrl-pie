@@ -47,6 +47,20 @@ def test_frontend_has_six_primary_routes_and_separate_training_models_owners() -
     assert "function ModelCard" in models_source
     assert "const visibleLogs = logs.slice().reverse();" in training_source
     assert "logs.slice(-500)" not in training_source
+    assert "ManagedJobCard" in training_source
+    assert 'job.target_kind === "modal"' in training_source
+    assert "Stub · no GPU" in training_source
+    assert "job.output_revision ?? job.output_marker_revision" in training_source
+    assert "run.managed_job?.output_revision ?? run.managed_job?.output_marker_revision" in training_source
+    assert "managedArtifactUrl ?" in training_source
+    assert ") : <ArtifactLink repoId={run.output_model_repo} />" in training_source
+    assert "Requested repo · existence not yet verified" in training_source
+    assert "Simulation teardown complete · no provider tasks" in training_source
+    assert "job.teardown_verified" in training_source
+    assert "job.event_gap" in training_source
+    assert "Launch a managed job from the Python SDK" in training_source
+    assert "launch_managed_training" not in training_source
+    assert "cancel_managed_training" not in training_source
 
 
 def test_settings_exposes_service_backed_yam_onboarding_without_browser_device_logic() -> None:

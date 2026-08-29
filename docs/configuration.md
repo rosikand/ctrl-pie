@@ -27,10 +27,10 @@ ${EDITOR:-vi} .env
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | All persisted workflows | PostgreSQL 14+ connection URL. A blank value keeps first-run mode available while database-backed APIs return 503. |
-| `HF_TOKEN` | Hub browsing/upload and real policy deployment | Backend-only Hugging Face token for the exact configured namespace. |
-| `HF_NAMESPACE` | Hub browsing/upload and real policy deployment | Exact user or organization ctrl-π may enumerate and mutate. It is never guessed from the token. |
-| `MODAL_TOKEN_ID` | Real Modal lifecycle unless a profile is used | Modal API credential ID. Must be paired with `MODAL_TOKEN_SECRET`. |
-| `MODAL_TOKEN_SECRET` | Real Modal lifecycle unless a profile is used | Modal API credential secret. |
+| `HF_TOKEN` | Hub browsing/upload, real policy deployment, and managed-training artifacts | Backend-only Hugging Face token for the exact configured namespace. |
+| `HF_NAMESPACE` | Hub browsing/upload, real policy deployment, and managed-training artifacts | Exact user or organization ctrl-π may enumerate and mutate. It is never guessed from the token. |
+| `MODAL_TOKEN_ID` | Real inference or managed-training lifecycle unless a profile is used | Modal API credential ID. Must be paired with `MODAL_TOKEN_SECRET`. |
+| `MODAL_TOKEN_SECRET` | Real inference or managed-training lifecycle unless a profile is used | Modal API credential secret. |
 | `MODAL_CONFIG_PATH` | Optional | Modal profile path; defaults to `~/.modal.toml`. |
 | `MODAL_PROFILE` | Optional | Explicit Modal profile name. |
 | `MODAL_PROXY_TOKEN_ID` | Real inference endpoint traffic | Distinct Modal Proxy Token ID beginning `wk-`. |
@@ -90,8 +90,8 @@ HF_TOKEN=hf_replace_with_a_backend_token
 Use a fine-grained token scoped to the exact namespace:
 
 - Read access supports dataset/model discovery and private video playback.
-- Write and repository-creation access supports recording upload and
-  `make seed`.
+- Write and repository-creation access supports recording upload,
+  `make seed`, and managed-training output repositories/checkpoints.
 - The real `make smoke` gate also deletes the uniquely named private dataset
   that it creates. Grant delete permission only when you intend to run it.
 
@@ -128,9 +128,15 @@ beginning `wk-`/`ws-`. The backend sends the latter only as `Modal-Key` and
 `Modal-Secret` headers to a validated HTTPS `.modal.run` endpoint. Neither pair
 is stored in PostgreSQL or returned to the browser.
 
-Real LeRobot deployment also needs `HF_TOKEN` while building the Modal image.
+Real LeRobot inference deployment also needs `HF_TOKEN` while building the Modal image.
 The selected model commit is downloaded once as a build secret; serving then
 enforces `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
+
+Managed training does not use Proxy Tokens. Its trusted Modal wrapper receives
+`HF_TOKEN` through a Modal Secret to snapshot exact inputs and publish only to
+the pre-created, marker-verified output repository; the fixed SmolVLA/LeRobot child
+process runs with that token removed. Launch requests and stored jobs never
+contain either credential pair.
 
 ## Local recording storage
 
@@ -158,7 +164,7 @@ See [YAM setup](/yam-setup) before enabling either path.
 
 ## Network boundary
 
-V1 has no login or API key. Keep `CTRL_PI_BIND_ADDRESS=127.0.0.1` unless the
+V1.1 has no login or API key. Keep `CTRL_PI_BIND_ADDRESS=127.0.0.1` unless the
 host is on a trusted, firewalled LAN. Do not expose ports 8000 or 5173 directly
 to the Internet or add a public reverse proxy without an authentication layer
 outside ctrl-π.

@@ -40,6 +40,9 @@ def test_python_sdk_guide_documents_every_public_method_and_stream_boundary() ->
         "GET /api/camera/stream",
         "video_url",
         "teardown_verified",
-        "Managed training is not part",
+        "launch_managed_training",
+        "cancel_managed_training_job",
+        "Only one managed job may be nonterminal",
+        "Closing the client does not cancel a job.",
     ):
         assert required in source

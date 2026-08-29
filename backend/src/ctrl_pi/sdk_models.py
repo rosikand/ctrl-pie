@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -13,6 +13,39 @@ RunStatus = Literal["created", "running", "completed", "failed", "cancelled"]
 ConsoleLogSource = Literal["stdout", "stderr", "system"]
 Runtime = Literal["stub", "lerobot", "openpi"]
 ComputeSize = Literal["CPU", "Modal: A10G", "Modal: A100", "Modal: H100"]
+ManagedTrainingComputeSize = Literal[
+    "Modal: A10G",
+    "Modal: A100",
+    "Modal: 2xA100",
+    "Modal: 4xA100",
+    "Modal: 8xA100",
+    "Modal: H100",
+    "Modal: 2xH100",
+    "Modal: 4xH100",
+    "Modal: 8xH100",
+]
+ManagedTrainingJobStatus = Literal[
+    "created",
+    "launching",
+    "running",
+    "finalizing",
+    "cancelling",
+    "completed",
+    "failed",
+    "cancelled",
+]
+ManagedTrainingOutcome = Literal["pending", "succeeded", "failed", "cancelled"]
+ManagedTrainingProviderState = Literal[
+    "pending",
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "stopping",
+    "stopped",
+    "unknown",
+]
+ImmutableRevision = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
 RecordingStatus = Literal[
     "draft", "teleop", "recording", "ready", "uploading", "uploaded", "failed"
 ]
@@ -344,6 +377,22 @@ class ConsoleLogPage(SDKModel):
     has_more: bool
 
 
+class ManagedTrainingJobSummary(SDKModel):
+    id: UUID
+    status: ManagedTrainingJobStatus
+    outcome: ManagedTrainingOutcome
+    target_kind: Literal["stub", "modal"]
+    compute_size: ManagedTrainingComputeSize
+    deadline_at: datetime
+    provider_state: ManagedTrainingProviderState
+    teardown_verified: bool
+    output_model_repo: str = Field(min_length=3, max_length=255)
+    output_marker_revision: ImmutableRevision | None
+    output_revision: ImmutableRevision | None
+    last_error: str | None = Field(max_length=240)
+    event_gap: bool
+
+
 class TrainingRun(SDKModel):
     id: UUID
     name: str
@@ -358,8 +407,72 @@ class TrainingRun(SDKModel):
     config: dict[str, Any]
     metrics: dict[str, list[MetricPoint]]
     checkpoints: list[Checkpoint]
+    managed_job: ManagedTrainingJobSummary | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ManagedTrainingJob(SDKModel):
+    id: UUID
+    training_run_id: UUID
+    idempotency_key: UUID
+    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: ManagedTrainingJobStatus
+    outcome: ManagedTrainingOutcome
+    target_kind: Literal["stub", "modal"]
+    provider_state: ManagedTrainingProviderState
+    compute_size: ManagedTrainingComputeSize
+    runtime: Literal["lerobot"]
+    dataset_repo: str = Field(min_length=3, max_length=255)
+    requested_dataset_revision: str | None = Field(max_length=128)
+    dataset_revision: ImmutableRevision | None
+    base_model: str = Field(min_length=3, max_length=255)
+    requested_base_model_revision: str | None = Field(max_length=128)
+    base_model_revision: ImmutableRevision | None
+    output_model_repo: str = Field(min_length=3, max_length=255)
+    output_private: bool
+    output_marker_revision: ImmutableRevision | None
+    output_revision: ImmutableRevision | None
+    max_steps: int = Field(ge=1, le=2_147_483_647)
+    batch_size: int = Field(ge=1, le=4_096)
+    log_every: int = Field(ge=1)
+    save_every: int = Field(ge=1)
+    seed: int = Field(ge=0, le=2_147_483_647)
+    num_workers: int = Field(ge=0, le=64)
+    timeout_seconds: int = Field(ge=60, le=86_400)
+    deadline_at: datetime
+    provider_app_id: str | None = Field(min_length=1, max_length=255)
+    provider_function_call_id: str | None = Field(min_length=1, max_length=255)
+    last_event_sequence: int = Field(ge=0, le=9_007_199_254_740_991)
+    event_gap: bool
+    launch_attempted_at: datetime | None
+    provider_launch_started_at: datetime | None
+    started_at: datetime | None
+    execution_finished_at: datetime | None
+    cancel_requested_at: datetime | None
+    teardown_verified: bool
+    teardown_verified_at: datetime | None
+    last_error: str | None = Field(max_length=240)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ManagedTrainingJobPage(SDKModel):
+    jobs: list[ManagedTrainingJob]
+    next_cursor: str | None
+
+
+class ManagedTrainingMetrics(SDKModel):
+    job_id: UUID
+    training_run_id: UUID
+    current_step: int = Field(ge=0, le=2_147_483_647)
+    metrics: dict[str, list[MetricPoint]]
+
+
+class ManagedTrainingCheckpoints(SDKModel):
+    job_id: UUID
+    training_run_id: UUID
+    checkpoints: list[Checkpoint]
 
 
 class ModelCard(SDKModel):

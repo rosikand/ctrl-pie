@@ -75,8 +75,10 @@ cp .env.example .env
 
 Mock arms and Stub inference work with external credentials blank. A complete
 Record, Datasets, Training, or persisted Inference workflow needs PostgreSQL.
-Hub browsing/upload needs `HF_TOKEN` and `HF_NAMESPACE`. Real Modal inference
-also needs the Modal API and Proxy Token pairs described in
+Hub browsing/upload and real managed-training artifacts need `HF_TOKEN` and
+`HF_NAMESPACE`. Real Modal inference needs the Modal API and Proxy Token pairs;
+managed training needs the Modal API pair/profile but not endpoint Proxy Tokens.
+Both are described in
 [Setup and configuration](setup.md).
 
 ### Apply migrations
@@ -249,8 +251,10 @@ not belong in a migration or ORM column.
 - Hub browsing requires both the explicit namespace and a token that belongs
   to that user or organization.
 - Real inference requires the HF token, Modal lifecycle credentials, and the
-  distinct Modal Proxy Token pair. Settings reports presence/readiness without
-  returning values.
+  distinct Modal Proxy Token pair. Managed training requires HF plus Modal
+  lifecycle credentials, a new namespace-confined output repo, and explicit
+  cost acknowledgement. Settings reports presence/readiness without returning
+  values.
 - Stop Uvicorn with `Ctrl-C` and let lifespan teardown finish. If a Modal App
   cannot be proven stopped, use [Modal operator cleanup](modal-operations.md)
   rather than deleting resources by a name prefix.
@@ -265,5 +269,6 @@ or local Hub cache paths when diagnosing a failure.
 - [Recording and teleoperation](recording.md)
 - [YAM driver interface](yam-driver.md)
 - [Compute and inference](inference.md)
+- [Managed training](managed-training.md)
 - [Trainer API](trainer-api.md)
 - [Docker deployment](docker-deployment.md)
