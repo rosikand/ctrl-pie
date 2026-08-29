@@ -74,7 +74,7 @@ hardware behavior; H0-H7 remain required on the field rig.
 | Hardware-derived Docker image build | NOT COMPLETED in this cloud — exact-source/script preflight passed, but isolated daemon attempt 1 had no bridge and attempt 2 had no NAT, so dependency download failed and no image was produced |
 | All-CAN and legacy Compose render | PASS — base, all-CAN, and legacy merged configurations plus shell syntax |
 | `make smoke` | PASS — four arms/two pairs, 3.117 s explicit sync, 5.000 s/50 samples, real private Hub upload/list, 100 stub actions, verified compute/rig/upload cleanup and Hub repo deletion |
-| Final branch / implementation commit | `v1.2-yam-cell` / milestone 17 commit recorded in the evidence follow-up |
+| Final branch / implementation commit | `v1.2-yam-cell` / `ff763f37664d419588ce559996f390f3d0ef4c4b` (`milestone 17: ship the YAM cell console and handoff`) |
 
 No row in this table may be described as physical validation.
 
