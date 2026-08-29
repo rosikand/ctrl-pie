@@ -91,32 +91,32 @@ ARG CTRL_PI_I2RT_DEPENDENCY_COMMIT
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-      build-essential \
       git \
-      python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=i2rt-source / /tmp/i2rt-source/
-COPY docker/i2rt-build-constraints.txt /tmp/i2rt-build-constraints.txt
+COPY docker/i2rt-worker-requirements.txt /tmp/i2rt-worker-requirements.txt
 
-# PIP_CONSTRAINT is inherited by pip's isolated PEP 517 subprocess. This
-# honors i2rt's ruckig build-backend ceiling; a top-level --constraint alone
-# would not reliably constrain the isolated build environment.
-RUN case "${CTRL_PI_I2RT_DEPENDENCY_COMMIT}" in \
-      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; \
-      *) echo "CTRL_PI_I2RT_DEPENDENCY_COMMIT must be an exact lowercase 40-hex commit" >&2; exit 2 ;; \
-    esac \
+# i2rt's full project metadata conflicts with ctrl-pi's policy stack over the
+# rerun-sdk major version. The supervised worker imports only the YAM factory
+# path, so install its small, pinned runtime closure and prove that the exact
+# operator source can import that path without installing or copying the source.
+RUN if ! printf '%s\n' "${CTRL_PI_I2RT_DEPENDENCY_COMMIT}" \
+       | grep -Eq '^[0-9a-f]{40}$'; then \
+      echo "CTRL_PI_I2RT_DEPENDENCY_COMMIT must be an exact lowercase 40-hex commit" >&2; \
+      exit 2; \
+    fi \
     && test "$(git -C /tmp/i2rt-source rev-parse --show-toplevel)" = /tmp/i2rt-source \
     && test "$(git -C /tmp/i2rt-source rev-parse --verify 'HEAD^{commit}')" = "${CTRL_PI_I2RT_DEPENDENCY_COMMIT}" \
     && git -C /tmp/i2rt-source status \
        --porcelain=v1 --ignored --untracked-files=all \
        > /tmp/i2rt-source-status \
     && test ! -s /tmp/i2rt-source-status \
-    && PIP_CONSTRAINT=/tmp/i2rt-build-constraints.txt \
-       python -m pip install /tmp/i2rt-source \
-    && python -m pip uninstall -y i2rt \
+    && python -m pip install -r /tmp/i2rt-worker-requirements.txt \
+    && PYTHONPATH=/tmp/i2rt-source python -c \
+       'import i2rt.robots.get_robot; import i2rt.robots.utils' \
     && python -m pip check \
-    && rm -rf /tmp/i2rt-source /tmp/i2rt-build-constraints.txt \
+    && rm -rf /tmp/i2rt-source /tmp/i2rt-worker-requirements.txt \
        /tmp/i2rt-source-status
 
 

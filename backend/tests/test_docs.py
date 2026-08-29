@@ -262,6 +262,22 @@ def test_container_entrypoint_does_not_gate_operator_tools_on_database(
     ]
 
 
+def test_yam_cell_dockerfile_validates_commit_and_pinned_worker_imports() -> None:
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    requirements = (
+        REPOSITORY_ROOT / "docker" / "i2rt-worker-requirements.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "grep -Eq '^[0-9a-f]{40}$'" in dockerfile
+    assert "CTRL_PI_I2RT_DEPENDENCY_COMMIT must be an exact lowercase 40-hex" in (
+        dockerfile
+    )
+    assert "PYTHONPATH=/tmp/i2rt-source python -c" in dockerfile
+    for dependency in ("crcmod-plus", "dm-env", "python-can", "tyro"):
+        assert re.search(rf"^{re.escape(dependency)}==", requirements, re.MULTILINE)
+    assert "rerun" not in requirements.casefold()
+
+
 def test_milestone_13_reference_contracts_are_documented() -> None:
     yam = (DOCS_ROOT / "yam-driver.md").read_text(encoding="utf-8")
     for required in (

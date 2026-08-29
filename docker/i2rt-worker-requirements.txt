@@ -1,0 +1,6 @@
+# Runtime-only dependency closure imported by the supervised YAM factory path.
+# The operator-controlled i2rt source remains a read-only runtime mount.
+crcmod-plus==2.3.1
+dm-env==1.6
+python-can==4.5.0
+tyro==1.0.16

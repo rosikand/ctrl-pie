@@ -68,12 +68,12 @@ hardware behavior; H0-H7 remain required on the field rig.
 | Gate | Result |
 | --- | --- |
 | Frontend production build | PASS — `npm run build` |
-| Full backend pytest | PASS — 791 tests, one existing Starlette deprecation warning |
-| Clean PostgreSQL Alembic upgrade to head | PASS — PostgreSQL upgrade/no-op at revision `0011` |
+| Full backend pytest | PASS — 792 tests, one existing Starlette deprecation warning |
+| Clean PostgreSQL Alembic upgrade to head | PASS — clean temporary PostgreSQL schema upgraded through revision `0011` |
 | Backend and frontend development boot | PASS — mock Uvicorn health and Vite root answered on loopback; both were stopped afterward |
-| Hardware-derived Docker image build | NOT COMPLETED in this cloud — exact-source/script preflight passed, but isolated daemon attempt 1 had no bridge and attempt 2 had no NAT, so dependency download failed and no image was produced |
+| Base and hardware-derived Docker image builds | PASS — production runtime built; hardware target verified a clean synthetic Git checkout of the supplied field-source snapshot, pinned worker dependencies, source-path import, non-root runtime user, read-only checkout preflight, and matching image label |
 | All-CAN and legacy Compose render | PASS — base, all-CAN, and legacy merged configurations plus shell syntax |
-| `make smoke` | PASS — four arms/two pairs, 3.117 s explicit sync, 5.000 s/50 samples, real private Hub upload/list, 100 stub actions, verified compute/rig/upload cleanup and Hub repo deletion |
+| `make smoke` | PASS — four arms/two pairs, 3.154 s explicit sync, 5.000 s/50 samples, real private Hub upload/list, 100 stub actions, verified compute/rig/upload cleanup and Hub repo deletion |
 | Final branch / implementation commit | `v1.2-yam-cell` / `ff763f37664d419588ce559996f390f3d0ef4c4b` (`milestone 17: ship the YAM cell console and handoff`) |
 
 No row in this table may be described as physical validation.
@@ -84,7 +84,7 @@ No row in this table may be described as physical validation.
   and open existing SocketCAN raw sockets with only `NET_RAW` is an H1 test on
   the reference host. The container has no `NET_ADMIN`, cannot configure or
   bounce links, and is not privileged.
-- The exact mounted i2rt checkout, its dependencies in the derived image, and
+- The exact mounted i2rt checkout, its worker dependencies in the derived image, and
   safe-idle/close behavior have not run in this cloud workspace against a YAM.
 - Motor directions, offsets, gravity compensation, joint/gripper units,
   calibration motion, physical limits, bus-off behavior, E-stop response,
@@ -227,9 +227,24 @@ motion-capable gate.
    Rerun the read-only audit and require only `false` values or no rows before
    continuing. Do not start the hardware application on a failed or ambiguous
    result.
-2. Confirm the host owns CAN configuration and that the intended links are
+2. On the host, prove the known Lux/i2rt pair controller is not running before
+   ctrl-π can open any hardware path:
+
+   ```bash
+   if pgrep -af '[p]ython.*minimum_gello\.py'; then
+     echo "BLOCKED: stop the external Lux/i2rt controller before ctrl-pi hardware startup" >&2
+     exit 1
+   fi
+   ```
+
+   Require zero matching processes. The ctrl-π file-bus lease isolates ctrl-π
+   processes only; it cannot detect an independent host controller. Inventory
+   the host's reviewed services as well, and stop any other process that can
+   write these CAN buses through its owner procedure. Do not continue on an
+   ambiguous result.
+3. Confirm the host owns CAN configuration and that the intended links are
    already present. Do not run `ip link set`, a bringup script, or motor ping.
-3. Verify the exact, clean local i2rt checkout with the commands above. Then
+4. Verify the exact, clean local i2rt checkout with the commands above. Then
    prove the Compose bind reports the kernel read-only mount flag without
    starting FastAPI or a hardware driver:
 
@@ -246,7 +261,7 @@ motion-capable gate.
 
    Require the final `true` line. Host chmod or an effective-permission check
    is not acceptable proof; stop if this command fails.
-4. Set `CTRL_PI_MOCK_MODE=false` and start the all-CAN override:
+5. Set `CTRL_PI_MOCK_MODE=false` and start the all-CAN override:
 
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.yam-cell.yml \
@@ -254,8 +269,8 @@ motion-capable gate.
    curl --fail http://127.0.0.1:8010/api/health
    ```
 
-5. Open Settings → YAM Cell. Discover only; do not Connect.
-6. Confirm all four fixture serials are present and assigned to the intended
+6. Open Settings → YAM Cell. Discover only; do not Connect.
+7. Confirm all four fixture serials are present and assigned to the intended
    logical roles. The original session mapped:
 
    ```text
@@ -266,9 +281,9 @@ motion-capable gate.
    ```
 
    Treat the displayed `canN` values as session-local; they may differ.
-7. Confirm pair/group/side metadata, distinct pair ports, intentional identity
+8. Confirm pair/group/side metadata, distinct pair ports, intentional identity
    frame maps, and the prominent `NO SASH GUARD` warning.
-8. Confirm no arm moves, no jaw calibration runs, no motor is pinged/enabled,
+9. Confirm no arm moves, no jaw calibration runs, no motor is pinged/enabled,
    and no CAN link changes state. Inspect container capabilities and mounts:
 
    ```bash
@@ -276,7 +291,7 @@ motion-capable gate.
      exec app sh -c 'id; grep -E "(/sys|/opt/i2rt)" /proc/mounts'
    ```
 
-9. Record whether UID 10001 plus `NET_RAW`, `/sys:ro`, and host networking are
+10. Record whether UID 10001 plus `NET_RAW`, `/sys:ro`, and host networking are
    sufficient. Any requested `NET_ADMIN`, broad `/dev`, or privileged access
    is a blocker requiring a code/review round trip.
 

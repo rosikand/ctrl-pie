@@ -732,3 +732,12 @@ milestones:
   hypotheses. A separate legacy override may pass exactly one GELLO serial
   device. The internal Uvicorn port is configurable so host-network hardware
   mode can use 8010 beside an existing service on 8000.
+- 2026-08-29 — The hardware image installs a pinned, worker-only dependency
+  closure and proves the exact operator checkout's YAM factory imports during
+  the build. It does not install i2rt as a package. The field i2rt metadata's
+  full package dependency set requires `rerun-sdk>=0.32.2`, while ctrl-π's
+  LeRobot 0.4.4 stack requires `rerun-sdk<0.27`; the supervised factory path
+  imports neither rerun nor the unrelated application modules. Keeping the
+  source as the verified read-only runtime mount avoids an unsatisfiable shared
+  package declaration while retaining strict `pip check` and exact-source
+  import verification.

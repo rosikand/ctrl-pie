@@ -142,11 +142,14 @@ exact source from its owner. The final status command rejects modified,
 staged, untracked, and ignored content; an ignored file can still shadow an
 import from the pinned tree.
 
-The `yam-cell-runtime` image target installs dependency declarations from that
-local clean checkout, then uninstalls the packaged i2rt source. The checked-in
-`docker/i2rt-build-constraints.txt` is passed through `PIP_CONSTRAINT`, so
-pip's isolated `ruckig` build honors i2rt's required
-`scikit-build-core<0.10` ceiling. The image retains the
+The `yam-cell-runtime` image target installs the pinned dependency closure used
+by the supervised YAM factory path from
+`docker/i2rt-worker-requirements.txt`. It then imports that factory path from
+the exact clean build-context checkout as a build gate. It deliberately does
+not install the i2rt package: the checkout's full package dependency set
+requires a newer `rerun-sdk` than ctrl-π's pinned LeRobot stack, while the YAM
+worker path does not import rerun. This keeps both dependency sets truthful and
+lets `pip check` remain strict. The image retains the
 build identity in the immutable image environment and OCI label as
 `CTRL_PI_I2RT_DEPENDENCY_COMMIT`. At runtime, the supervised worker can import
 i2rt only from `/opt/i2rt:ro`. That bind must expose the kernel `ST_RDONLY`
@@ -238,8 +241,17 @@ ctrl-π's passive path does not run `ip link set`, Lux `yam_bringup.sh`, or a
 motor ping. Inspect existing state without mutation:
 
 ```bash
+if pgrep -af '[p]ython.*minimum_gello\.py'; then
+  echo "BLOCKED: stop the external Lux/i2rt controller before ctrl-pi hardware startup" >&2
+  exit 1
+fi
 ip -details -statistics link show type can
 ```
+
+The file-bus lease serializes ctrl-π processes; it cannot detect an independent
+host controller. Treat any other service or process that can write the same CAN
+buses as the same blocker, and stop it through its reviewed owner procedure
+before starting ctrl-π hardware mode.
 
 If a required link is down or misconfigured, stop ctrl-π and follow the host's
 approved CAN procedure. Do not grant the container `NET_ADMIN` as a shortcut.
