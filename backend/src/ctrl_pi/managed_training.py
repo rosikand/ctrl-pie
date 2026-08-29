@@ -16,8 +16,11 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ctrl_pi.managed_training_artifacts import (
+    ManagedTrainingArtifactConfigurationError,
+    ManagedTrainingArtifactConflictError,
     ManagedTrainingArtifactError,
     ManagedTrainingArtifactService,
+    ManagedTrainingArtifactVerificationError,
 )
 from ctrl_pi.models import ManagedTrainingJob, TrainingRun
 from ctrl_pi.training_compute import (
@@ -44,7 +47,9 @@ from ctrl_pi.training_compute import (
     validate_training_state,
 )
 from ctrl_pi.training_store import (
+    TrainingStoreCorruptError,
     TrainingStoreError,
+    TrainingStoreLimitError,
     append_checkpoint,
     append_console_log,
     append_metrics,
@@ -757,6 +762,9 @@ class ManagedTrainingManager:
             self._note_retryable_error(
                 job_id, "The original managed training provider is unavailable."
             )
+            # The done-callback reschedules active rows immediately; without a
+            # pause an unavailable cleanup adapter becomes a tight retry loop.
+            await asyncio.sleep(self._poll_interval)
             return
         if job.status in {"finalizing", "cancelling"} or job.outcome != "pending":
             await self._cleanup_until_stopped(job_id, target=target)
@@ -885,6 +893,14 @@ class ManagedTrainingManager:
                 ManagedTrainingProtocolError,
                 TargetConfigurationError,
                 ManagedTrainingConfigurationError,
+                # Storage-limit/corruption and deterministic artifact failures
+                # cannot heal by re-polling the identical event page; retrying
+                # them would burn the provider budget until the hard deadline.
+                TrainingStoreLimitError,
+                TrainingStoreCorruptError,
+                ManagedTrainingArtifactConfigurationError,
+                ManagedTrainingArtifactConflictError,
+                ManagedTrainingArtifactVerificationError,
                 ValueError,
             ) as error:
                 await self._fail_and_cleanup(
@@ -953,13 +969,17 @@ class ManagedTrainingManager:
                     output_model_repo=job.output_model_repo,
                     output_private=job.output_private,
                     revision=event.revision,
-                    # Every persisted managed checkpoint must be loadable by the
-                    # existing offline inference runtime, not only the final one.
-                    require_deployable_root=True,
+                    # Intermediate checkpoints live under checkpoints/<step>/ in
+                    # the output repository; only the final commit places a
+                    # deployable policy at the repository root, so demanding the
+                    # root layout for every event would wedge event ingestion.
+                    require_deployable_root=event.final,
                 )
         if poll.next_sequence > (events[-1].sequence if events else job.last_event_sequence):
             gap = True
-        self._persist_events(job.id, job.last_event_sequence, events, poll, gap)
+        await asyncio.to_thread(
+            self._persist_events, job.id, job.last_event_sequence, events, poll, gap
+        )
 
         state = poll.state.execution_state
         if state == "succeeded":
@@ -1410,12 +1430,26 @@ class ManagedTrainingManager:
                 )
             for event in events:
                 if isinstance(event, TrainingLogEvent):
-                    append_console_log(
-                        run,
-                        source=event.source,
-                        line=event.line,
-                        step=event.step,
-                    )
+                    try:
+                        append_console_log(
+                            run,
+                            source=event.source,
+                            line=event.line,
+                            step=event.step,
+                        )
+                    except ValueError:
+                        # Provider output the store refuses (for example a
+                        # benign LeRobot config dump matching a credential key
+                        # pattern) must not fail an otherwise healthy paid job.
+                        append_console_log(
+                            run,
+                            source="system",
+                            line=(
+                                "[ctrl-pi redacted one provider console line "
+                                "that resembled a credential]"
+                            ),
+                            step=event.step,
+                        )
                 elif isinstance(event, TrainingMetricEvent):
                     append_metrics(run, step=event.step, metrics=event.metrics)
                 elif isinstance(event, TrainingCheckpointEvent):
@@ -1496,7 +1530,11 @@ class ManagedTrainingManager:
 
     def _note_retryable_error(self, job_id: uuid.UUID, message: str) -> None:
         with self.session_factory() as db:
-            job = db.get(ManagedTrainingJob, job_id)
+            job = db.scalar(
+                select(ManagedTrainingJob)
+                .where(ManagedTrainingJob.id == job_id)
+                .with_for_update()
+            )
             if job is None or job.status in _TERMINAL_STATUSES:
                 return
             job.last_error = _bounded_error(message)
@@ -1504,7 +1542,11 @@ class ManagedTrainingManager:
 
     def _set_cleanup_pending_error(self, job_id: uuid.UUID, message: str) -> None:
         with self.session_factory() as db:
-            job = db.get(ManagedTrainingJob, job_id)
+            job = db.scalar(
+                select(ManagedTrainingJob)
+                .where(ManagedTrainingJob.id == job_id)
+                .with_for_update()
+            )
             if job is None or job.status in _TERMINAL_STATUSES:
                 return
             job.last_error = _bounded_error(message)

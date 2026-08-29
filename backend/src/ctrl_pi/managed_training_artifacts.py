@@ -35,6 +35,12 @@ class ManagedTrainingArtifactProviderError(ManagedTrainingArtifactError):
     pass
 
 
+class ManagedTrainingArtifactVerificationError(ManagedTrainingArtifactError):
+    """An immutable output exists but violates the managed artifact contract."""
+
+    pass
+
+
 @dataclass(frozen=True)
 class PreparedTrainingArtifacts:
     dataset_repo: str
@@ -401,16 +407,19 @@ class HFManagedTrainingArtifactService:
         returned_repo = getattr(info, "id", None) or getattr(info, "repo_id", None)
         returned_sha = getattr(info, "sha", None)
         returned_private = getattr(info, "private", None)
+        if info_failed:
+            raise ManagedTrainingArtifactProviderError(
+                "The output model repository could not be inspected."
+            ) from None
         if (
-            info_failed
-            or returned_repo != output_model_repo
+            returned_repo != output_model_repo
             or not isinstance(returned_sha, str)
             or returned_sha.casefold() != revision
             or not isinstance(returned_private, bool)
             or returned_private is not output_private
         ):
-            raise ManagedTrainingArtifactProviderError(
-                "The output model repository identity could not be verified."
+            raise ManagedTrainingArtifactVerificationError(
+                "The immutable output model repository identity is invalid."
             ) from None
         marker_failed = False
         marker_path: Any = None
@@ -432,15 +441,19 @@ class HFManagedTrainingArtifactService:
                     marker_bytes = path.read_bytes()
             except (OSError, TypeError, ValueError):
                 marker_bytes = None
-        if marker_bytes != managed_training_marker(job_id, request_hash):
+        if marker_failed:
             raise ManagedTrainingArtifactProviderError(
-                "The output model ownership marker could not be verified."
+                "The output model ownership marker could not be fetched."
+            ) from None
+        if marker_bytes != managed_training_marker(job_id, request_hash):
+            raise ManagedTrainingArtifactVerificationError(
+                "The immutable output model ownership marker is invalid."
             ) from None
         if require_deployable_root:
             siblings = getattr(info, "siblings", None)
             if not isinstance(siblings, (list, tuple)) or len(siblings) > 10_000:
-                raise ManagedTrainingArtifactProviderError(
-                    "The output model file manifest could not be verified."
+                raise ManagedTrainingArtifactVerificationError(
+                    "The immutable output model file manifest is invalid."
                 )
             files = {
                 value
@@ -465,8 +478,8 @@ class HFManagedTrainingArtifactService:
                 ),
             }
             if not required_policy_files.issubset(files):
-                raise ManagedTrainingArtifactProviderError(
-                    "The output model does not contain a deployable root checkpoint."
+                raise ManagedTrainingArtifactVerificationError(
+                    "The immutable output model lacks a deployable root checkpoint."
                 )
 
 
@@ -482,6 +495,7 @@ __all__ = [
     "ManagedTrainingArtifactConflictError",
     "ManagedTrainingArtifactError",
     "ManagedTrainingArtifactProviderError",
+    "ManagedTrainingArtifactVerificationError",
     "ManagedTrainingArtifactService",
     "PreparedTrainingArtifacts",
     "StubManagedTrainingArtifactService",

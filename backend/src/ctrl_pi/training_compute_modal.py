@@ -505,9 +505,8 @@ class ModalTrainingTarget:
             transient=True,
         )
         expected_hash = handle.request_hash
-        events: list[TrainingEvent] = []
+        events_by_sequence: dict[int, TrainingEvent] = {}
         highest_observed_sequence = after_sequence
-        previous_tail_sequence = 0
         observed_hash: str | None = expected_hash
         for line in tail.lines:
             try:
@@ -516,17 +515,32 @@ class ModalTrainingTarget:
                     observed_hash = event_hash
                 elif event_hash != observed_hash:
                     raise ValueError("managed training request hash changed")
-                if event.sequence <= previous_tail_sequence:
-                    raise ValueError("managed training event sequence is not monotonic")
-                previous_tail_sequence = event.sequence
+                previous = events_by_sequence.get(event.sequence)
+                if previous is not None:
+                    if previous != event:
+                        raise ValueError(
+                            "managed training event sequence has conflicting payloads"
+                        )
+                    # Modal log delivery is at-least-once; an exact replay is
+                    # harmless and remains one logical event.
+                    continue
+                events_by_sequence[event.sequence] = event
                 highest_observed_sequence = max(highest_observed_sequence, event.sequence)
-                if event.sequence > after_sequence:
-                    events.append(event)
             except (TypeError, ValueError):
                 raise ManagedTrainingProtocolError(
                     "The Modal training event protocol is invalid."
                 ) from None
-        deduplicated = events
+        # A bounded Modal tail may replay or reorder lines. Sorting the unique
+        # sequence identities preserves every available event; missing
+        # identities below still make the gap explicit.
+        deduplicated = sorted(
+            (
+                event
+                for sequence, event in events_by_sequence.items()
+                if sequence > after_sequence
+            ),
+            key=lambda event: event.sequence,
+        )
         gap = bool(deduplicated and deduplicated[0].sequence > after_sequence + 1)
         gap = gap or any(
             right.sequence != left.sequence + 1
@@ -773,14 +787,15 @@ class ModalTrainingTarget:
         )
         running_tasks = listed.running_tasks if listed is not None else 0
         if (
-            effective_lifecycle == "stopped"
+            lifecycle == "stopped"
             and running_tasks == 0
             and execution not in {"pending", "running"}
             and (listed is None or listed.app_name == app_name)
         ):
-            # Modal may remove tags/name resolution from stopped history. A
-            # lifecycle-by-ID response plus zero listed tasks is the pinned
-            # SDK's provider proof for idempotent teardown.
+            # The pinned SDK's lifecycle-by-ID response is provider proof for
+            # this exact persisted App ID. Modal may expire its tag and name
+            # history after stopping; AppList/name-derived lifecycle evidence
+            # still falls through to the ownership-tag check below.
             return TrainingTargetState(
                 job_id=job_id,
                 provider_app_id=provider_app_id,

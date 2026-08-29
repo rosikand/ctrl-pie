@@ -10,6 +10,7 @@ from ctrl_pi.managed_training_artifacts import (
     HFManagedTrainingArtifactService,
     ManagedTrainingArtifactConflictError,
     ManagedTrainingArtifactProviderError,
+    ManagedTrainingArtifactVerificationError,
 )
 from ctrl_pi.training_compute import (
     MANAGED_SMOLVLA_DEPENDENCY_DIR,
@@ -159,10 +160,31 @@ def test_output_visibility_and_marker_are_reverified(tmp_path: Path) -> None:
     api.marker = managed_training_marker(job_id, request_hash)
     api.output_private = False
 
-    with pytest.raises(ManagedTrainingArtifactProviderError, match="identity"):
+    with pytest.raises(ManagedTrainingArtifactVerificationError, match="identity"):
         service.verify_output_revision(
             job_id=job_id,
             request_hash=request_hash,
+            output_model_repo="acme/output",
+            output_private=True,
+            revision=api.marker_sha,
+            require_deployable_root=False,
+        )
+
+
+def test_immutable_output_marker_mismatch_is_a_verification_failure(
+    tmp_path: Path,
+) -> None:
+    api = FakeHub(tmp_path)
+    service = HFManagedTrainingArtifactService(
+        "hf_test_token", "acme", hub_api_factory=lambda _token: api
+    )
+    job_id = uuid.uuid4()
+    api.marker = managed_training_marker(uuid.uuid4(), "e" * 64)
+
+    with pytest.raises(ManagedTrainingArtifactVerificationError, match="marker"):
+        service.verify_output_revision(
+            job_id=job_id,
+            request_hash="d" * 64,
             output_model_repo="acme/output",
             output_private=True,
             revision=api.marker_sha,
@@ -195,7 +217,7 @@ def test_final_output_requires_every_lerobot_runtime_root_file(
     api.marker = managed_training_marker(job_id, request_hash)
     api.output_files.remove(missing)
 
-    with pytest.raises(ManagedTrainingArtifactProviderError, match="deployable"):
+    with pytest.raises(ManagedTrainingArtifactVerificationError, match="deployable"):
         service.verify_output_revision(
             job_id=job_id,
             request_hash=request_hash,

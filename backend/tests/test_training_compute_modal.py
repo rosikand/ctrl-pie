@@ -344,18 +344,58 @@ def test_poll_fails_closed_on_duplicate_nonfinite_or_wrong_hash_protocol_lines()
 @pytest.mark.parametrize(
     "lines",
     [
-        (_event(2), _event(1)),
-        (_event(1), _event(1)),
         (_event(1).replace('"version":1', '"version":true'),),
         (_event(1, "metric").replace("0.5", "true"),),
     ],
 )
-def test_poll_fails_closed_on_nonmonotonic_or_loosely_typed_events(
+def test_poll_fails_closed_on_loosely_typed_events(
     lines: tuple[str, ...],
 ) -> None:
     gateway = FakeGateway()
     gateway.add_app()
     gateway.log_tail = _ProviderLogTail(lines, False)
+    target = ModalTrainingTarget(gateway=gateway, hf_token="hf-safe")
+
+    with pytest.raises(ManagedTrainingProtocolError, match="event protocol"):
+        target.poll(_handle(), after_sequence=0, limit=10)
+
+
+@pytest.mark.parametrize(
+    ("lines", "expected_sequences", "expected_gap"),
+    [
+        # Modal log delivery is not exactly-once: replayed or reordered lines
+        # are deduplicated and sorted without failing a paid job, while true
+        # sequence gaps stay visible.
+        ((_event(1), _event(1)), [1], False),
+        ((_event(2), _event(1)), [1, 2], False),
+        ((_event(1), _event(2), _event(2), _event(3)), [1, 2, 3], False),
+        ((_event(1), _event(3)), [1, 3], True),
+    ],
+)
+def test_poll_deduplicates_and_orders_provider_lines(
+    lines: tuple[str, ...],
+    expected_sequences: list[int],
+    expected_gap: bool,
+) -> None:
+    gateway = FakeGateway()
+    gateway.add_app()
+    gateway.call_info = _ProviderCallInfo(APP_ID, "running")
+    gateway.log_tail = _ProviderLogTail(lines, False)
+    target = ModalTrainingTarget(gateway=gateway, hf_token="hf-safe")
+
+    poll = target.poll(_handle(), after_sequence=0, limit=10)
+
+    assert [event.sequence for event in poll.events] == expected_sequences
+    assert poll.truncated is expected_gap
+
+
+def test_poll_rejects_conflicting_payloads_for_one_sequence() -> None:
+    gateway = FakeGateway()
+    gateway.add_app()
+    gateway.log_tail = _ProviderLogTail(
+        (_event(1), _event(1, line="conflicting line")),
+        False,
+    )
     target = ModalTrainingTarget(gateway=gateway, hf_token="hf-safe")
 
     with pytest.raises(ManagedTrainingProtocolError, match="event protocol"):
@@ -392,7 +432,7 @@ def test_stopped_history_remains_idempotent_after_tags_and_name_resolution_disap
     assert gateway.stop_calls == []
 
 
-def test_stopped_applist_history_is_sufficient_when_lifecycle_tags_and_resolution_expire() -> None:
+def test_stopped_applist_history_without_lifecycle_or_tags_is_not_verified() -> None:
     gateway = FakeGateway()
     gateway.add_app(lifecycle="stopped", running_tasks=0)
     gateway.lifecycles[APP_ID] = None
@@ -401,8 +441,21 @@ def test_stopped_applist_history_is_sufficient_when_lifecycle_tags_and_resolutio
     gateway.call_info = _ProviderCallInfo(APP_ID, "succeeded")
     target = ModalTrainingTarget(gateway=gateway, hf_token="hf-safe")
 
+    with pytest.raises(ManagedTrainingOwnershipError, match="ownership tag"):
+        target.inspect(_handle())
+
+    assert gateway.stop_calls == []
+
+
+def test_stopped_applist_history_requires_the_exact_ownership_tag() -> None:
+    gateway = FakeGateway()
+    gateway.add_app(lifecycle="stopped", running_tasks=0)
+    gateway.lifecycles[APP_ID] = None
+    gateway.resolved.clear()
+    gateway.call_info = _ProviderCallInfo(APP_ID, "succeeded")
+    target = ModalTrainingTarget(gateway=gateway, hf_token="hf-safe")
+
     state = target.inspect(_handle())
-    target.stop(_handle())
 
     assert state.stopped_verified is True
     assert gateway.stop_calls == []

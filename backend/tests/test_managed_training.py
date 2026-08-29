@@ -10,10 +10,10 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from ctrl_pi.db import Base, get_db
 from ctrl_pi.main import create_app
@@ -22,12 +22,17 @@ from ctrl_pi.managed_training import (
     ManagedTrainingLaunch,
     ManagedTrainingManager,
 )
-from ctrl_pi.managed_training_artifacts import StubManagedTrainingArtifactService
+from ctrl_pi.managed_training_artifacts import (
+    ManagedTrainingArtifactVerificationError,
+    StubManagedTrainingArtifactService,
+)
 from ctrl_pi.models import ManagedTrainingJob, TrainingRun
 from ctrl_pi.training_compute import (
     ManagedTrainingSpec,
     ManagedTrainingTargetError,
     TrainingHandle,
+    TrainingLogEvent,
+    TrainingMetricEvent,
     TrainingPoll,
     TrainingTargetState,
     training_app_name,
@@ -37,11 +42,26 @@ from ctrl_pi.training_compute_stub import StubManagedTrainingTarget
 
 
 def _factory():
+    database_name = f"ctrl-pi-managed-training-{uuid.uuid4().hex}"
     engine = create_engine(
-        "sqlite+pysqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        (
+            f"sqlite+pysqlite:///file:{database_name}"
+            "?mode=memory&cache=shared&uri=true"
+        ),
+        connect_args={"check_same_thread": False, "timeout": 5.0},
     )
+
+    @event.listens_for(engine, "connect")
+    def configure_test_connection(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA busy_timeout = 5000")
+        # Shared-cache SQLite otherwise rejects a concurrent status read while
+        # the worker-thread event transaction is committing. PostgreSQL uses
+        # MVCC for this production path, so let the test observer avoid taking
+        # a SQLite table read lock instead of sharing one unsafe connection.
+        cursor.execute("PRAGMA read_uncommitted = 1")
+        cursor.close()
+
     Base.metadata.create_all(engine)
     return engine, sessionmaker(bind=engine, expire_on_commit=False)
 
@@ -74,10 +94,14 @@ def _launch(**overrides: Any) -> ManagedTrainingLaunch:
 
 async def _wait_status(factory, job_id: uuid.UUID, statuses: set[str]):
     for _ in range(300):
-        with factory() as db:
-            job = db.get(ManagedTrainingJob, job_id)
-            if job is not None and job.status in statuses:
-                return job
+        try:
+            with factory() as db:
+                job = db.get(ManagedTrainingJob, job_id)
+                if job is not None and job.status in statuses:
+                    return job
+        except OperationalError as error:
+            if "locked" not in str(error).casefold():
+                raise
         await asyncio.sleep(0.01)
     raise AssertionError(f"managed training did not reach {statuses}")
 
@@ -954,3 +978,257 @@ def test_lifespan_rolls_back_partially_started_managed_training_manager() -> Non
             pass
 
     assert manager.shutdown_called is True
+
+
+class RootRequirementRecordingArtifacts(StubManagedTrainingArtifactService):
+    """Record how each revision verification treats the repository root."""
+
+    def __init__(self) -> None:
+        self.deployable_root_calls: list[bool] = []
+
+    def verify_output_revision(self, **kwargs: Any) -> str:
+        self.deployable_root_calls.append(bool(kwargs["require_deployable_root"]))
+        return super().verify_output_revision(**kwargs)
+
+
+class InvalidFinalArtifacts(StubManagedTrainingArtifactService):
+    def verify_output_revision(self, **kwargs: Any) -> str:
+        if kwargs["require_deployable_root"]:
+            raise ManagedTrainingArtifactVerificationError(
+                "The immutable output model lacks a deployable root checkpoint."
+            )
+        return super().verify_output_revision(**kwargs)
+
+
+class EventPersistenceThreadRecordingManager(ManagedTrainingManager):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.event_persistence_threads: list[int] = []
+
+    def _persist_events(self, *args: Any, **kwargs: Any) -> None:
+        self.event_persistence_threads.append(threading.get_ident())
+        super()._persist_events(*args, **kwargs)
+
+
+async def test_intermediate_checkpoint_events_do_not_require_a_deployable_root() -> None:
+    """The worker uploads non-final checkpoints under checkpoints/<step>/, so
+    demanding root-deployable files for every checkpoint event would fail every
+    intermediate save and wedge event ingestion until the hard deadline."""
+
+    _engine, factory = _factory()
+    artifacts = RootRequirementRecordingArtifacts()
+    manager = ManagedTrainingManager(
+        StubManagedTrainingTarget(),
+        artifacts,
+        session_factory=factory,
+        poll_interval_seconds=0.01,
+    )
+    await manager.startup()
+    with factory() as db:
+        record = await manager.create(db, _launch())
+    job = await _wait_status(factory, record.id, {"completed", "failed"})
+    assert job.status == "completed"
+    # The default launch saves an intermediate checkpoint (save_every=10 <
+    # max_steps=100): its event verification must not demand the root layout;
+    # only the final-result verification may.
+    assert artifacts.deployable_root_calls == [False, True]
+    await manager.shutdown()
+
+
+async def test_event_persistence_runs_off_the_async_supervisor_loop() -> None:
+    _engine, factory = _factory()
+    loop_thread = threading.get_ident()
+    manager = EventPersistenceThreadRecordingManager(
+        StubManagedTrainingTarget(),
+        StubManagedTrainingArtifactService(),
+        session_factory=factory,
+        poll_interval_seconds=0.01,
+    )
+    await manager.startup()
+    with factory() as db:
+        record = await manager.create(db, _launch())
+    job = await _wait_status(factory, record.id, {"completed", "failed"})
+
+    assert job.status == "completed"
+    assert manager.event_persistence_threads
+    assert all(item != loop_thread for item in manager.event_persistence_threads)
+    await manager.shutdown()
+
+
+async def test_immutable_final_artifact_failure_stops_compute_without_deadline_spin() -> None:
+    _engine, factory = _factory()
+    manager = ManagedTrainingManager(
+        StubManagedTrainingTarget(),
+        InvalidFinalArtifacts(),
+        session_factory=factory,
+        poll_interval_seconds=0.01,
+    )
+    await manager.startup()
+    with factory() as db:
+        record = await manager.create(db, _launch())
+
+    job = await _wait_status(factory, record.id, {"completed", "failed"})
+
+    assert job.status == "failed"
+    assert job.outcome == "failed"
+    assert job.teardown_verified_at is not None
+    assert job.last_error is not None
+    assert "deployable root checkpoint" in job.last_error
+    await manager.shutdown()
+
+
+class SecretLikeLineTarget(StubManagedTrainingTarget):
+    def poll(
+        self, handle: TrainingHandle, *, after_sequence: int, limit: int
+    ) -> TrainingPoll:
+        poll = super().poll(handle, after_sequence=after_sequence, limit=limit)
+        events = tuple(
+            replace(event, line="password: hunter2")
+            if isinstance(event, TrainingLogEvent) and event.sequence == 1
+            else event
+            for event in poll.events
+        )
+        return replace(poll, events=events)
+
+
+async def test_secret_like_provider_log_line_is_redacted_without_failing_the_job() -> None:
+    _engine, factory = _factory()
+    manager = ManagedTrainingManager(
+        SecretLikeLineTarget(),
+        StubManagedTrainingArtifactService(),
+        session_factory=factory,
+        poll_interval_seconds=0.01,
+    )
+    await manager.startup()
+    with factory() as db:
+        record = await manager.create(db, _launch())
+    job = await _wait_status(factory, record.id, {"completed", "failed"})
+    assert job.status == "completed"
+    with factory() as db:
+        run = db.get(TrainingRun, job.training_run_id)
+        assert run is not None
+        lines = [entry["line"] for entry in run.console_logs]
+    assert not any("hunter2" in line for line in lines)
+    assert any("redacted one provider console line" in line for line in lines)
+    await manager.shutdown()
+
+
+class MetricFloodTarget(StubManagedTrainingTarget):
+    """Emit more metric names than the bounded run store permits."""
+
+    def poll(
+        self, handle: TrainingHandle, *, after_sequence: int, limit: int
+    ) -> TrainingPoll:
+        poll = super().poll(handle, after_sequence=after_sequence, limit=limit)
+        flood = tuple(
+            TrainingMetricEvent(
+                sequence=index + 1,
+                step=index + 1,
+                metrics={f"metric{index}x{name}": 0.5 for name in range(64)},
+            )
+            for index in range(3)
+        )
+        return replace(poll, events=flood, next_sequence=3, has_more=False)
+
+
+async def test_storage_limit_violation_fails_the_job_instead_of_spinning() -> None:
+    """A deterministic bounded-store violation cannot heal by re-polling the
+    identical event page; it must fail the job promptly rather than burn the
+    provider budget until the hard deadline."""
+
+    _engine, factory = _factory()
+    manager = ManagedTrainingManager(
+        MetricFloodTarget(),
+        StubManagedTrainingArtifactService(),
+        session_factory=factory,
+        poll_interval_seconds=0.01,
+    )
+    await manager.startup()
+    with factory() as db:
+        record = await manager.create(db, _launch())
+    job = await _wait_status(factory, record.id, {"completed", "failed"})
+    assert job.status == "failed"
+    assert job.outcome == "failed"
+    assert job.teardown_verified_at is not None
+    await manager.shutdown()
+
+
+async def test_unavailable_original_target_delays_before_supervisor_reschedule() -> None:
+    """An active row can outlive a backend whose original adapter is absent.
+
+    The supervisor done-callback immediately schedules another resume attempt,
+    so the unavailable-target branch itself must apply the configured delay.
+    """
+
+    _engine, factory = _factory()
+    first = ManagedTrainingManager(
+        HoldingTarget(),
+        StubManagedTrainingArtifactService(),
+        session_factory=factory,
+        poll_interval_seconds=0.01,
+    )
+    await first.startup()
+    with factory() as db:
+        record = await first.create(db, _launch())
+    await _wait_status(factory, record.id, {"running"})
+    await first.shutdown()
+    with factory() as db:
+        row = db.get(ManagedTrainingJob, record.id)
+        assert row is not None
+        row.target_kind = "modal"
+        db.commit()
+
+    unavailable = ManagedTrainingManager(
+        StubManagedTrainingTarget(),
+        StubManagedTrainingArtifactService(),
+        session_factory=factory,
+        poll_interval_seconds=0.05,
+    )
+    started = time.monotonic()
+    await unavailable._resume_job(record.id)
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.04
+    with factory() as db:
+        row = db.get(ManagedTrainingJob, record.id)
+        assert row is not None
+        assert row.status == "running"
+        assert row.last_error == (
+            "The original managed training provider is unavailable."
+        )
+
+
+class StatementCapturingSession:
+    def __init__(self, statements: list[Any]) -> None:
+        self._statements = statements
+
+    def __enter__(self) -> StatementCapturingSession:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def scalar(self, statement: Any) -> None:
+        self._statements.append(statement)
+        return None
+
+
+def test_retryable_and_cleanup_error_writes_request_row_locks() -> None:
+    """PostgreSQL serializes competing supervisor/cancel status writers."""
+
+    statements: list[Any] = []
+    manager = ManagedTrainingManager(
+        StubManagedTrainingTarget(),
+        StubManagedTrainingArtifactService(),
+        session_factory=lambda: StatementCapturingSession(statements),  # type: ignore[arg-type]
+    )
+    job_id = uuid.uuid4()
+
+    manager._note_retryable_error(job_id, "temporary observation outage")
+    manager._set_cleanup_pending_error(job_id, "cleanup still pending")
+
+    assert len(statements) == 2
+    assert all(
+        "FOR UPDATE" in str(statement.compile(dialect=postgresql.dialect()))
+        for statement in statements
+    )
