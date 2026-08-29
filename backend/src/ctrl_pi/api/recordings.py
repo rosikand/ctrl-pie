@@ -92,11 +92,20 @@ class RecordingsResponse(BaseModel):
 class RecordingState(BaseModel):
     recording_id: str
     teleop_active: bool
+    sync_enabled: bool
+    sync_in_progress: bool
+    joint_deltas_radians: dict[str, float]
     episode_active: bool
     current_episode_index: int | None
     episode_duration_seconds: float
     episode_count: int
     status: RecordingStatus
+
+
+class TeleopSyncEnable(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledge_slow_sync_motion: bool = Field(default=False, strict=True)
 
 
 class EpisodeMetadata(BaseModel):
@@ -201,6 +210,14 @@ def _recording_read(db: Session, recording: Recording) -> RecordingRead:
 
 
 def _upsert_robot(db: Session, arm: ArmTelemetry) -> Robot:
+    arm_config = {
+        "pair_id": arm.pair_id,
+        "group_id": arm.group_id,
+        "side": arm.side,
+        "transport_kind": arm.transport_kind,
+        "stable_identity": arm.stable_identity,
+        "end_effector_kind": arm.end_effector_kind,
+    }
     robot = db.scalar(select(Robot).where(Robot.driver_id == arm.id))
     if robot is None:
         robot = Robot(
@@ -208,17 +225,19 @@ def _upsert_robot(db: Session, arm: ArmTelemetry) -> Robot:
             name=arm.name,
             role=arm.role,
             driver=arm.driver,
-            can_interface=arm.can.interface,
+            # Runtime canN is deliberately not durable identity.
+            can_interface=None,
             enabled=arm.connected,
-            config={},
+            config=arm_config,
         )
         db.add(robot)
     else:
         robot.name = arm.name
         robot.role = arm.role
         robot.driver = arm.driver
-        robot.can_interface = arm.can.interface
+        robot.can_interface = None
         robot.enabled = arm.connected
+        robot.config = arm_config
     db.flush()
     return robot
 
@@ -497,6 +516,10 @@ def create_recording(
         )
     if not leader_arm.connected or not follower_arm.connected:
         raise HTTPException(status_code=422, detail="Both selected arms must be connected.")
+    try:
+        driver.validate_teleop_pair(leader_arm.id, follower_arm.id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
 
     leader_robot = _upsert_robot(db, leader_arm)
     follower_robot = _upsert_robot(db, follower_arm)
@@ -508,7 +531,20 @@ def create_recording(
         follower_robot_id=follower_robot.id,
         episode_count=0,
         duration_seconds=0.0,
-        recording_metadata={**payload.metadata, "episodes": []},
+        recording_metadata={
+            **payload.metadata,
+            "episodes": [],
+            "yam_pair": {
+                "pair_id": leader_arm.pair_id,
+                "group_id": leader_arm.group_id,
+                "side": leader_arm.side,
+                "leader_id": leader_arm.id,
+                "follower_id": follower_arm.id,
+                "leader_end_effector": leader_arm.end_effector_kind,
+                "follower_end_effector": follower_arm.end_effector_kind,
+            },
+            "camera_kind": "synthetic",
+        },
     )
     db.add(recording)
     db.commit()
@@ -598,6 +634,40 @@ async def stop_teleop(
         raise HTTPException(
             status_code=503, detail="Teleoperation state could not be persisted."
         ) from None
+    return _state(snapshot)
+
+
+@router.post("/{recording_id}/teleop/sync/enable", response_model=RecordingState)
+async def enable_teleop_sync(
+    recording_id: uuid.UUID,
+    payload: TeleopSyncEnable,
+    db: Session = Depends(get_db),
+    manager: RecordingManager = Depends(get_recording_manager),
+) -> RecordingState:
+    recording = _recording_or_404(db, recording_id)
+    await manager.ensure_session(**_runtime_arguments(db, recording))
+    try:
+        snapshot = await manager.enable_sync(
+            str(recording.id),
+            acknowledge_slow_sync_motion=payload.acknowledge_slow_sync_motion,
+        )
+    except (RecordingConflictError, RecordingRuntimeError) as error:
+        raise _conflict(error) from error
+    return _state(snapshot)
+
+
+@router.post("/{recording_id}/teleop/sync/disable", response_model=RecordingState)
+async def disable_teleop_sync(
+    recording_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    manager: RecordingManager = Depends(get_recording_manager),
+) -> RecordingState:
+    recording = _recording_or_404(db, recording_id)
+    await manager.ensure_session(**_runtime_arguments(db, recording))
+    try:
+        snapshot = await manager.disable_sync(str(recording.id))
+    except (RecordingConflictError, RecordingRuntimeError) as error:
+        raise _conflict(error) from error
     return _state(snapshot)
 
 

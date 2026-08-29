@@ -138,6 +138,21 @@ class FakeTransport:
         self.closed = True
 
 
+class _UnsafeIdleDriver(MockYAMDriver):
+    def __init__(self, *, latch_fails: bool = False) -> None:
+        super().__init__()
+        self.latch_fails = latch_fails
+
+    def safe_idle(self, arm_id: str):
+        del arm_id
+        raise RuntimeError("injected safe-idle failure")
+
+    def latch_fault(self, arm_ids: list[str], detail: str) -> None:
+        if self.latch_fails:
+            raise RuntimeError("injected fault-latch failure")
+        super().latch_fault(arm_ids, detail)
+
+
 def _loop(
     transport: FakeTransport | InProcessInferenceTransport,
     *,
@@ -208,9 +223,43 @@ async def test_mock_loop_executes_100_steps_single_flight_and_releases_everythin
     assert stopped.started_at is not None and stopped.stopped_at is not None
     assert lease.current() is None
     assert await loop.active_resource_counts() == (0, 0)
+    assert after.control_state == "gravity_comp"
+    assert after.energized is True
+    assert after.holding is True
     assert [joint.position_radians for joint in before.joints] != [
         joint.position_radians for joint in after.joints
     ]
+
+
+@pytest.mark.asyncio
+async def test_inference_fault_latches_before_release_when_safe_idle_fails() -> None:
+    driver = _UnsafeIdleDriver()
+    lease = RigLease()
+    loop = _loop(FakeTransport(), driver=driver, lease=lease, max_steps=1)
+
+    await loop.start()
+    stopped = await loop.wait()
+
+    assert stopped.running is False
+    assert "fault-latched" in (stopped.last_error or "")
+    assert lease.current("yam-follower") is None
+    follower = driver.get_arm("yam-follower")
+    assert follower.control_state == "error"
+    assert follower.connected is False
+
+
+@pytest.mark.asyncio
+async def test_inference_retains_lease_when_safe_idle_and_latch_are_uncertain() -> None:
+    driver = _UnsafeIdleDriver(latch_fails=True)
+    lease = RigLease()
+    loop = _loop(FakeTransport(), driver=driver, lease=lease, max_steps=1)
+
+    await loop.start()
+    stopped = await loop.wait()
+
+    assert "ownership remains blocked" in (stopped.last_error or "")
+    token = lease.current("yam-follower")
+    assert token is not None and token.owner == "inference"
 
 
 @pytest.mark.asyncio
@@ -583,7 +632,7 @@ async def test_cleanup_failure_is_preserved_in_terminal_snapshot() -> None:
     stopped = await loop.stop()
 
     assert stopped.last_error == (
-        "The inference resources could not be released safely."
+        "The inference resources could not be released safely; command ownership remains blocked."
     )
     assert "raw" not in stopped.last_error
     assert lease.current() is None

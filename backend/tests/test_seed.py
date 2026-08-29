@@ -12,15 +12,36 @@ from sqlalchemy.orm import Session
 
 from ctrl_pi.config import AppConfig
 from ctrl_pi.db import Base
+from ctrl_pi.drivers.mock_yam import MockYAMDriver
 from ctrl_pi.hf import DatasetUploadResult, UploadConflictError
 from ctrl_pi.models import Recording, Robot, TrainingRun
 from ctrl_pi.recording import EpisodeResult
 from ctrl_pi.seed import (
     _SAMPLE_RECORDING_ID,
     _persist_seed_upload_success,
+    _record_sample_episode,
     _upload_sample_recording,
     seed,
 )
+
+
+class _FakeVideoWriter:
+    def __init__(self, output_path: Path, width: int, height: int, fps: int) -> None:
+        del width, height, fps
+        self.output_path = output_path
+        self.output_path.write_bytes(b"")
+
+    def write(self, frame) -> None:
+        assert frame.rgb
+        with self.output_path.open("ab") as stream:
+            stream.write(b"frame")
+
+    def close(self) -> None:
+        if not self.output_path.read_bytes():
+            raise RuntimeError("empty test video")
+
+    def terminate(self) -> None:
+        return None
 
 
 def _engine():
@@ -48,13 +69,82 @@ def test_seed_is_idempotent_and_skips_external_upload_without_credentials(
     assert first.database_seeded is second.database_seeded is True
     assert first.dataset_status == second.dataset_status == "skipped"
     assert any("HF_NAMESPACE and HF_TOKEN" in message for message in messages)
+    assert messages.count("Seeded 4 mock robots and two example training runs.") == 2
     with Session(engine) as db:
-        assert db.scalar(select(func.count()).select_from(Robot)) == 2
+        assert db.scalar(select(func.count()).select_from(Robot)) == 4
         assert db.scalar(select(func.count()).select_from(TrainingRun)) == 2
         assert db.scalar(select(func.count()).select_from(Recording)) == 0
         runs = db.scalars(select(TrainingRun).order_by(TrainingRun.name)).all()
         assert all(run.metrics for run in runs)
         assert {run.status for run in runs} == {"completed", "running"}
+        robots = db.scalars(select(Robot).order_by(Robot.driver_id)).all()
+        assert {
+            robot.driver_id: (
+                robot.role,
+                robot.config["pair_id"],
+                robot.config["group_id"],
+                robot.config["side"],
+                robot.config["end_effector_kind"],
+            )
+            for robot in robots
+        } == {
+            "yam-leader": (
+                "leader",
+                "right",
+                "bimanual",
+                "right",
+                "yam_teaching_handle",
+            ),
+            "yam-follower": (
+                "follower",
+                "right",
+                "bimanual",
+                "right",
+                "linear_4310",
+            ),
+            "yam-leader-left": (
+                "leader",
+                "left",
+                "bimanual",
+                "left",
+                "yam_teaching_handle",
+            ),
+            "yam-follower-left": (
+                "follower",
+                "left",
+                "bimanual",
+                "left",
+                "linear_4310",
+            ),
+        }
+        assert all(robot.can_interface is None for robot in robots)
+        stable_identities = {
+            robot.config["stable_identity"] for robot in robots
+        }
+        assert len(stable_identities) == 4
+        assert all(robot.config["transport_kind"] == "socketcan" for robot in robots)
+
+
+@pytest.mark.asyncio
+async def test_seed_sample_recording_crosses_explicit_sync_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ctrl_pi.recording.FFmpegVideoWriter", _FakeVideoWriter)
+    driver = MockYAMDriver()
+
+    result = await _record_sample_episode(
+        recording_id="seed-sync-test",
+        driver=driver,
+        staging_dir=tmp_path / "recordings",
+        fps=10,
+        duration_seconds=0.02,
+    )
+
+    assert result.sample_count >= 1
+    assert driver.action_counts["yam-follower"] >= 5
+    assert driver.action_counts["yam-follower-left"] == 0
+    assert (tmp_path / "recordings" / result.artifact_key / "video.mp4").is_file()
 
 
 class FakeUploader:

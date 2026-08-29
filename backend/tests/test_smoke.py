@@ -19,6 +19,14 @@ async def test_full_smoke_loop_uses_fake_hub_offline(tmp_path: Path) -> None:
     )
 
     assert evidence.hub_mode == "fake"
+    assert evidence.mock_arm_ids == (
+        "yam-leader",
+        "yam-follower",
+        "yam-leader-left",
+        "yam-follower-left",
+    )
+    assert evidence.mock_pair_ids == ("left", "right")
+    assert evidence.teleop_sync_seconds >= 2.7
     assert evidence.private is True
     assert evidence.recording_wall_seconds >= 5.0
     assert evidence.episode_duration_seconds >= 5.0
@@ -41,9 +49,19 @@ async def test_full_smoke_loop_uses_fake_hub_offline(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
     report = "\n".join(messages)
-    for stage in ("record", "upload", "datasets", "deploy", "inference", "teardown"):
+    for stage in (
+        "topology",
+        "record",
+        "upload",
+        "datasets",
+        "deploy",
+        "inference",
+        "teardown",
+    ):
         assert f"[smoke] {stage}: PASS" in report
     assert "[smoke] PASS" in report
+    assert "arms=4 pairs=2 group=bimanual mode=mock" in report
+    assert "sync=" in report
     assert "steps=100" in report
     assert smoke._FAKE_TOKEN not in report
 

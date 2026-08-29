@@ -26,6 +26,7 @@ from ctrl_pi.drivers.real_yam import (
     VendorDevices,
     create_yam_driver,
 )
+from ctrl_pi.drivers.yam_cell import YAMCellDriver
 from ctrl_pi.drivers.yam import (
     JOINT_NAMES,
     ActionLimitError,
@@ -214,12 +215,9 @@ def test_factory_selects_mock_or_real_without_hardware_fallback() -> None:
     )
 
     assert isinstance(mock, MockYAMDriver)
-    assert isinstance(hardware, RealYAMDriver)
+    assert isinstance(hardware, YAMCellDriver)
     assert not isinstance(hardware, MockYAMDriver)
-    assert [(arm.id, arm.connected) for arm in hardware.list_arms()] == [
-        (LEADER_ID, False),
-        (FOLLOWER_ID, False),
-    ]
+    assert hardware.list_arms() == []
 
 
 def test_app_config_wires_every_explicit_hardware_value() -> None:

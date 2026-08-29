@@ -62,6 +62,9 @@ class SmokeFailure(RuntimeError):
 @dataclass(frozen=True)
 class SmokeEvidence:
     hub_mode: str
+    mock_arm_ids: tuple[str, ...]
+    mock_pair_ids: tuple[str, ...]
+    teleop_sync_seconds: float
     repo_id: str
     revision: str
     private: bool
@@ -445,16 +448,69 @@ async def _to_thread_terminal(callback: Callable[..., Any], *args: Any, **kwargs
 async def _record_episode(
     manager: RecordingManager,
     *,
+    driver: MockYAMDriver,
     recording_id: str,
-) -> tuple[EpisodeResult, float, int]:
+) -> tuple[EpisodeResult, float, int, float]:
     await manager.startup()
-    await manager.start_teleop(
+    follower_writes = driver.action_counts["yam-follower"]
+    teleop = await manager.start_teleop(
         recording_id,
         "yam-leader",
         "yam-follower",
         episode_count=0,
         status="draft",
     )
+    _require(
+        teleop.teleop_active
+        and not teleop.sync_enabled
+        and not teleop.sync_in_progress,
+        "Teleoperation did not start at the observation-only boundary.",
+    )
+    await asyncio.sleep(2.0 / manager.teleop_frequency_hz)
+    _require(
+        driver.action_counts["yam-follower"] == follower_writes,
+        "Observation-only teleoperation wrote to the follower before sync was enabled.",
+    )
+
+    sync_started = time.monotonic()
+    syncing = await manager.enable_sync(
+        recording_id,
+        acknowledge_slow_sync_motion=True,
+    )
+    _require(
+        syncing.sync_in_progress and not syncing.sync_enabled,
+        "The explicit pair synchronization phase did not start.",
+    )
+    _require(
+        driver.action_counts["yam-follower"] == follower_writes,
+        "Pair synchronization wrote before its slow correction task started.",
+    )
+    sync_deadline = sync_started + manager.sync_duration_seconds + 5.0
+    while True:
+        state = await manager.state(
+            recording_id,
+            "yam-leader",
+            "yam-follower",
+            episode_count=0,
+            status="teleop",
+        )
+        if state.sync_enabled and not state.sync_in_progress:
+            break
+        _require(
+            time.monotonic() < sync_deadline,
+            "The explicit pair synchronization phase did not complete.",
+        )
+        await asyncio.sleep(0.01)
+    sync_seconds = time.monotonic() - sync_started
+    _require(
+        sync_seconds >= manager.sync_duration_seconds * 0.9,
+        "The slow pair correction completed faster than its configured safety duration.",
+    )
+    _require(
+        driver.action_counts["yam-follower"] > follower_writes,
+        "Pair synchronization completed without commanding the selected follower.",
+    )
+
     await manager.start_episode(
         recording_id,
         fps=_RECORD_FPS,
@@ -469,6 +525,17 @@ async def _record_episode(
         notes="ctrl-pi recurring smoke gate",
     )
     await manager.confirm_episode_persisted(recording_id, 1, "teleop")
+    disabled = await manager.disable_sync(recording_id)
+    _require(
+        not disabled.sync_enabled and not disabled.sync_in_progress,
+        "Pair synchronization did not disable cleanly.",
+    )
+    writes_after_disable = driver.action_counts["yam-follower"]
+    await asyncio.sleep(2.0 / manager.teleop_frequency_hz)
+    _require(
+        driver.action_counts["yam-follower"] == writes_after_disable,
+        "The follower received an action after pair synchronization was disabled.",
+    )
     await manager.stop_teleop(recording_id)
     episode_root = manager.staging_dir / result.artifact_key
     video_path = episode_root / "video.mp4"
@@ -490,7 +557,92 @@ async def _record_episode(
         samples_path.is_file() and samples_path.stat().st_size > 0,
         "The finalized episode has no sample artifact.",
     )
-    return result, wall_seconds, video_path.stat().st_size
+    return result, wall_seconds, video_path.stat().st_size, sync_seconds
+
+
+def _verify_mock_cell(driver: MockYAMDriver) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    expected = {
+        "yam-leader": (
+            "leader",
+            "right",
+            "bimanual",
+            "right",
+            "yam_teaching_handle",
+        ),
+        "yam-follower": (
+            "follower",
+            "right",
+            "bimanual",
+            "right",
+            "linear_4310",
+        ),
+        "yam-leader-left": (
+            "leader",
+            "left",
+            "bimanual",
+            "left",
+            "yam_teaching_handle",
+        ),
+        "yam-follower-left": (
+            "follower",
+            "left",
+            "bimanual",
+            "left",
+            "linear_4310",
+        ),
+    }
+    arms = driver.list_arms()
+    by_id = {arm.id: arm for arm in arms}
+    _require(
+        set(by_id) == set(expected),
+        "The mock YAM cell does not expose the four reference arms.",
+    )
+    identities: set[str] = set()
+    runtime_interfaces: set[str] = set()
+    for arm_id, metadata in expected.items():
+        arm = by_id[arm_id]
+        observed = (
+            arm.role,
+            arm.pair_id,
+            arm.group_id,
+            arm.side,
+            arm.end_effector_kind,
+        )
+        _require(
+            observed == metadata,
+            f"The mock YAM arm {arm_id} has unexpected pair/group/side metadata.",
+        )
+        _require(
+            arm.connected and arm.transport_kind == "socketcan",
+            f"The mock YAM arm {arm_id} is not a connected SocketCAN arm.",
+        )
+        _require(
+            bool(arm.stable_identity) and arm.stable_identity not in identities,
+            f"The mock YAM arm {arm_id} does not have a unique stable adapter identity.",
+        )
+        assert arm.stable_identity is not None
+        identities.add(arm.stable_identity)
+        _require(
+            arm.can is not None
+            and arm.can.interface not in runtime_interfaces
+            and arm.can.state == "active",
+            f"The mock YAM arm {arm_id} does not have a unique active runtime CAN mapping.",
+        )
+        assert arm.can is not None
+        runtime_interfaces.add(arm.can.interface)
+        if arm.role == "leader":
+            _require(
+                arm.handle is not None and arm.handle.reachable,
+                f"The mock teaching handle for {arm_id} is not reachable.",
+            )
+        else:
+            _require(
+                "NO SASH GUARD" in arm.warnings,
+                f"The mock linear follower {arm_id} did not surface its soft-limit warning.",
+            )
+    arm_ids = tuple(arm.id for arm in arms)
+    pair_ids = tuple(sorted({arm.pair_id for arm in arms if arm.pair_id is not None}))
+    return arm_ids, pair_ids
 
 
 def _safe_delete_dataset(
@@ -755,6 +907,11 @@ async def run_smoke(
         workspace_path = workspace
         recording_root = workspace / "recordings"
         driver = MockYAMDriver()
+        mock_arm_ids, mock_pair_ids = _verify_mock_cell(driver)
+        output(
+            "[smoke] topology: PASS "
+            f"arms={len(mock_arm_ids)} pairs={len(mock_pair_ids)} group=bimanual mode=mock"
+        )
         camera = MockCamera(width=96, height=64)
         rig_lease = RigLease()
         manager = RecordingManager(
@@ -793,12 +950,14 @@ async def run_smoke(
         hub_deleted = False
         try:
             with _offline_environment(fake_hub):
-                episode, wall_seconds, video_bytes = await _record_episode(
+                episode, wall_seconds, video_bytes, sync_seconds = await _record_episode(
                     manager,
+                    driver=driver,
                     recording_id=recording_id,
                 )
                 output(
                     "[smoke] record: PASS "
+                    f"sync={sync_seconds:.3f}s "
                     f"wall={wall_seconds:.3f}s duration={episode.duration_seconds:.3f}s "
                     f"samples={episode.sample_count} mp4_bytes={video_bytes}"
                 )
@@ -906,6 +1065,9 @@ async def run_smoke(
                 recording_counts = await manager.active_resource_counts()
                 evidence = SmokeEvidence(
                     hub_mode="fake" if fake_hub else "real",
+                    mock_arm_ids=mock_arm_ids,
+                    mock_pair_ids=mock_pair_ids,
+                    teleop_sync_seconds=sync_seconds,
                     repo_id=repo_id,
                     revision=upload_result.revision,
                     private=listed.private,

@@ -27,6 +27,8 @@ def test_openapi_covers_every_current_ctrl_pi_product_workflow() -> None:
         "/api/recordings/{recording_id}/state": {"get"},
         "/api/recordings/{recording_id}/teleop/start": {"post"},
         "/api/recordings/{recording_id}/teleop/stop": {"post"},
+        "/api/recordings/{recording_id}/teleop/sync/enable": {"post"},
+        "/api/recordings/{recording_id}/teleop/sync/disable": {"post"},
         "/api/recordings/{recording_id}/episodes/start": {"post"},
         "/api/recordings/{recording_id}/episodes/stop": {"post"},
         "/api/recordings/{recording_id}/upload": {"post"},

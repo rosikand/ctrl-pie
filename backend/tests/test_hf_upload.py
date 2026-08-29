@@ -542,6 +542,8 @@ async def test_real_lerobot_044_conversion_reopens_with_expected_counts(
         driver,
         MockCamera(width=96, height=64),
         recording_staging,
+        sync_duration_seconds=0.01,
+        sync_steps=5,
     )
     await manager.startup()
     await manager.start_teleop(
@@ -551,6 +553,24 @@ async def test_real_lerobot_044_conversion_reopens_with_expected_counts(
         episode_count=0,
         status="draft",
     )
+    await manager.enable_sync(
+        recording_id,
+        acknowledge_slow_sync_motion=True,
+    )
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while True:
+        state = await manager.state(
+            recording_id,
+            "yam-leader",
+            "yam-follower",
+            episode_count=0,
+            status="teleop",
+        )
+        if state.sync_enabled and not state.sync_in_progress:
+            break
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("mock pair synchronization did not finish")
+        await asyncio.sleep(0.01)
     await manager.start_episode(recording_id, fps=10, metadata={})
     await asyncio.sleep(0.13)
     _, episode = await manager.stop_episode(recording_id, success=True, notes=None)

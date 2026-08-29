@@ -1061,6 +1061,24 @@ async def test_inference_post_commit_confirmation_is_cancellation_safe(
     await recording_manager.start_teleop(
         str(recording_id), "yam-leader", "yam-follower", 0, "draft"
     )
+    recording_manager.sync_duration_seconds = 0.01
+    await recording_manager.enable_sync(
+        str(recording_id), acknowledge_slow_sync_motion=True
+    )
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while True:
+        state = await recording_manager.state(
+            str(recording_id),
+            "yam-leader",
+            "yam-follower",
+            0,
+            "teleop",
+        )
+        if state.sync_enabled and not state.sync_in_progress:
+            break
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("mock pair synchronization did not finish")
+        await asyncio.sleep(0.01)
     await recording_manager.start_episode(str(recording_id), fps=10, metadata={})
     _, result = await recording_manager.stop_episode(
         str(recording_id), success=True, notes=None

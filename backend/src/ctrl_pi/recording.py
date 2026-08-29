@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from ctrl_pi.camera import CameraFrame, MockCamera
-from ctrl_pi.drivers.yam import ArmAction, ArmTelemetry, YAMDriver
+from ctrl_pi.drivers.yam import JOINT_NAMES, ArmAction, ArmTelemetry, YAMDriver
+from ctrl_pi.motion_safety import MotionReleaseResult, release_motion_ownership
 from ctrl_pi.rig import RigLease, RigLeaseConflictError, RigLeaseToken
 
 
@@ -33,12 +34,18 @@ EPISODE_MANIFEST_VERSION = 1
 MAX_EPISODE_MANIFEST_BYTES = 64 * 1024
 _EPISODE_DIRECTORY = re.compile(r"episode_(\d{6,})\Z")
 _RECORDING_COMPONENT = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+MAX_SYNC_JOINT_STEP_RADIANS = 0.10
+MAX_SYNC_GRIPPER_STEP = 0.05
+SYNC_CONVERGENCE_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True)
 class RecordingStateSnapshot:
     recording_id: str
     teleop_active: bool
+    sync_enabled: bool
+    sync_in_progress: bool
+    joint_deltas_radians: dict[str, float]
     episode_active: bool
     current_episode_index: int | None
     episode_duration_seconds: float
@@ -402,12 +409,15 @@ class _RecordingRuntime:
     episode_count: int
     status: str
     teleop_task: asyncio.Task[None] | None = None
+    sync_task: asyncio.Task[None] | None = None
+    sync_enabled: bool = False
     episode: _ActiveEpisode | None = None
     finalizing_episode: _ActiveEpisode | None = None
     finalize_task: asyncio.Task[EpisodeResult] | None = None
     latest_leader: ArmTelemetry | None = None
     latest_follower: ArmTelemetry | None = None
     latest_action: ArmAction | None = None
+    latest_sync_target: ArmAction | None = None
     last_error: str | None = None
     rig_token: RigLeaseToken | None = None
     inference_active: bool = False
@@ -423,12 +433,20 @@ class RecordingManager:
         camera: MockCamera,
         staging_dir: Path,
         teleop_frequency_hz: float = 50.0,
+        sync_duration_seconds: float = 3.0,
+        sync_steps: int = 100,
         rig_lease: RigLease | None = None,
     ) -> None:
         self.driver = driver
         self.camera = camera
         self.staging_dir = staging_dir
         self.teleop_frequency_hz = teleop_frequency_hz
+        if not 0.01 <= sync_duration_seconds <= 10.0:
+            raise ValueError("sync duration must be between 0.01 and 10 seconds")
+        if not 2 <= sync_steps <= 500:
+            raise ValueError("sync steps must be between 2 and 500")
+        self.sync_duration_seconds = sync_duration_seconds
+        self.sync_steps = sync_steps
         self.rig_lease = rig_lease or RigLease()
         self._runtimes: dict[str, _RecordingRuntime] = {}
         self._filesystem_busy: set[str] = set()
@@ -628,28 +646,38 @@ class RecordingManager:
                 raise RecordingConflictError("teleoperation is already active")
             if runtime.inference_active:
                 raise RecordingConflictError("inference recording is already active")
-            if any(
-                other.recording_id != recording_id and self._task_active(other.teleop_task)
-                for other in self._runtimes.values()
-            ):
-                raise RecordingConflictError("another recording session owns the mock rig")
-
             leader = self.driver.get_arm(leader_robot_id)
             follower = self.driver.get_arm(follower_robot_id)
             if leader.role != "leader" or follower.role != "follower":
                 raise RecordingConflictError("teleop requires a leader arm and a follower arm")
             if leader.id == follower.id:
                 raise RecordingConflictError("leader and follower must be different arms")
+            if not leader.connected or not follower.connected:
+                raise RecordingConflictError(
+                    "teleop requires a connected leader and follower"
+                )
+            try:
+                self.driver.validate_teleop_pair(leader_robot_id, follower_robot_id)
+            except (ValueError, LookupError) as error:
+                raise RecordingConflictError(str(error)) from None
 
             try:
-                rig_token = self.rig_lease.acquire("teleop", recording_id)
+                rig_token = self.rig_lease.acquire(
+                    "teleop",
+                    recording_id,
+                    resources={leader_robot_id, follower_robot_id},
+                )
             except RigLeaseConflictError as error:
                 raise RecordingConflictError(str(error)) from None
             runtime.rig_token = rig_token
             try:
                 runtime.status = "teleop"
                 runtime.last_error = None
-                self._teleop_step(runtime)
+                runtime.sync_enabled = False
+                runtime.sync_task = None
+                # Start is observation-only. No follower command crosses this
+                # boundary until enable_sync is separately acknowledged.
+                self._observe_teleop(runtime)
                 runtime.teleop_task = asyncio.create_task(
                     self._teleop_loop(runtime),
                     name=f"ctrl-pi-teleop-{recording_id}",
@@ -661,6 +689,62 @@ class RecordingManager:
                 raise
             return self._snapshot(runtime)
 
+    async def enable_sync(
+        self,
+        recording_id: str,
+        *,
+        acknowledge_slow_sync_motion: bool = False,
+    ) -> RecordingStateSnapshot:
+        if not acknowledge_slow_sync_motion:
+            raise RecordingConflictError(
+                "Acknowledge the slow follower correction motion before enabling sync."
+            )
+        async with self._lock:
+            runtime = self._require_runtime(recording_id)
+            if not self._task_active(runtime.teleop_task):
+                raise RecordingConflictError("start teleop before enabling sync")
+            if runtime.episode is not None:
+                raise RecordingConflictError("stop the active episode before changing sync")
+            if runtime.sync_enabled:
+                return self._snapshot(runtime)
+            if self._task_active(runtime.sync_task):
+                raise RecordingConflictError("pair synchronization is already in progress")
+            if runtime.rig_token is None or not self.rig_lease.owns(
+                runtime.rig_token,
+                {runtime.leader_robot_id, runtime.follower_robot_id},
+            ):
+                raise RecordingConflictError("teleoperation no longer owns the selected pair")
+            self._observe_teleop(runtime)
+            runtime.sync_task = asyncio.create_task(
+                self._sync_pair(runtime),
+                name=f"ctrl-pi-teleop-sync-{recording_id}",
+            )
+            return self._snapshot(runtime)
+
+    async def disable_sync(self, recording_id: str) -> RecordingStateSnapshot:
+        async with self._lock:
+            runtime = self._require_runtime(recording_id)
+            if not self._task_active(runtime.teleop_task):
+                raise RecordingConflictError("teleoperation is not active")
+            task = runtime.sync_task
+            runtime.sync_task = None
+            runtime.sync_enabled = False
+            follower_id = runtime.follower_robot_id
+        if task is not None:
+            await self._cancel_task(task)
+        try:
+            self.driver.safe_idle(follower_id)
+        except Exception:
+            async with self._lock:
+                runtime.last_error = "sync stopped but follower safe-idle is uncertain"
+                runtime.status = "failed"
+            raise RecordingRuntimeError(
+                "follower safe-idle could not be confirmed"
+            ) from None
+        async with self._lock:
+            self._observe_teleop(runtime)
+            return self._snapshot(runtime)
+
     async def stop_teleop(self, recording_id: str) -> RecordingStateSnapshot:
         async with self._lock:
             runtime = self._require_runtime(recording_id)
@@ -670,15 +754,38 @@ class RecordingManager:
                 raise RecordingConflictError("teleoperation is not active")
             task = runtime.teleop_task
             runtime.teleop_task = None
+            sync_task = runtime.sync_task
+            runtime.sync_task = None
+            runtime.sync_enabled = False
             rig_token = runtime.rig_token
-            runtime.rig_token = None
-            runtime.status = "ready" if runtime.episode_count else "draft"
+            runtime.status = "failed"
+            runtime.last_error = "teleoperation stop is still settling"
 
-        try:
-            await self._cancel_task(task)
-        finally:
-            if rig_token is not None:
-                self.rig_lease.release(rig_token)
+        if sync_task is not None:
+            await self._cancel_task(sync_task)
+        await self._cancel_task(task)
+        assert rig_token is not None
+        release = self._release_pair_motion(
+            runtime,
+            rig_token,
+            fault_detail=(
+                "Follower safe-idle was not confirmed while stopping teleoperation; "
+                "commands remain fault-latched."
+            ),
+        )
+        async with self._lock:
+            if release.lease_released:
+                runtime.rig_token = None
+            if release.clean:
+                runtime.status = "ready" if runtime.episode_count else "draft"
+                runtime.last_error = None
+            else:
+                runtime.status = "failed"
+                runtime.last_error = release.detail
+        if not release.clean:
+            raise RecordingRuntimeError(
+                "follower safe-idle could not be confirmed; teleoperation failed"
+            )
         async with self._lock:
             return self._snapshot(runtime)
 
@@ -695,6 +802,10 @@ class RecordingManager:
             runtime = self._require_runtime(recording_id)
             if not self._task_active(runtime.teleop_task):
                 raise RecordingConflictError("start teleop before recording an episode")
+            if not runtime.sync_enabled or self._task_active(runtime.sync_task):
+                raise RecordingConflictError(
+                    "enable and finish pair synchronization before recording an episode"
+                )
             if runtime.episode is not None:
                 raise RecordingConflictError("an episode is already recording")
             if runtime.finalizing_episode is not None:
@@ -751,7 +862,7 @@ class RecordingManager:
                 raise RecordingConflictError("the previous episode is still finalizing")
             if recording_id in self._filesystem_busy:
                 raise RecordingConflictError("recording artifacts are being reconciled")
-            lease = self.rig_lease.current()
+            lease = self.rig_lease.current(follower_robot_id)
             if (
                 lease is None
                 or lease.owner != "inference"
@@ -797,7 +908,7 @@ class RecordingManager:
             episode = runtime.episode
             if not runtime.inference_active or episode is None:
                 raise RecordingRuntimeError("inference recording is not active")
-            lease = self.rig_lease.current()
+            lease = self.rig_lease.current(runtime.follower_robot_id)
             if (
                 lease is None
                 or lease.owner != "inference"
@@ -927,7 +1038,10 @@ class RecordingManager:
             teleop_still_owns_rig = (
                 self._task_active(runtime.teleop_task)
                 and runtime.rig_token is not None
-                and self.rig_lease.current() == runtime.rig_token
+                and self.rig_lease.owns(
+                    runtime.rig_token,
+                    {runtime.leader_robot_id, runtime.follower_robot_id},
+                )
                 and runtime.last_error is None
                 and not self._shutting_down
             )
@@ -958,7 +1072,10 @@ class RecordingManager:
             teleop_still_owns_rig = (
                 self._task_active(runtime.teleop_task)
                 and runtime.rig_token is not None
-                and self.rig_lease.current() == runtime.rig_token
+                and self.rig_lease.owns(
+                    runtime.rig_token,
+                    {runtime.leader_robot_id, runtime.follower_robot_id},
+                )
                 and runtime.last_error is None
                 and not self._shutting_down
             )
@@ -987,6 +1104,9 @@ class RecordingManager:
             runtime = self._require_runtime(recording_id)
             task = runtime.teleop_task
             runtime.teleop_task = None
+            sync_task = runtime.sync_task
+            runtime.sync_task = None
+            runtime.sync_enabled = False
             episode = runtime.episode
             runtime.episode = None
             finalizing_episode = runtime.finalizing_episode
@@ -994,17 +1114,28 @@ class RecordingManager:
             finalize_task = runtime.finalize_task
             runtime.finalize_task = None
             rig_token = runtime.rig_token
-            runtime.rig_token = None
             runtime.inference_active = False
             runtime.inference_owner_id = None
             runtime.status = "failed"
             runtime.last_error = "episode metadata could not be persisted"
 
-        try:
-            await self._cancel_task(task)
-        finally:
-            if rig_token is not None:
-                self.rig_lease.release(rig_token)
+        if sync_task is not None:
+            await self._cancel_task(sync_task)
+        await self._cancel_task(task)
+        if rig_token is not None:
+            release = self._release_pair_motion(
+                runtime,
+                rig_token,
+                fault_detail=(
+                    "Follower safe-idle was not confirmed during recording persistence "
+                    "compensation; commands remain fault-latched."
+                ),
+            )
+            async with self._lock:
+                if release.lease_released:
+                    runtime.rig_token = None
+                if not release.clean:
+                    runtime.last_error = release.detail
         if episode is not None:
             await self._run_blocking(self._abort_episode, episode)
             self._remove_failed_episode_files(episode)
@@ -1025,6 +1156,11 @@ class RecordingManager:
                 for runtime in self._runtimes.values()
                 if self._task_active(runtime.teleop_task)
             ]
+            sync_tasks = [
+                runtime.sync_task
+                for runtime in self._runtimes.values()
+                if self._task_active(runtime.sync_task)
+            ]
             episodes = [
                 runtime.episode
                 for runtime in self._runtimes.values()
@@ -1038,23 +1174,37 @@ class RecordingManager:
             ]
             for runtime in self._runtimes.values():
                 runtime.teleop_task = None
+                runtime.sync_task = None
+                runtime.sync_enabled = False
                 runtime.episode = None
                 runtime.inference_active = False
                 runtime.inference_owner_id = None
-            rig_tokens = [
-                runtime.rig_token
+            rig_owners = [
+                (runtime, runtime.rig_token)
                 for runtime in self._runtimes.values()
                 if runtime.rig_token is not None
             ]
-            for runtime in self._runtimes.values():
-                runtime.rig_token = None
 
-        try:
-            for task in tasks:
-                await self._cancel_task(task)
-        finally:
-            for rig_token in rig_tokens:
-                self.rig_lease.release(rig_token)
+        for sync_task in sync_tasks:
+            await self._cancel_task(sync_task)
+        for task in tasks:
+            await self._cancel_task(task)
+        for runtime, rig_token in rig_owners:
+            assert rig_token is not None
+            release = self._release_pair_motion(
+                runtime,
+                rig_token,
+                fault_detail=(
+                    "Follower safe-idle was not confirmed during recording service "
+                    "shutdown; commands remain fault-latched."
+                ),
+            )
+            async with self._lock:
+                if release.lease_released:
+                    runtime.rig_token = None
+                if not release.clean:
+                    runtime.status = "failed"
+                    runtime.last_error = release.detail
         for episode in episodes:
             await self._run_blocking(self._abort_episode, episode)
             self._remove_failed_episode_files(episode)
@@ -1079,7 +1229,11 @@ class RecordingManager:
     async def active_resource_counts(self) -> tuple[int, int]:
         async with self._lock:
             return (
-                sum(self._task_active(runtime.teleop_task) for runtime in self._runtimes.values()),
+                sum(
+                    self._task_active(runtime.teleop_task)
+                    + self._task_active(runtime.sync_task)
+                    for runtime in self._runtimes.values()
+                ),
                 sum(
                     runtime.episode is not None or runtime.finalizing_episode is not None
                     for runtime in self._runtimes.values()
@@ -1092,7 +1246,10 @@ class RecordingManager:
             while True:
                 cycle_started = time.monotonic()
                 async with self._lock:
-                    self._teleop_step(runtime)
+                    if runtime.sync_enabled and not self._task_active(runtime.sync_task):
+                        self._teleop_step(runtime)
+                    else:
+                        self._observe_teleop(runtime)
                     episode = runtime.episode
                     if episode is not None and (
                         cycle_started >= episode.next_sample_monotonic
@@ -1104,27 +1261,211 @@ class RecordingManager:
             raise
         except Exception:
             rig_token: RigLeaseToken | None = None
+            sync_task: asyncio.Task[None] | None = None
             async with self._lock:
                 runtime.last_error = "teleoperation stopped safely after a runtime failure"
                 runtime.status = "failed"
                 episode = runtime.episode
                 runtime.episode = None
                 runtime.teleop_task = None
+                sync_task = runtime.sync_task
+                runtime.sync_task = None
+                runtime.sync_enabled = False
                 rig_token = runtime.rig_token
-                runtime.rig_token = None
+            if sync_task is not None and sync_task is not asyncio.current_task():
+                await self._cancel_task(sync_task)
+            release: MotionReleaseResult | None = None
             if rig_token is not None:
-                self.rig_lease.release(rig_token)
+                release = self._release_pair_motion(
+                    runtime,
+                    rig_token,
+                    fault_detail=(
+                        "Follower safe-idle was not confirmed after a teleoperation "
+                        "runtime failure; commands remain fault-latched."
+                    ),
+                )
+                async with self._lock:
+                    if release.lease_released:
+                        runtime.rig_token = None
+                    if not release.clean:
+                        runtime.last_error = release.detail
             if episode is not None:
                 await self._run_blocking(self._abort_episode, episode)
                 await self._run_blocking(self._remove_failed_episode_files, episode)
 
+    async def _sync_pair(self, runtime: _RecordingRuntime) -> None:
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        try:
+            async with self._lock:
+                follower = self.driver.get_arm(runtime.follower_robot_id)
+                leader = self.driver.get_arm(runtime.leader_robot_id)
+                initial_target = self.driver.prepare_teleop_action(
+                    runtime.leader_robot_id,
+                    runtime.follower_robot_id,
+                    ArmAction.from_telemetry(leader),
+                )
+                current_action = ArmAction.from_telemetry(follower)
+                runtime.latest_leader = leader
+                runtime.latest_follower = follower
+                runtime.latest_action = current_action
+                runtime.latest_sync_target = initial_target
+
+            interval = self.sync_duration_seconds / self.sync_steps
+            for step in range(1, self.sync_steps + 1):
+                await asyncio.sleep(interval)
+                async with self._lock:
+                    if runtime.sync_task is not current_task:
+                        raise asyncio.CancelledError
+                    if not self._task_active(runtime.teleop_task):
+                        raise RecordingRuntimeError("teleoperation stopped during sync")
+                    if runtime.rig_token is None or not self.rig_lease.owns(
+                        runtime.rig_token,
+                        {runtime.leader_robot_id, runtime.follower_robot_id},
+                    ):
+                        raise RecordingRuntimeError(
+                            "teleoperation lost pair ownership during sync"
+                        )
+                    # Refresh the gravity-comp leader on every correction step.
+                    # Dividing by the remaining samples reaches a stationary
+                    # target in ~3 s, while the explicit per-step caps prevent
+                    # a moving leader from creating a stale-endpoint jump.
+                    leader = self.driver.get_arm(runtime.leader_robot_id)
+                    target = self.driver.prepare_teleop_action(
+                        runtime.leader_robot_id,
+                        runtime.follower_robot_id,
+                        ArmAction.from_telemetry(leader),
+                    )
+                    remaining = self.sync_steps - step + 1
+                    action = self._bounded_sync_action(
+                        current_action, target, remaining_steps=remaining
+                    )
+                    applied = self.driver.apply_action(
+                        runtime.follower_robot_id, action
+                    )
+                    current_action = action
+                    runtime.latest_leader = leader
+                    runtime.latest_action = action
+                    runtime.latest_sync_target = target
+                    runtime.latest_follower = applied
+            if not self._actions_close(current_action, target):
+                raise RecordingRuntimeError(
+                    "the moving leader did not converge within the bounded sync correction"
+                )
+            async with self._lock:
+                if runtime.sync_task is current_task:
+                    runtime.sync_task = None
+                    runtime.sync_enabled = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            teleop_task: asyncio.Task[None] | None = None
+            rig_token: RigLeaseToken | None = None
+            async with self._lock:
+                if runtime.sync_task is current_task:
+                    runtime.sync_task = None
+                runtime.sync_enabled = False
+                runtime.last_error = "pair synchronization failed safely"
+                runtime.status = "failed"
+                teleop_task = runtime.teleop_task
+                runtime.teleop_task = None
+                rig_token = runtime.rig_token
+            if teleop_task is not None and teleop_task is not current_task:
+                await self._cancel_task(teleop_task)
+            if rig_token is not None:
+                release = self._release_pair_motion(
+                    runtime,
+                    rig_token,
+                    fault_detail=(
+                        "Follower safe-idle was not confirmed after pair synchronization "
+                        "failed; commands remain fault-latched."
+                    ),
+                )
+                async with self._lock:
+                    if release.lease_released:
+                        runtime.rig_token = None
+                    if not release.clean:
+                        runtime.last_error = release.detail
+
+    @staticmethod
+    def _bounded_sync_action(
+        current: ArmAction, target: ArmAction, *, remaining_steps: int
+    ) -> ArmAction:
+        if remaining_steps < 1:
+            raise ValueError("remaining_steps must be positive")
+
+        def bounded_delta(delta: float, maximum: float) -> float:
+            return max(-maximum, min(maximum, delta / remaining_steps))
+
+        return ArmAction(
+            timestamp=datetime.now(UTC),
+            joint_positions_radians={
+                name: current.joint_positions_radians[name]
+                + bounded_delta(
+                    target.joint_positions_radians[name]
+                    - current.joint_positions_radians[name],
+                    MAX_SYNC_JOINT_STEP_RADIANS,
+                )
+                for name in JOINT_NAMES
+            },
+            gripper_position=current.gripper_position
+            + bounded_delta(
+                target.gripper_position - current.gripper_position,
+                MAX_SYNC_GRIPPER_STEP,
+            ),
+        )
+
+    @staticmethod
+    def _actions_close(left: ArmAction, right: ArmAction) -> bool:
+        return all(
+            abs(left.joint_positions_radians[name] - right.joint_positions_radians[name])
+            <= SYNC_CONVERGENCE_TOLERANCE
+            for name in JOINT_NAMES
+        ) and (
+            abs(left.gripper_position - right.gripper_position)
+            <= SYNC_CONVERGENCE_TOLERANCE
+        )
+
+    def _observe_teleop(self, runtime: _RecordingRuntime) -> None:
+        leader = self.driver.get_arm(runtime.leader_robot_id)
+        follower = self.driver.get_arm(runtime.follower_robot_id)
+        target = self.driver.prepare_teleop_action(
+            runtime.leader_robot_id,
+            runtime.follower_robot_id,
+            ArmAction.from_telemetry(leader),
+        )
+        runtime.latest_leader = leader
+        runtime.latest_follower = follower
+        runtime.latest_action = ArmAction.from_telemetry(follower)
+        runtime.latest_sync_target = target
+
     def _teleop_step(self, runtime: _RecordingRuntime) -> None:
         leader = self.driver.get_arm(runtime.leader_robot_id)
-        action = ArmAction.from_telemetry(leader)
+        action = self.driver.prepare_teleop_action(
+            runtime.leader_robot_id,
+            runtime.follower_robot_id,
+            ArmAction.from_telemetry(leader),
+        )
         follower = self.driver.apply_action(runtime.follower_robot_id, action)
         runtime.latest_leader = leader
         runtime.latest_action = action
+        runtime.latest_sync_target = action
         runtime.latest_follower = follower
+
+    def _release_pair_motion(
+        self,
+        runtime: _RecordingRuntime,
+        token: RigLeaseToken,
+        *,
+        fault_detail: str,
+    ) -> MotionReleaseResult:
+        return release_motion_ownership(
+            driver=self.driver,
+            arm_ids=[runtime.follower_robot_id],
+            rig_lease=self.rig_lease,
+            token=token,
+            fault_detail=fault_detail,
+        )
 
     def _capture_sample(
         self, runtime: _RecordingRuntime, episode: _ActiveEpisode
@@ -1569,9 +1910,29 @@ class RecordingManager:
     @staticmethod
     def _snapshot(runtime: _RecordingRuntime) -> RecordingStateSnapshot:
         episode = runtime.episode or runtime.finalizing_episode
+        follower_positions = (
+            {}
+            if runtime.latest_follower is None
+            else {
+                joint.name: joint.position_radians
+                for joint in runtime.latest_follower.joints
+            }
+        )
+        target_positions = (
+            {}
+            if runtime.latest_sync_target is None
+            else runtime.latest_sync_target.joint_positions_radians
+        )
         return RecordingStateSnapshot(
             recording_id=runtime.recording_id,
             teleop_active=RecordingManager._task_active(runtime.teleop_task),
+            sync_enabled=runtime.sync_enabled,
+            sync_in_progress=RecordingManager._task_active(runtime.sync_task),
+            joint_deltas_radians={
+                name: target_positions[name] - follower_positions[name]
+                for name in JOINT_NAMES
+                if name in target_positions and name in follower_positions
+            },
             episode_active=episode is not None,
             current_episode_index=None if episode is None else episode.index,
             episode_duration_seconds=(

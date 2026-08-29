@@ -60,7 +60,7 @@ def jog_arm(
     rig_lease: RigLease = Depends(get_rig_lease),
 ) -> ArmTelemetry:
     try:
-        with rig_lease.hold("manual", f"jog:{arm_id}"):
+        with rig_lease.hold("manual", f"jog:{arm_id}", resources={arm_id}):
             return driver.jog(arm_id, command)
     except RigLeaseConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from None

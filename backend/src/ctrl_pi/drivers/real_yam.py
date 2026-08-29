@@ -1324,6 +1324,14 @@ class RealYAMDriver(YAMDriver):
             self._latch_fault_state_locked(detail)
         self._disconnect_devices()
 
+    def latch_fault(self, arm_ids: list[str], detail: str) -> None:
+        del arm_ids
+        self._fault(detail)
+        if any(arm.connected for arm in self.list_arms()):
+            raise YAMDriverUnavailableError(
+                "The legacy YAM command path could not be fault-latched safely."
+            )
+
     def _disconnect_devices(self) -> None:
         """Close both buses while acquiring device locks in one fixed order."""
 
@@ -1509,4 +1517,12 @@ def create_yam_driver(
         from ctrl_pi.drivers.mock_yam import MockYAMDriver
 
         return MockYAMDriver()
-    return RealYAMDriver.from_app_config(config, vendor_factory=vendor_factory)
+    # Hardware mode is always cell-capable.  The original adapter remains the
+    # compatibility delegate when the V1.1 environment selects a complete
+    # serial-GELLO + CAN-follower setup; newly persisted all-CAN cells are
+    # applied in place by YAMSetupManager without restarting FastAPI.
+    from ctrl_pi.drivers.yam_cell import YAMCellDriver
+
+    return YAMCellDriver(
+        RealYAMDriver.from_app_config(config, vendor_factory=vendor_factory)
+    )

@@ -454,14 +454,6 @@ class InferenceSessionManager:
                 raise InferenceSessionConflictError(
                     "An inference session is already active for this deployment."
                 )
-            if any(
-                item.status in {"starting", "running", "stopping"}
-                for key, item in self._sessions.items()
-                if key != deployment_id
-            ):
-                raise InferenceSessionConflictError(
-                    "Another inference session already controls the arm rig."
-                )
             live = _LiveSession(
                 deployment_id=deployment_id,
                 session_id=uuid.uuid4(),
@@ -1208,23 +1200,32 @@ class InferenceSessionManager:
                     "Only a running deployment can start robot inference."
                 )
             robot = db.scalar(select(Robot).where(Robot.driver_id == arm.id))
+            arm_config = {
+                "pair_id": arm.pair_id,
+                "group_id": arm.group_id,
+                "side": arm.side,
+                "transport_kind": arm.transport_kind,
+                "stable_identity": arm.stable_identity,
+                "end_effector_kind": arm.end_effector_kind,
+            }
             if robot is None:
                 robot = Robot(
                     driver_id=arm.id,
                     name=arm.name,
                     role=arm.role,
                     driver=arm.driver,
-                    can_interface=arm.can.interface,
+                    can_interface=None,
                     enabled=arm.connected,
-                    config={},
+                    config=arm_config,
                 )
                 db.add(robot)
                 db.flush()
             else:
                 robot.role = arm.role
                 robot.driver = arm.driver
-                robot.can_interface = arm.can.interface
+                robot.can_interface = None
                 robot.enabled = arm.connected
+                robot.config = arm_config
             recording_id: uuid.UUID | None = None
             if options.record_session:
                 recording = Recording(

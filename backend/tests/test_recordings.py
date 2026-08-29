@@ -54,6 +54,35 @@ class _FailingActionDriver(MockYAMDriver):
         return super().apply_action(arm_id, action)
 
 
+class _CapturingActionDriver(MockYAMDriver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.actions = []
+
+    def apply_action(self, arm_id, action):
+        self.actions.append(action)
+        return super().apply_action(arm_id, action)
+
+    def move_leader_during_sync(self, *, joint_delta: float) -> None:
+        with self._lock:
+            self._arms["yam-leader"].joints["shoulder_yaw"] += joint_delta
+
+
+class _UnsafeReleaseDriver(_FailingActionDriver):
+    def __init__(self, fail_on_call: int, *, latch_fails: bool = False) -> None:
+        super().__init__(fail_on_call)
+        self.latch_fails = latch_fails
+
+    def safe_idle(self, arm_id: str):
+        del arm_id
+        raise RuntimeError("injected safe-idle failure")
+
+    def latch_fault(self, arm_ids: list[str], detail: str) -> None:
+        if self.latch_fails:
+            raise RuntimeError("injected fault-latch failure")
+        super().latch_fault(arm_ids, detail)
+
+
 class _FakeVideoWriter:
     def __init__(self, output_path: Path, width: int, height: int, fps: int) -> None:
         del width, height, fps
@@ -116,6 +145,40 @@ def _create_recording(client: TestClient) -> dict[str, object]:
     return response.json()
 
 
+async def _enable_manager_sync(
+    manager: RecordingManager, recording_id: str = "session"
+) -> None:
+    manager.sync_duration_seconds = 0.01
+    started = await manager.enable_sync(
+        recording_id, acknowledge_slow_sync_motion=True
+    )
+    assert started.sync_in_progress is True
+    for _ in range(100):
+        await asyncio.sleep(0.002)
+        runtime = manager._runtimes[recording_id]
+        if runtime.sync_enabled:
+            return
+    raise AssertionError("mock pair synchronization did not finish")
+
+
+def _enable_api_sync(
+    client: TestClient, manager: RecordingManager, recording_id: str
+) -> None:
+    manager.sync_duration_seconds = 0.01
+    response = client.post(
+        f"/api/recordings/{recording_id}/teleop/sync/enable",
+        json={"acknowledge_slow_sync_motion": True},
+    )
+    assert response.status_code == 200, response.text
+    for _ in range(100):
+        state = client.get(f"/api/recordings/{recording_id}/state")
+        assert state.status_code == 200, state.text
+        if state.json()["sync_enabled"]:
+            return
+        time.sleep(0.002)
+    raise AssertionError("mock pair synchronization did not finish")
+
+
 def test_create_lists_recording_and_maps_driver_ids_to_robot_foreign_keys(
     recording_app,
 ) -> None:
@@ -157,12 +220,28 @@ def test_recording_lifecycle_writes_atomic_mp4_and_synchronized_samples(
         started = client.post(f"/api/recordings/{recording_id}/teleop/start")
         assert started.status_code == 200
         assert started.json()["teleop_active"] is True
+        assert started.json()["sync_enabled"] is False
+        assert started.json()["sync_in_progress"] is False
+        assert manager.driver.action_counts["yam-follower"] == 0
+        unsynchronized_episode = client.post(
+            f"/api/recordings/{recording_id}/episodes/start",
+            json={},
+        )
+        assert unsynchronized_episode.status_code == 409
+        assert "enable and finish" in unsynchronized_episode.json()["detail"]
+        unacknowledged_sync = client.post(
+            f"/api/recordings/{recording_id}/teleop/sync/enable",
+            json={"acknowledge_slow_sync_motion": False},
+        )
+        assert unacknowledged_sync.status_code == 409
+        assert manager.driver.action_counts["yam-follower"] == 0
         blocked_jog = client.post(
             "/api/arms/yam-follower/jog",
             json={"kind": "joint", "axis": "shoulder_yaw", "delta": 0.1},
         )
         assert blocked_jog.status_code == 409
         assert "controlled by teleop" in blocked_jog.json()["detail"]
+        _enable_api_sync(client, manager, recording_id)
 
         episode = client.post(
             f"/api/recordings/{recording_id}/episodes/start",
@@ -245,6 +324,7 @@ def test_app_shutdown_stops_active_teleop_and_ffmpeg(recording_app) -> None:
     with TestClient(app) as client:
         recording_id = _create_recording(client)["id"]
         assert client.post(f"/api/recordings/{recording_id}/teleop/start").status_code == 200
+        _enable_api_sync(client, manager, recording_id)
         assert client.post(f"/api/recordings/{recording_id}/episodes/start", json={}).status_code == 200
         time.sleep(0.05)
 
@@ -264,18 +344,252 @@ async def test_teleop_releases_rig_when_the_first_driver_action_fails(
         tmp_path / "staging",
     )
 
-    with pytest.raises(RuntimeError, match="mock action failure"):
-        await manager.start_teleop(
-            "session",
-            "yam-leader",
-            "yam-follower",
-            episode_count=0,
-            status="draft",
-        )
+    await manager.start_teleop(
+        "session",
+        "yam-leader",
+        "yam-follower",
+        episode_count=0,
+        status="draft",
+    )
+    assert driver.action_calls == 0
+    manager.sync_duration_seconds = 0.01
+    await manager.enable_sync("session", acknowledge_slow_sync_motion=True)
+    for _ in range(50):
+        if manager.rig_lease.current() is None:
+            break
+        await asyncio.sleep(0.01)
 
+    assert driver.action_calls == 1
     assert await manager.active_resource_counts() == (0, 0)
     assert manager.rig_lease.current() is None
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sync_failure_fault_latches_before_pair_lease_release(
+    tmp_path: Path,
+) -> None:
+    driver = _UnsafeReleaseDriver(fail_on_call=1)
+    manager = RecordingManager(
+        driver,
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+        sync_duration_seconds=0.02,
+        sync_steps=2,
+    )
+    await manager.start_teleop(
+        "sync-fault", "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.enable_sync(
+        "sync-fault", acknowledge_slow_sync_motion=True
+    )
+
+    for _ in range(100):
+        if manager.rig_lease.current("yam-follower") is None:
+            break
+        await asyncio.sleep(0.002)
+
+    state = await manager.state(
+        "sync-fault", "yam-leader", "yam-follower", 0, "failed"
+    )
+    assert state.status == "failed"
+    assert manager.rig_lease.current("yam-follower") is None
+    follower = driver.get_arm("yam-follower")
+    assert follower.control_state == "error" and not follower.connected
+
+
+@pytest.mark.asyncio
+async def test_runtime_failure_retains_pair_lease_if_fault_latch_is_uncertain(
+    tmp_path: Path,
+) -> None:
+    driver = _UnsafeReleaseDriver(fail_on_call=3, latch_fails=True)
+    manager = RecordingManager(
+        driver,
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+        teleop_frequency_hz=200.0,
+        sync_duration_seconds=0.02,
+        sync_steps=2,
+    )
+    await manager.start_teleop(
+        "runtime-fault", "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.enable_sync(
+        "runtime-fault", acknowledge_slow_sync_motion=True
+    )
+
+    for _ in range(200):
+        runtime = manager._runtimes["runtime-fault"]
+        if (
+            runtime.status == "failed"
+            and runtime.teleop_task is None
+            and "ownership remains blocked" in (runtime.last_error or "")
+        ):
+            break
+        await asyncio.sleep(0.002)
+
+    token = manager.rig_lease.current("yam-follower")
+    assert token is not None and token.owner == "teleop"
+    assert "ownership remains blocked" in (
+        manager._runtimes["runtime-fault"].last_error or ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_persistence_compensation_and_shutdown_fault_latch_before_release(
+    tmp_path: Path,
+) -> None:
+    for recording_id, operation in (
+        ("persistence", "persistence"),
+        ("shutdown", "shutdown"),
+    ):
+        driver = _UnsafeReleaseDriver(fail_on_call=10_000)
+        manager = RecordingManager(
+            driver,
+            MockCamera(width=96, height=64),
+            tmp_path / recording_id,
+        )
+        await manager.start_teleop(
+            recording_id, "yam-leader", "yam-follower", 0, "draft"
+        )
+        if operation == "persistence":
+            await manager.compensate_persistence_failure(recording_id)
+        else:
+            await manager.shutdown()
+
+        assert manager.rig_lease.current("yam-follower") is None
+        follower = driver.get_arm("yam-follower")
+        assert follower.control_state == "error" and not follower.connected
+        assert manager._runtimes[recording_id].status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_teleop_start_is_observation_only_then_sync_is_explicit_and_disable_is_clean(
+    tmp_path: Path,
+) -> None:
+    driver = MockYAMDriver()
+    manager = RecordingManager(
+        driver,
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+        teleop_frequency_hz=100.0,
+        sync_duration_seconds=0.03,
+        sync_steps=6,
+    )
+
+    started = await manager.start_teleop(
+        "session", "yam-leader", "yam-follower", 0, "draft"
+    )
+    assert started.sync_enabled is False
+    assert started.sync_in_progress is False
+    assert started.joint_deltas_radians
+    assert driver.action_counts["yam-follower"] == 0
+    await asyncio.sleep(0.03)
+    assert driver.action_counts["yam-follower"] == 0
+
+    with pytest.raises(RecordingConflictError, match="Acknowledge"):
+        await manager.enable_sync("session")
+    began = time.monotonic()
+    syncing = await manager.enable_sync(
+        "session", acknowledge_slow_sync_motion=True
+    )
+    assert syncing.sync_in_progress is True
+    assert driver.action_counts["yam-follower"] == 0
+    for _ in range(100):
+        if manager._runtimes["session"].sync_enabled:
+            break
+        await asyncio.sleep(0.002)
+    assert manager._runtimes["session"].sync_enabled is True
+    assert time.monotonic() - began >= 0.025
+    assert driver.action_counts["yam-follower"] >= 6
+
+    disabled = await manager.disable_sync("session")
+    assert disabled.sync_enabled is False
+    stopped_at = driver.action_counts["yam-follower"]
+    await asyncio.sleep(0.03)
+    assert driver.action_counts["yam-follower"] == stopped_at
+    await manager.stop_teleop("session")
+
+
+@pytest.mark.asyncio
+async def test_slow_sync_refreshes_a_moving_leader_and_bounds_every_step(
+    tmp_path: Path,
+) -> None:
+    driver = _CapturingActionDriver()
+    manager = RecordingManager(
+        driver,
+        MockCamera(width=96, height=64),
+        tmp_path / "staging",
+        teleop_frequency_hz=100.0,
+        sync_duration_seconds=0.10,
+        sync_steps=10,
+    )
+    initial = driver.get_arm("yam-follower")
+    initial_joint = {
+        joint.name: joint.position_radians for joint in initial.joints
+    }["shoulder_yaw"]
+    await manager.start_teleop(
+        "moving", "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.enable_sync("moving", acknowledge_slow_sync_motion=True)
+    await asyncio.sleep(0.035)
+    driver.move_leader_during_sync(joint_delta=0.30)
+
+    for _ in range(200):
+        if manager._runtimes["moving"].sync_enabled:
+            break
+        await asyncio.sleep(0.002)
+    else:
+        raise AssertionError("moving leader did not converge during bounded sync")
+
+    leader = driver.get_arm("yam-leader")
+    follower = driver.get_arm("yam-follower")
+    leader_joint = {
+        joint.name: joint.position_radians for joint in leader.joints
+    }["shoulder_yaw"]
+    follower_joint = {
+        joint.name: joint.position_radians for joint in follower.joints
+    }["shoulder_yaw"]
+    assert follower_joint == pytest.approx(leader_joint)
+    values = [initial_joint] + [
+        action.joint_positions_radians["shoulder_yaw"]
+        for action in driver.actions[:10]
+    ]
+    assert all(
+        abs(current - previous) <= 0.10 + 1e-9
+        for previous, current in zip(values[:-1], values[1:], strict=True)
+    )
+    await manager.stop_teleop("moving")
+
+
+@pytest.mark.asyncio
+async def test_cross_pair_route_is_rejected_before_lease_or_write_and_pairs_are_independent(
+    tmp_path: Path,
+) -> None:
+    driver = MockYAMDriver()
+    manager = RecordingManager(
+        driver, MockCamera(width=96, height=64), tmp_path / "staging"
+    )
+
+    with pytest.raises(RecordingConflictError, match="same pair"):
+        await manager.start_teleop(
+            "bad", "yam-leader", "yam-follower-left", 0, "draft"
+        )
+    assert manager.rig_lease.active() == ()
+    assert driver.action_counts["yam-follower-left"] == 0
+
+    await manager.start_teleop(
+        "right", "yam-leader", "yam-follower", 0, "draft"
+    )
+    await manager.start_teleop(
+        "left", "yam-leader-left", "yam-follower-left", 0, "draft"
+    )
+    assert len(manager.rig_lease.active()) == 2
+    await manager.stop_teleop("right")
+    assert len(manager.rig_lease.active()) == 1
+    assert manager.rig_lease.current("yam-follower-left") is not None
+    await manager.stop_teleop("left")
+    assert manager.rig_lease.active() == ()
 
 
 @pytest.mark.asyncio
@@ -296,6 +610,9 @@ async def test_teleop_releases_rig_when_the_background_loop_fails(
         episode_count=0,
         status="draft",
     )
+    assert driver.action_calls == 0
+    manager.sync_duration_seconds = 0.01
+    await manager.enable_sync("session", acknowledge_slow_sync_motion=True)
 
     for _ in range(50):
         if manager.rig_lease.current() is None:
@@ -342,6 +659,7 @@ async def test_episode_finalization_keeps_the_global_rig_locked(
         episode_count=0,
         status="draft",
     )
+    await _enable_manager_sync(manager)
     await manager.start_episode("session", fps=10, metadata={})
 
     entered = threading.Event()
@@ -392,6 +710,7 @@ async def test_teleop_failure_during_finalization_is_not_restored_to_active(
         episode_count=0,
         status="draft",
     )
+    await _enable_manager_sync(manager)
     await manager.start_episode("session", fps=10, metadata={})
 
     entered = threading.Event()
@@ -443,6 +762,7 @@ async def test_persistence_confirmation_preserves_a_late_teleop_failure(
         episode_count=0,
         status="draft",
     )
+    await _enable_manager_sync(manager)
     await manager.start_episode("session", fps=10, metadata={})
     stopped, _ = await manager.stop_episode("session", success=True, notes=None)
     assert stopped.status == "teleop"
@@ -486,6 +806,7 @@ async def test_shutdown_waits_for_in_flight_episode_finalizer(
         episode_count=0,
         status="draft",
     )
+    await _enable_manager_sync(manager)
     await manager.start_episode("session", fps=10, metadata={})
 
     entered = threading.Event()
@@ -531,6 +852,15 @@ def test_recording_create_validates_arm_roles_and_reserved_metadata(recording_ap
                 "follower_robot_id": "yam-leader",
             },
         )
+        cross_pair = client.post(
+            "/api/recordings",
+            json={
+                "name": "Crossed pairs",
+                "task": "No-op",
+                "leader_robot_id": "yam-leader",
+                "follower_robot_id": "yam-follower-left",
+            },
+        )
         reserved_metadata = client.post(
             "/api/recordings",
             json={
@@ -543,6 +873,8 @@ def test_recording_create_validates_arm_roles_and_reserved_metadata(recording_ap
         )
 
     assert reversed_pair.status_code == 422
+    assert cross_pair.status_code == 422
+    assert "same pair" in cross_pair.json()["detail"]
     assert reserved_metadata.status_code == 422
 
 
@@ -622,6 +954,7 @@ def test_episode_start_commit_failure_stops_writer_teleop_and_cleans_partials(
     with TestClient(app) as client:
         recording_id = _create_recording(client)["id"]
         assert client.post(f"/api/recordings/{recording_id}/teleop/start").status_code == 200
+        _enable_api_sync(client, manager, recording_id)
         app.dependency_overrides[get_db] = _commit_failing_database(engine, secret)
         response = client.post(
             f"/api/recordings/{recording_id}/episodes/start", json={}
@@ -644,6 +977,7 @@ def test_finalized_manifest_recovers_failed_db_commit_exactly_once_after_restart
     with TestClient(app) as client:
         recording_id = _create_recording(client)["id"]
         assert client.post(f"/api/recordings/{recording_id}/teleop/start").status_code == 200
+        _enable_api_sync(client, manager, recording_id)
         assert client.post(
             f"/api/recordings/{recording_id}/episodes/start", json={}
         ).status_code == 200
@@ -700,6 +1034,7 @@ async def test_rename_failure_removes_mixed_final_and_partial_artifacts(
     await manager.start_teleop(
         "session", "yam-leader", "yam-follower", 0, "draft"
     )
+    await _enable_manager_sync(manager)
     await manager.start_episode("session", fps=10, metadata={})
     original_replace = Path.replace
 
@@ -732,6 +1067,7 @@ async def test_restart_removes_partial_and_mixed_orphans_but_keeps_manifest(
     await manager.start_teleop(
         "valid", "yam-leader", "yam-follower", 0, "draft"
     )
+    await _enable_manager_sync(manager, "valid")
     await manager.start_episode("valid", fps=10, metadata={})
     _, result = await manager.stop_episode("valid", success=True, notes=None)
     await manager.confirm_episode_persisted("valid", 1, "teleop")
@@ -792,6 +1128,7 @@ async def test_episode_directory_fsyncs_cover_creation_and_manifest_publication(
     await manager.start_teleop(
         "session", "yam-leader", "yam-follower", 0, "draft"
     )
+    await _enable_manager_sync(manager)
     await manager.start_episode("session", fps=10, metadata={})
     assert events == ["fsync-dir:.", "fsync-dir:session"]
 
@@ -828,6 +1165,7 @@ async def test_fresh_database_preserves_manifest_and_unrelated_shared_root_conte
     await manager.start_teleop(
         "preserved", "yam-leader", "yam-follower", 0, "draft"
     )
+    await _enable_manager_sync(manager, "preserved")
     await manager.start_episode("preserved", fps=10, metadata={})
     _, result = await manager.stop_episode("preserved", success=True, notes=None)
     await manager.confirm_episode_persisted("preserved", 1, "teleop")
@@ -913,6 +1251,7 @@ async def test_cancelled_reconciliation_keeps_filesystem_ownership_until_worker_
     await manager.start_teleop(
         "session", "yam-leader", "yam-follower", 0, "draft"
     )
+    await _enable_manager_sync(manager)
     entered = threading.Event()
     release = threading.Event()
     original = manager._reconcile_recording_directory
@@ -977,6 +1316,7 @@ async def test_cancel_after_episode_db_commit_settles_runtime_confirmation(
         await manager.start_teleop(
             str(recording_id), "yam-leader", "yam-follower", 0, "draft"
         )
+        await _enable_manager_sync(manager, str(recording_id))
         await manager.start_episode(str(recording_id), fps=10, metadata={})
         recording.status = "recording"
         db.commit()
@@ -1036,6 +1376,7 @@ async def test_noop_manifest_reconciliation_releases_persisted_finalizer_sentine
     await manager.start_teleop(
         str(recording_id), "yam-leader", "yam-follower", 0, "draft"
     )
+    await _enable_manager_sync(manager, str(recording_id))
     await manager.start_episode(str(recording_id), fps=10, metadata={})
     _, result = await manager.stop_episode(
         str(recording_id), success=True, notes=None

@@ -29,6 +29,7 @@ from ctrl_pi.inference_transport import (
     InferenceTransport,
     InferenceTransportError,
 )
+from ctrl_pi.motion_safety import release_motion_ownership
 from ctrl_pi.rig import (
     RigLease,
     RigLeaseConflictError,
@@ -268,6 +269,7 @@ class RobotInferenceLoop:
                 lease_token = self.rig_lease.acquire(
                     "inference",
                     str(self.session_id),
+                    resources={self.arm_id},
                 )
             except RigLeaseConflictError:
                 raise RobotInferenceConflictError(
@@ -591,20 +593,40 @@ class RobotInferenceLoop:
             if in_flight is not None:
                 await self._settle_in_flight(in_flight)
             queue.clear()
-            close_ok = False
+            cancellation_pending = False
             try:
                 close_ok = await self._safe_close_transport()
-            finally:
-                release_ok = self._safe_release_lease(lease_token)
-                if safe_error is None and (not close_ok or not release_ok):
-                    safe_error = (
-                        "The inference resources could not be released safely."
-                    )
-                with self._state_lock:
-                    self._queue_depth = 0
-                    self._running = False
-                    self._stopped_at = self._as_utc(self._now())
-                    self._last_error = safe_error
+            except asyncio.CancelledError:
+                # The blocking close has settled before cancellation is
+                # re-raised. Complete the no-await motion release boundary,
+                # then preserve cancellation for the caller.
+                close_ok = False
+                cancellation_pending = True
+            release = release_motion_ownership(
+                driver=self.driver,
+                arm_ids=[self.arm_id],
+                rig_lease=self.rig_lease,
+                token=lease_token,
+                fault_detail=(
+                    "Follower safe-idle was not confirmed while stopping inference; "
+                    "policy commands remain fault-latched."
+                ),
+            )
+            if safe_error is None and (not close_ok or not release.clean):
+                safe_error = (
+                    "The inference command path was fault-latched before release."
+                    if release.fault_latched and release.lease_released
+                    else "The inference resources could not be released safely; command ownership remains blocked."
+                )
+            with self._state_lock:
+                if release.lease_released:
+                    self._lease_token = None
+                self._queue_depth = 0
+                self._running = False
+                self._stopped_at = self._as_utc(self._now())
+                self._last_error = safe_error
+            if cancellation_pending:
+                raise asyncio.CancelledError
 
     def _capture_observation(
         self,
