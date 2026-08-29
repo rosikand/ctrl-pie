@@ -828,18 +828,20 @@ class ManagedTrainingManager:
                 ),
             )
             return
-        if job.provider_launch_started_at is not None:
-            await self._fail_and_cleanup(
-                job_id,
-                target=target,
-                preferred_handle=state.handle(request_hash=job.request_hash),
-                message=(
-                    "Managed training stopped because provider launch completed "
-                    "after its durable handle was lost."
-                ),
-            )
-            return
         if state.provider_function_call_id is None:
+            # A discovered App without a FunctionCall is the normal shape of a
+            # launch still in flight: deploy and the image build take minutes
+            # before spawn runs, and a concurrent reconciler (another boot, or
+            # this process after a crash) must not destroy it early. As
+            # documented, watch the exact deterministic identity through the
+            # persisted deadline; only a late App is stopped.
+            if _aware(self._now()) < _aware(job.deadline_at):
+                self._note_retryable_error(
+                    job_id,
+                    "Managed training provider launch is still being reconciled.",
+                )
+                await asyncio.sleep(self._poll_interval)
+                return
             await self._fail_and_cleanup(
                 job_id,
                 target=target,
@@ -847,6 +849,20 @@ class ManagedTrainingManager:
                 message=(
                     "Managed training stopped because its exact FunctionCall could not "
                     "be reattached."
+                ),
+            )
+            return
+        if job.provider_launch_started_at is not None:
+            # The App and its FunctionCall exist but this row never persisted
+            # them: the launch response was durably lost. Never adopt an
+            # execution whose spawn acknowledgement cannot be proven; stop it.
+            await self._fail_and_cleanup(
+                job_id,
+                target=target,
+                preferred_handle=state.handle(request_hash=job.request_hash),
+                message=(
+                    "Managed training stopped because provider launch completed "
+                    "after its durable handle was lost."
                 ),
             )
             return

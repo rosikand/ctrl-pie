@@ -423,7 +423,11 @@ async def test_restart_uses_persisted_call_id_not_app_only_listing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_without_reattachable_call_is_failed_and_stopped() -> None:
+async def test_app_without_call_is_watched_until_the_deadline_not_destroyed() -> None:
+    """A discovered App with no FunctionCall is the normal shape of a launch
+    still in flight (deploy and image build precede spawn). A reconciler must
+    watch the exact identity through the persisted deadline, not stop it."""
+
     _engine, factory = _factory()
     target = HoldingTarget()
     artifacts = StubManagedTrainingArtifactService()
@@ -447,7 +451,45 @@ async def test_app_without_reattachable_call_is_failed_and_stopped() -> None:
         target, artifacts, session_factory=factory, poll_interval_seconds=0.01
     )
     await second.startup()
-    job = await _wait_status(factory, record.id, {"failed"})
+    await asyncio.sleep(0.2)
+    with factory() as db:
+        current = db.get(ManagedTrainingJob, record.id)
+        assert current is not None
+        assert current.status == "launching"
+        assert current.outcome == "pending"
+        assert current.last_error is not None
+        assert "reconciled" in current.last_error
+    assert target.states[record.id].resource_lifecycle != "stopped"
+    await second.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_app_without_reattachable_call_is_failed_and_stopped_after_deadline() -> None:
+    _engine, factory = _factory()
+    target = HoldingTarget()
+    artifacts = StubManagedTrainingArtifactService()
+    first = ManagedTrainingManager(
+        target, artifacts, session_factory=factory, poll_interval_seconds=0.01
+    )
+    await first.startup()
+    with factory() as db:
+        record = await first.create(db, _launch())
+    await _wait_status(factory, record.id, {"running"})
+    await first.shutdown()
+    with factory() as db:
+        row = db.get(ManagedTrainingJob, record.id)
+        assert row is not None
+        row.status = "launching"
+        row.provider_app_id = None
+        row.provider_function_call_id = None
+        row.deadline_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+    target.list_app_only = True
+    second = ManagedTrainingManager(
+        target, artifacts, session_factory=factory, poll_interval_seconds=0.01
+    )
+    await second.startup()
+    job = await _wait_status(factory, record.id, {"failed", "cancelled"})
     assert job.teardown_verified_at is not None
     assert target.states[record.id].resource_lifecycle == "stopped"
     await second.shutdown()
