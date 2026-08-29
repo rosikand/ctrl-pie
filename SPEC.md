@@ -269,8 +269,10 @@ Three categories:
 
 ## Setup, configuration, credentials
 
-- Secrets via a gitignored `.env`: `DATABASE_URL`, `HF_TOKEN`. Modal uses its
-  normal local credential mechanism.
+- Secrets via a gitignored `.env`: `DATABASE_URL`, `HF_TOKEN`, and for Modal
+  either `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` (plus
+  `MODAL_PROXY_TOKEN_ID`/`MODAL_PROXY_TOKEN_SECRET` for the inference
+  endpoint) or Modal's normal local credential file.
 - A Settings page in the UI shows connection status for Postgres / HF / Modal
   / arms and lets the user enter or update non-secret config. Never store
   secrets in Postgres or HF.
@@ -430,7 +432,10 @@ V1.1 builds on the completed V1 in this order:
   private MP4 to one immutable Hub SHA. Timeline values are episode-relative;
   packed-video timestamps provide the media seek offset, and the proxy serves
   byte ranges so native browser playback can scrub without exposing HF_TOKEN.
-- 2026-08-28 — Training remains an external-script responsibility. The
+- 2026-08-28 — Training remains an external-script responsibility. (Superseded
+  in part on 2026-08-29: V1.1 adds the SDK/REST-launched managed Modal
+  training path described in its own decision below; external scripts remain
+  fully supported.) The
   control plane stores only bounded JSONB scalar curves and checkpoint
   descriptors; row-locked, copy-on-write updates replace duplicate
   metric/step points and keep `current_step` monotonic without imposing an
@@ -543,7 +548,10 @@ V1.1 builds on the completed V1 in this order:
   visible. Retention discards the oldest console entries at 1,000 records or
   512 KiB and reports gaps explicitly. This is an observer contract for
   external trainers and future workers, not managed training or direct Modal
-  console attachment/streaming.
+  console attachment/streaming. (Superseded in part on 2026-08-29: the managed
+  training worker later became a first-class producer on this same bounded
+  metrics/console/checkpoint contract; raw provider console attachment remains
+  excluded.)
 - 2026-08-29 — V1.1 persists one bounded, non-secret physical YAM rig setup in
   PostgreSQL and applies it in place to the same `YAMDriver` object shared by
   Arms, recording, and inference. Discovery and preflight inspect bounded

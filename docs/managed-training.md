@@ -19,6 +19,16 @@ CtrlPiClient ──► durable job + Training run in PostgreSQL
 
 ## Prerequisites
 
+<Warning>
+  Run exactly one ctrl-π backend instance per `DATABASE_URL`. Every backend
+  boot reconciles persisted managed jobs and owned provider resources; a
+  second instance (including a stray development server, container, or
+  in-process boot) that shares the database supervises the same durable jobs
+  and can stop compute the other instance is still launching or watching. A
+  backend built from older code is especially destructive: it reconciles
+  newer rows and provider resources with rules that predate them.
+</Warning>
+
 Before a real launch, configure and verify:
 
 - `DATABASE_URL` and an up-to-date Alembic schema;

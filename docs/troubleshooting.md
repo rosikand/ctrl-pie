@@ -10,6 +10,18 @@ paths, or local Hugging Face cache paths while diagnosing a problem.
 
 ## Setup and startup
 
+**A managed training job failed with "provider launch is still being
+reconciled" or stopped soon after launch.** Check that exactly one ctrl-π
+backend instance is running against your `DATABASE_URL`. Concurrent instances
+(a second dev server, a leftover container, a parallel `uvicorn`) reconcile
+the same durable jobs and interfere with each other's provider supervision.
+Stop the extras and inspect the original durable job. While no App is visible,
+ctrl-π keeps checking for a late provider mutation until the hard deadline.
+Once the exact owned App is visible without a durably persisted FunctionCall
+identity, ctrl-π stops it promptly and verifies zero tasks. Retry only after
+the original job is terminal with teardown verified, using a new output
+repository and idempotency key.
+
 ### The setup banner says the backend is unavailable
 
 Confirm the backend is listening on port 8000:
