@@ -16,7 +16,7 @@ your Hugging Face namespace holds datasets and model artifacts, and your
 Modal account runs inference. Live telemetry and action-loop state remain
 ephemeral. There is no hosted ctrl-π service.
 
-## Five workflows
+## Six workflows
 
 - **Arms** — watch connection and CAN health, joints, end-effector pose,
   gripper state, and loop diagnostics; issue bounded manual jog commands.
@@ -26,9 +26,12 @@ ephemeral. There is no hosted ctrl-π service.
 - **Datasets** — discover namespace-scoped LeRobot repositories and inspect
   cards, revisions, episodes, synchronized state/action values, and proxied
   private video without sending `HF_TOKEN` to the browser.
-- **Training** — track runs created by external scripts, render scalar metric
-  curves, and browse model/checkpoint metadata. ctrl-π does **not** launch or
-  run training in V1.
+- **Training** — track runs created by external scripts and render their
+  configuration, status, checkpoints, live scalar metric curves, and bounded
+  trainer-reported console output. ctrl-π does **not** launch or run training
+  in V1.
+- **Models** — browse Hugging Face model repositories, revisions, checkpoint
+  files, and card metadata in the configured namespace.
 - **Inference** — deploy one immutable policy revision, verify endpoint
   identity, explicitly start a follower-arm action loop, optionally record
   the run, and stop with provider teardown verification.
@@ -139,7 +142,7 @@ contract, cost guardrails, model packaging, robot loop, and teardown model.
 | [Docker deployment](docs/docker-deployment.md) | Production container, storage, graceful shutdown, USB, and SocketCAN |
 | [Record and teleoperate](docs/recording.md) | Pairing, episode lifecycle, metadata, staging, upload, and recovery |
 | [Datasets and inference](docs/inference.md) | Compute targets, Modal serving, runtime adapters, robot execution, and teardown |
-| [Trainer API](docs/trainer-api.md) | Python client, every REST method, metric logging, and a LeRobot fine-tune example |
+| [Trainer API](docs/trainer-api.md) | Python client, every REST method, metric and console reporting, and a LeRobot fine-tune example |
 | [YAM driver interface](docs/yam-driver.md) | Driver contract, telemetry, command bounds, leases, and the real-hardware boundary |
 | [Modal operations](docs/modal-operations.md) | Owned-App naming and verified emergency cleanup with `make modal-panic` |
 | [Mock smoke gate](docs/smoke-test.md) | The complete record → upload → discover → infer → teardown acceptance flow |

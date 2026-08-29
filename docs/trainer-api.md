@@ -2,8 +2,9 @@
 
 ctrl-π does not run training. The Trainer API is a small, local control-plane
 API that lets an external LeRobot, OpenPI, or custom training script report
-run status, scalar metrics, and Hugging Face checkpoint revisions. Metrics and
-run metadata live in PostgreSQL; model weights stay on Hugging Face.
+run status, scalar metrics, bounded console lines, and Hugging Face checkpoint
+revisions. Observability metadata lives in PostgreSQL; model weights stay on
+Hugging Face.
 
 There is no ctrl-π authentication in V1. Run the backend on a trusted network
 and use its LAN URL from the training machine. Never put Hugging Face tokens,
@@ -45,6 +46,12 @@ with Client("http://127.0.0.1:8000", timeout=10.0) as trainer:
 
     for step, loss in ((100, 0.82), (200, 0.51), (300, 0.34)):
         trainer.log_metrics(run_id, step=step, metrics={"train/loss": loss})
+        trainer.log_console(
+            run_id,
+            source="stdout",
+            line=f"step {step}: train/loss={loss}",
+            step=step,
+        )
 
     trainer.update_run(run_id, status="completed", current_step=300)
     print(trainer.get_run(run_id))
@@ -53,14 +60,15 @@ with Client("http://127.0.0.1:8000", timeout=10.0) as trainer:
 Run statuses are `created`, `running`, `completed`, `failed`, and `cancelled`.
 External scripts may resume or correct a status and may report late metrics or
 checkpoint metadata. `current_step` never decreases: explicit updates below
-the stored step return HTTP 409, while metric/checkpoint calls retain the
-maximum observed step.
+the stored step return HTTP 409, while metric/checkpoint calls and console
+records with a step retain the maximum observed step.
 
 ## Python client reference
 
 Import `Client` and the sanitized `TrainerClientError` from
 `ctrl_pi.trainer`. Every method returns a typed dictionary representing the
-updated run, except `list_runs`, which returns a list of those dictionaries.
+updated run, except `list_runs`, which returns a list of those dictionaries,
+and `log_console`, which returns the accepted console record.
 
 ### `Client(base_url, *, timeout=10.0)`
 
@@ -119,6 +127,29 @@ trainer.log_metrics(
     metrics={"train/loss": 0.27, "eval/success_rate": 0.74},
 )
 ```
+
+### `log_console(run_id, *, line, source="stdout", step=None)`
+
+Reports one already-sanitized, single-line console record. `source` is
+`stdout`, `stderr`, or `system`; `step` is optional. The server assigns both a
+strictly increasing sequence and a UTC receive timestamp. It rejects blank,
+multiline, control/ANSI-containing, over-4-KiB, and common secret-like values
+without including the submitted line in an error response.
+
+```python
+trainer.log_console(
+    run_id,
+    source="stdout",
+    line="step 500: checkpoint upload started",
+    step=500,
+)
+```
+
+The client cannot know every credential format. Scrub output before calling
+this method and never forward environment dumps, command arguments, request
+headers, URLs with credentials, tokens, or passwords. A future external Modal
+training worker may use the same reporting call, but ctrl-π does not attach to
+Modal job consoles or launch managed training in V1.
 
 ### `register_checkpoint(run_id, *, repo_id, revision, step)`
 
@@ -179,11 +210,32 @@ A training run has this shape:
 }
 ```
 
+`GET /api/trainer/runs/{id}/logs` returns the newest `limit` records when no
+cursor is supplied. Pass the prior response's `next_sequence` as
+`after_sequence` to request only later records. The response includes
+`oldest_sequence`, `latest_sequence`, `next_sequence`, `has_more`, and
+`truncated`; `truncated=true` means older records were omitted by retention,
+the page limit, or a stale cursor. Log reads are always `private, no-store`.
+
 Repository IDs use `namespace/name` form. Revisions may be a Hub commit SHA,
 branch, or tag using safe Git revision characters. Config is limited to 64
 KiB of finite JSON values and recursively rejects secret-like keys. One run
 may store at most 128 metric names, 10,000 total metric points, and 512
-checkpoint records.
+checkpoint records. Console storage keeps only the newest 1,000 records and
+also trims from the front when its compact JSON representation exceeds 512
+KiB. Sequence numbers do not reset when older records are removed.
+
+A console record has this shape:
+
+```json
+{
+  "sequence": 42,
+  "source": "stdout",
+  "line": "step 500: checkpoint upload started",
+  "step": 500,
+  "timestamp": "2026-08-29T12:05:01Z"
+}
+```
 
 ## REST endpoints
 
@@ -196,6 +248,8 @@ All endpoints are under the backend URL; there is no `/v1` prefix.
 | `GET` | `/api/trainer/runs/{id}` | — | run |
 | `PATCH` | `/api/trainer/runs/{id}` | partial run fields | updated run |
 | `POST` | `/api/trainer/runs/{id}/metrics` | `{"step", "metrics"}` | updated run |
+| `POST` | `/api/trainer/runs/{id}/logs` | `{"source", "line", "step"}` | accepted record, HTTP 201 |
+| `GET` | `/api/trainer/runs/{id}/logs?after_sequence=42&limit=200` | optional cursor and limit | bounded console page |
 | `POST` | `/api/trainer/runs/{id}/checkpoints` | `{"repo_id", "revision", "step"}` | updated run |
 | `GET` | `/api/trainer/models?refresh=false` | optional refresh query | namespace model listing |
 
@@ -226,12 +280,19 @@ curl --fail -X PATCH -H 'Content-Type: application/json' \
   "http://127.0.0.1:8000/api/trainer/runs/$RUN_ID"
 ```
 
-Log metrics and register a checkpoint:
+Log metrics and console output, then register a checkpoint:
 
 ```bash
 curl --fail -X POST -H 'Content-Type: application/json' \
   -d '{"step":100,"metrics":{"train/loss":0.82,"lr":0.0001}}' \
   "http://127.0.0.1:8000/api/trainer/runs/$RUN_ID/metrics"
+
+curl --fail -X POST -H 'Content-Type: application/json' \
+  -d '{"source":"stdout","line":"step 100: loss=0.82","step":100}' \
+  "http://127.0.0.1:8000/api/trainer/runs/$RUN_ID/logs"
+
+curl --fail \
+  "http://127.0.0.1:8000/api/trainer/runs/$RUN_ID/logs?after_sequence=0&limit=200"
 
 curl --fail -X POST -H 'Content-Type: application/json' \
   -d '{
@@ -293,7 +354,8 @@ HTTP errors are stable and sanitized:
 - `404`: a training run UUID does not exist.
 - `409`: an explicit `current_step` would regress or a per-run metadata limit
   is reached.
-- `422`: request, status, repository, revision, metric, or config validation.
+- `422`: request, status, repository, revision, metric, console, or config
+  validation.
 - `502`: Hugging Face model enumeration failed.
 - `503`: PostgreSQL or required Hugging Face configuration is unavailable.
 
@@ -335,6 +397,7 @@ from ctrl_pi.trainer import Client
 
 
 LOG_VALUE = re.compile(r"\b([A-Za-z][A-Za-z0-9_]*)\s*:\s*([^\s]+)")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def required(env: Mapping[str, str], name: str) -> str:
@@ -350,6 +413,19 @@ def formatted_step(value: str) -> int:
     multiplier = suffixes.get(suffix, 1)
     number = value[:-1] if suffix in suffixes else value
     return int(float(number) * multiplier)
+
+
+def reportable_console_line(value: str, secrets: tuple[str, ...]) -> str | None:
+    candidate = ANSI_ESCAPE.sub("", value).rstrip("\r\n")
+    candidate = "".join(
+        character if character == "\t" or character.isprintable() else " "
+        for character in candidate
+    )
+    if not candidate.strip():
+        return None
+    if any(secret and secret in candidate for secret in secrets):
+        return "[redacted trainer output]"
+    return candidate.encode("utf-8")[:4096].decode("utf-8", errors="ignore")
 
 
 def main(
@@ -445,12 +521,33 @@ def main(
             )
             if process.stdout is None:
                 raise RuntimeError("LeRobot did not provide a readable log stream.")
+            console_secrets = tuple(
+                value
+                for value in (
+                    hf_token,
+                    env.get("DATABASE_URL", ""),
+                    env.get("MODAL_TOKEN_ID", ""),
+                    env.get("MODAL_TOKEN_SECRET", ""),
+                    env.get("MODAL_PROXY_TOKEN_ID", ""),
+                    env.get("MODAL_PROXY_TOKEN_SECRET", ""),
+                )
+                if value
+            )
             for line in process.stdout:
                 print(line, end="")
                 values = dict(LOG_VALUE.findall(line))
-                if "step" not in values:
+                raw_step = values.pop("step", None)
+                step = formatted_step(raw_step) if raw_step is not None else None
+                console_line = reportable_console_line(line, console_secrets)
+                if console_line is not None:
+                    trainer.log_console(
+                        run_id,
+                        source="stdout",
+                        line=console_line,
+                        step=step,
+                    )
+                if step is None:
                     continue
-                step = formatted_step(values.pop("step"))
                 metrics: dict[str, float] = {}
                 for name, raw_value in values.items():
                     try:
@@ -511,4 +608,8 @@ if __name__ == "__main__":
 Keep `HF_TOKEN` in the training process environment or its secret manager;
 never include it in `config` or send it to ctrl-π. The token goes explicitly
 to every Hub operation. Only the model repository ID, immutable commit
-revision, and step are registered with ctrl-π.
+revision, step, metrics, and locally scrubbed console text are registered with
+ctrl-π. `reportable_console_line` removes terminal controls, bounds UTF-8, and
+replaces lines containing the known credentials used by the example; operators
+must extend that redaction list for any additional secrets available to their
+trainer.

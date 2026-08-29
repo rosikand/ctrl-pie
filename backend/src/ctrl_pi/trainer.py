@@ -8,6 +8,7 @@ import uuid
 import httpx
 
 RunStatus = Literal["created", "running", "completed", "failed", "cancelled"]
+ConsoleLogSource = Literal["stdout", "stderr", "system"]
 
 
 class MetricPoint(TypedDict):
@@ -19,6 +20,14 @@ class Checkpoint(TypedDict):
     repo_id: str
     revision: str
     step: int
+
+
+class ConsoleLog(TypedDict):
+    sequence: int
+    source: ConsoleLogSource
+    line: str
+    step: int | None
+    timestamp: str
 
 
 class TrainingRun(TypedDict):
@@ -208,6 +217,20 @@ class Client:
             json={"step": step, "metrics": metrics},
         )
 
+    def log_console(
+        self,
+        run_id: str,
+        *,
+        line: str,
+        source: ConsoleLogSource = "stdout",
+        step: int | None = None,
+    ) -> ConsoleLog:
+        return self._request(
+            "POST",
+            f"/api/trainer/runs/{self._run_id(run_id)}/logs",
+            json={"source": source, "line": line, "step": step},
+        )
+
     def register_checkpoint(
         self,
         run_id: str,
@@ -222,7 +245,7 @@ class Client:
             json={"repo_id": repo_id, "revision": revision, "step": step},
         )
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> TrainingRun:
+    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         response: httpx.Response | None = None
         try:
             response = self._client.request(method, path, **kwargs)

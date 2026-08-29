@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, fetchTrainerModels } from "../lib/api";
-import type { TrainerModelsResponse } from "../types/training";
-import type { TrainingLoadError } from "./useTrainingRuns";
+import type { TrainerModelsResponse, TrainingLoadError } from "../types/training";
 
 export function useTrainerModels() {
   const [data, setData] = useState<TrainerModelsResponse | null>(null);

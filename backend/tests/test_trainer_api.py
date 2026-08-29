@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Generator
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 from ctrl_pi.db import Base, get_db
 from ctrl_pi.main import create_app
 from ctrl_pi.models import TrainingRun
+import ctrl_pi.api.trainer as trainer_api
 
 
 @pytest.fixture
@@ -78,6 +80,7 @@ def test_run_crud_filter_and_serialization(trainer_app) -> None:
     assert payload["checkpoint_revision"] is None
     assert payload["created_at"] and payload["updated_at"]
     assert fetched.json() == payload
+    assert fetched.headers["cache-control"] == "private, no-store"
     assert running.status_code == 200
     assert [run["id"] for run in running.json()["runs"]] == [second.json()["id"]]
     assert updated.status_code == 200, updated.text
@@ -147,6 +150,180 @@ def test_checkpoint_registration_is_idempotent_and_advances_run(trainer_app) -> 
     assert payload["checkpoints"] == [
         {"repo_id": "acme/act-block", "revision": revision, "step": 100}
     ]
+
+
+def test_console_logs_are_sequenced_timestamped_and_advance_run(
+    trainer_app,
+) -> None:
+    app, engine = trainer_app
+    with TestClient(app) as client:
+        run_id = _create(client, status="running", current_step=4).json()["id"]
+        first = client.post(
+            f"/api/trainer/runs/{run_id}/logs",
+            json={"source": "stdout", "line": "step 8: loss=0.42", "step": 8},
+        )
+        second = client.post(
+            f"/api/trainer/runs/{run_id}/logs",
+            json={"source": "stderr", "line": "checkpoint upload pending"},
+        )
+        logs_response = client.get(f"/api/trainer/runs/{run_id}/logs")
+        run_response = client.get(f"/api/trainer/runs/{run_id}")
+
+    assert first.status_code == second.status_code == 201
+    assert logs_response.status_code == run_response.status_code == 200
+    assert logs_response.headers["cache-control"] == "private, no-store"
+    assert run_response.json()["current_step"] == 8
+    payload = logs_response.json()
+    assert payload["oldest_sequence"] == 1
+    assert payload["latest_sequence"] == payload["next_sequence"] == 2
+    assert payload["truncated"] is payload["has_more"] is False
+    assert [item["sequence"] for item in payload["logs"]] == [1, 2]
+    assert payload["logs"][0] == {
+        "sequence": 1,
+        "source": "stdout",
+        "line": "step 8: loss=0.42",
+        "step": 8,
+        "timestamp": payload["logs"][0]["timestamp"],
+    }
+    assert payload["logs"][1]["source"] == "stderr"
+    assert payload["logs"][1]["step"] is None
+    for item in payload["logs"]:
+        timestamp = datetime.fromisoformat(item["timestamp"])
+        assert timestamp.utcoffset() is not None
+    with Session(engine) as db:
+        stored = db.scalar(select(TrainingRun))
+        assert stored is not None
+        assert [item["sequence"] for item in stored.console_logs] == [1, 2]
+
+
+def test_console_log_retention_is_bounded_and_sequences_do_not_reset(
+    trainer_app, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, engine = trainer_app
+    monkeypatch.setattr(trainer_api, "_MAX_CONSOLE_LOGS", 3)
+    monkeypatch.setattr(trainer_api, "_MAX_CONSOLE_LOG_BYTES", 430)
+    with TestClient(app) as client:
+        run_id = _create(client).json()["id"]
+        for index in range(1, 7):
+            response = client.post(
+                f"/api/trainer/runs/{run_id}/logs",
+                json={
+                    "source": "system",
+                    "line": f"event {index}: " + ("x" * 80),
+                    "step": index,
+                },
+            )
+            assert response.status_code == 201, response.text
+        latest = client.get(
+            f"/api/trainer/runs/{run_id}/logs", params={"limit": 2}
+        )
+        stale_cursor = client.get(
+            f"/api/trainer/runs/{run_id}/logs",
+            params={"after_sequence": 0, "limit": 1},
+        )
+        next_cursor = client.get(
+            f"/api/trainer/runs/{run_id}/logs",
+            params={"after_sequence": stale_cursor.json()["next_sequence"]},
+        )
+
+    assert latest.status_code == stale_cursor.status_code == next_cursor.status_code == 200
+    logs = latest.json()["logs"]
+    assert [item["sequence"] for item in logs] == [5, 6]
+    assert latest.json()["truncated"] is True
+    assert latest.json()["has_more"] is False
+    assert stale_cursor.json()["truncated"] is True
+    assert stale_cursor.json()["has_more"] is True
+    assert all(
+        item["sequence"] > stale_cursor.json()["next_sequence"]
+        for item in next_cursor.json()["logs"]
+    )
+    assert next_cursor.json()["logs"][-1]["sequence"] == 6
+    assert logs[-1]["sequence"] == 6
+    assert logs == sorted(logs, key=lambda item: item["sequence"])
+    with Session(engine) as db:
+        stored = db.scalar(select(TrainingRun))
+        assert stored is not None
+        assert len(stored.console_logs) <= 3
+        assert len(
+            json.dumps(stored.console_logs, separators=(",", ":")).encode("utf-8")
+        ) <= 430
+        assert [item["sequence"] for item in stored.console_logs][-2:] == [5, 6]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"source": "worker", "line": "hello"},
+        {"source": "stdout", "line": ""},
+        {"source": "stdout", "line": "first\nsecond"},
+        {"source": "stdout", "line": "ansi:\x1b[31m"},
+        {"source": "stdout", "line": "💥" * 2_000},
+        {"source": "stdout", "line": "x", "step": -1},
+        {"source": "stdout", "line": "x", "step": True},
+        {"source": "stdout", "line": "x", "timestamp": "2026-08-29T00:00:00Z"},
+    ],
+)
+def test_console_log_fields_are_strict(trainer_app, payload: dict) -> None:
+    app, _ = trainer_app
+    with TestClient(app) as client:
+        run_id = _create(client).json()["id"]
+        response = client.post(f"/api/trainer/runs/{run_id}/logs", json=payload)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "HF_TOKEN=hf_must_not_echo_123456",
+        "Authorization: Bearer super_secret_value",
+        "connecting to postgresql://user:password@db.internal/app",
+        "Modal credential wk-super_secret_value",
+        "WANDB_API_KEY=0123456789abcdef0123456789abcdef01234567",
+        "OPENAI_API_KEY=sk-proj-0123456789abcdef",
+        "AWS_SECRET_ACCESS_KEY=0123456789abcdef0123456789abcdef01234567",
+        "wandbApiKey=0123456789abcdef0123456789abcdef01234567",
+        "env: WANDB_API_KEY=0123456789abcdef0123456789abcdef01234567",
+    ],
+)
+def test_console_logs_reject_secret_like_lines_without_echo(
+    trainer_app, line: str
+) -> None:
+    app, _ = trainer_app
+    with TestClient(app) as client:
+        run_id = _create(client).json()["id"]
+        response = client.post(
+            f"/api/trainer/runs/{run_id}/logs",
+            json={"source": "stdout", "line": line},
+        )
+
+    assert response.status_code == 422
+    assert line not in response.text
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "num_tokens=4096",
+        "tokenizerName=lerobot/tokenizer",
+        "api_key_length=32",
+        "secretary=alice",
+        "monkey=banana",
+    ],
+)
+def test_console_logs_allow_nonsecret_training_assignments(
+    trainer_app, line: str
+) -> None:
+    app, _ = trainer_app
+    with TestClient(app) as client:
+        run_id = _create(client).json()["id"]
+        response = client.post(
+            f"/api/trainer/runs/{run_id}/logs",
+            json={"source": "system", "line": line},
+        )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["line"] == line
 
 
 def test_step_conflict_and_external_status_resume_are_supported(trainer_app) -> None:
@@ -279,8 +456,11 @@ def test_input_validation_missing_runs_and_empty_patch(trainer_app) -> None:
 def test_training_run_json_columns_have_callable_and_database_defaults() -> None:
     metrics = TrainingRun.__table__.c.metrics
     checkpoints = TrainingRun.__table__.c.checkpoints
+    console_logs = TrainingRun.__table__.c.console_logs
 
     assert metrics.default is not None and metrics.default.is_callable
     assert checkpoints.default is not None and checkpoints.default.is_callable
+    assert console_logs.default is not None and console_logs.default.is_callable
     assert metrics.server_default is not None
     assert checkpoints.server_default is not None
+    assert console_logs.server_default is not None

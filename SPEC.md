@@ -29,7 +29,7 @@ goal, but every feature must be runnable and demo-able in mock mode.
 
 ## Interface
 
-Exactly five primary tabs, plus a small Settings page (gear icon, not a
+Exactly six primary tabs, plus a small Settings page (gear icon, not a
 primary tab).
 
 ### 1. Arms
@@ -80,20 +80,31 @@ training scripts call to:
 
 - create/update a training run (status, current step, config)
 - log scalar metrics over steps (loss curves rendered in the UI)
+- report bounded, sanitized stdout/stderr/system console lines
 - register the output HF model repo / checkpoint revisions
 
 Run state goes to Postgres; weights go to HF Hub via the user's normal tooling.
 
-The tab has two subviews:
-
-- **Runs**: current/past runs, status/step, dataset, base model,
-  runtime/framework, config, metric curves, output model repo
-- **Models**: HF model repos in the namespace, revisions, checkpoints,
-  card metadata
+The Training tab is a minimal experiment-tracking surface for reported runs:
+current/past status and step, dataset, base model, runtime/framework, config,
+live-polled metric curves and trainer-reported console output, output model
+repo, and registered checkpoints.
 
 V2 (do not build): buttonized plug-and-play training on managed compute.
 
-### 5. Inference
+### 5. Models
+
+A browser over model artifacts already stored in the user's configured HF
+namespace.
+
+- model repositories and card metadata
+- immutable revisions and checkpoint files
+- direct links to the corresponding Hub artifacts
+
+Discovery is read-only. Training scripts remain responsible for producing and
+uploading weights.
+
+### 6. Inference
 
 Deploy a policy to Modal and run it against the arms.
 
@@ -251,14 +262,15 @@ repo `ctrl-pi` · Python package `ctrl_pi` · trainer client `ctrl_pi.trainer`.
 
 ## Milestones
 
-1. App shell: five tabs + Settings, sparse Tailwind layout
+1. App shell: six tabs + Settings, sparse Tailwind layout
 2. Postgres schema + Alembic migrations + settings/first-run checklist
 3. Mock Arms: `MockYAMDriver`, live telemetry over WebSocket, jog controls
 4. Mock Record/Teleop: recording lifecycle, episode metadata
 5. HF integration: namespace auth, dataset upload pipeline (LeRobot format)
 6. Datasets tab: discovery + metadata/cards
 7. Datasets tab: episode visualizer (video + synced state/actions + scrubbing)
-8. Trainer API: REST endpoints, Python client, Runs/Models subviews,
+8. Trainer API: REST endpoints, Python client, Training run analysis and a
+   first-class Models tab,
    plus reference docs for the API (`docs/trainer-api.md`: install, quickstart
    script, every client method and REST endpoint, an end-to-end example of a
    LeRobot fine-tune logging to ctrl-π and pushing checkpoints to HF)
@@ -428,3 +440,13 @@ open issues. Do not expand scope.
   Generated Hugging Face dataset cards leave the license field unset; making a
   repository public remains an explicit exposure choice, and selecting a data
   license remains the operator's responsibility.
+- 2026-08-29 — Training and Models are separate first-class primary tabs.
+  Training remains a read-only experiment-analysis surface for runs reported
+  by external trainer clients, while Models discovers existing Hugging Face
+  artifacts. External trainers may append strictly validated stdout, stderr,
+  or system lines to a row-locked, server-sequenced, server-timestamped JSONB
+  tail; the selected Training run polls bounded cursor pages and metrics while
+  visible. Retention discards the oldest console entries at 1,000 records or
+  512 KiB and reports gaps explicitly. This is an observer contract for
+  external trainers and future workers, not managed training or direct Modal
+  console attachment/streaming.

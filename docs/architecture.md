@@ -159,9 +159,18 @@ LeRobot chunk files remain within the documented budget.
 
 Training never executes inside ctrl-π. External scripts use the REST API or
 the synchronous `ctrl_pi.trainer.Client` to create runs, report bounded scalar
-curves, and register model repository revisions. PostgreSQL stores that small
-state; the external training process uploads weights to Hub. See the
-[Trainer API](trainer-api.md).
+curves and sanitized console lines, and register model repository revisions.
+PostgreSQL stores bounded JSONB metric and console tails. The selected run is
+refreshed with non-overlapping, visibility-aware polling; the browser never
+attaches to a trainer or provider console. The external training process still
+owns execution and uploads weights to Hub. See the [Trainer API](trainer-api.md).
+
+### Models
+
+The first-class Models route reads repository, immutable revision, checkpoint,
+and card metadata from the configured Hugging Face namespace through the
+backend. The browser receives no Hub token and never uploads or mutates model
+artifacts; external training tooling remains responsible for weights.
 
 ### Inference
 

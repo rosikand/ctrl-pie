@@ -11,6 +11,44 @@ from ctrl_pi.drivers.mock_yam import MockYAMDriver
 from ctrl_pi.main import create_app
 
 
+REPOSITORY_ROOT = Path(__file__).parents[2]
+
+
+def test_frontend_has_six_primary_routes_and_separate_training_models_owners() -> None:
+    app_source = (REPOSITORY_ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
+    training_source = (REPOSITORY_ROOT / "frontend/src/pages/TrainingPage.tsx").read_text(encoding="utf-8")
+    models_source = (REPOSITORY_ROOT / "frontend/src/pages/ModelsPage.tsx").read_text(encoding="utf-8")
+    navigation_source = app_source.split(
+        "const primaryNavigation: NavigationItem[] = [", 1
+    )[1].split("]", 1)[0]
+
+    expected_navigation = (
+        '{ label: "Arms", path: "/arms"',
+        '{ label: "Record / Teleop", mobileLabel: "Record", path: "/record"',
+        '{ label: "Datasets", path: "/datasets"',
+        '{ label: "Training", path: "/training"',
+        '{ label: "Models", path: "/models"',
+        '{ label: "Inference", path: "/inference"',
+    )
+    assert navigation_source.count("{ label:") == 6
+    assert all(item in navigation_source for item in expected_navigation)
+    assert all(
+        f'<Route path="{path}"' in app_source
+        for path in ("/arms", "/record", "/datasets", "/training", "/models", "/inference")
+    )
+    assert "grid-cols-6" in app_source
+
+    assert "useTrainerModels" not in training_source
+    assert "TrainerModelSummary" not in training_source
+    assert "ModelCard" not in training_source
+    assert 'from "./TrainingPage"' not in models_source
+    assert "useTrainerModels" in models_source
+    assert "TrainerModelSummary" in models_source
+    assert "function ModelCard" in models_source
+    assert "const visibleLogs = logs.slice().reverse();" in training_source
+    assert "logs.slice(-500)" not in training_source
+
+
 def _frontend_dist(tmp_path: Path) -> Path:
     dist = tmp_path / "dist"
     assets = dist / "assets"

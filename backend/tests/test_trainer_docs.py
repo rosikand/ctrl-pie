@@ -30,6 +30,7 @@ def test_trainer_api_documents_every_client_method_and_rest_endpoint() -> None:
         "get_run",
         "update_run",
         "log_metrics",
+        "log_console",
         "register_checkpoint",
     ):
         assert method in documentation
@@ -37,6 +38,7 @@ def test_trainer_api_documents_every_client_method_and_rest_endpoint() -> None:
         "/api/trainer/runs",
         "/api/trainer/runs/{id}",
         "/api/trainer/runs/{id}/metrics",
+        "/api/trainer/runs/{id}/logs",
         "/api/trainer/runs/{id}/checkpoints",
         "/api/trainer/models",
     ):
@@ -76,6 +78,9 @@ def test_end_to_end_lerobot_example_executes_offline_with_fakes(
         def log_metrics(self, run_id, **fields):
             events.append(("metrics", fields))
 
+        def log_console(self, run_id, **fields):
+            events.append(("console", fields))
+
         def register_checkpoint(self, run_id, **fields):
             events.append(("checkpoint", fields))
 
@@ -113,7 +118,10 @@ def test_end_to_end_lerobot_example_executes_offline_with_fakes(
     base_path.mkdir()
 
     class FakeProcess:
-        stdout = ["step:100 loss:0.42 lr:0.0001\n"]
+        stdout = [
+            "initializing LeRobot trainer\n",
+            "step:100 loss:0.42 lr:0.0001\n",
+        ]
 
         @staticmethod
         def wait(timeout=None) -> int:
@@ -155,6 +163,8 @@ def test_end_to_end_lerobot_example_executes_offline_with_fakes(
     )
 
     assert ("metrics", {"step": 100, "metrics": {"lerobot/loss": 0.42, "lerobot/lr": 0.0001}}) in events
+    assert ("console", {"source": "stdout", "line": "initializing LeRobot trainer", "step": None}) in events
+    assert ("console", {"source": "stdout", "line": "step:100 loss:0.42 lr:0.0001", "step": 100}) in events
     assert ("checkpoint", {"repo_id": "acme/new-act-model", "revision": "a" * 40, "step": 100}) in events
     assert events[-1] == ("update", {"status": "completed", "current_step": 100})
     assert set(uploaded_model_files) == {
@@ -193,6 +203,10 @@ def test_end_to_end_lerobot_example_terminates_child_on_reporting_failure(
         @staticmethod
         def log_metrics(run_id, **fields):
             raise RuntimeError("reporting unavailable")
+
+        @staticmethod
+        def log_console(run_id, **fields):
+            return None
 
         @staticmethod
         def register_checkpoint(run_id, **fields):

@@ -2,6 +2,7 @@ import {
   Bot,
   BrainCircuit,
   Database,
+  Package,
   RadioTower,
   Settings,
   Video,
@@ -16,6 +17,7 @@ import { ArmsPage } from "./pages/ArmsPage";
 import { DatasetEpisodePage } from "./pages/DatasetEpisodePage";
 import { DatasetsPage } from "./pages/DatasetsPage";
 import { InferencePage } from "./pages/InferencePage";
+import { ModelsPage } from "./pages/ModelsPage";
 import { RecordPage } from "./pages/RecordPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TrainingPage } from "./pages/TrainingPage";
@@ -32,6 +34,7 @@ const primaryNavigation: NavigationItem[] = [
   { label: "Record / Teleop", mobileLabel: "Record", path: "/record", icon: Video },
   { label: "Datasets", path: "/datasets", icon: Database },
   { label: "Training", path: "/training", icon: BrainCircuit },
+  { label: "Models", path: "/models", icon: Package },
   { label: "Inference", path: "/inference", icon: RadioTower },
 ];
 
@@ -126,7 +129,7 @@ function AppShell() {
         </NavLink>
       </header>
 
-      <nav aria-label="Mobile primary" className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-5 border-t border-slate-200 bg-white px-1 py-1.5 lg:hidden">
+      <nav aria-label="Mobile primary" className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-6 border-t border-slate-200 bg-white px-1 py-1.5 lg:hidden">
         {primaryNavigation.map((item) => {
           const Icon = item.icon;
           return (
@@ -153,6 +156,7 @@ function AppShell() {
           <Route path="/datasets" element={<DatasetsPage />} />
           <Route path="/datasets/:repoName" element={<DatasetEpisodePage />} />
           <Route path="/training" element={<TrainingPage />} />
+          <Route path="/models" element={<ModelsPage />} />
           <Route path="/inference" element={<InferencePage />} />
           <Route
             path="/settings"

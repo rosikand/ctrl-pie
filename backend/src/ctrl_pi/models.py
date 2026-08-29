@@ -95,6 +95,9 @@ class TrainingRun(TimestampMixin, Base):
     checkpoints: Mapped[list[dict[str, Any]]] = mapped_column(
         json_type, default=list, server_default="[]", nullable=False
     )
+    console_logs: Mapped[list[dict[str, Any]]] = mapped_column(
+        json_type, default=list, server_default="[]", nullable=False
+    )
 
 
 class InferenceEndpoint(TimestampMixin, Base):

@@ -16,6 +16,25 @@ export type TrainingCheckpoint = {
   step: number;
 };
 
+export type TrainingConsoleLogSource = "stdout" | "stderr" | "system";
+
+export type TrainingConsoleLog = {
+  sequence: number;
+  source: TrainingConsoleLogSource;
+  line: string;
+  step: number | null;
+  timestamp: string;
+};
+
+export type TrainingConsoleLogsResponse = {
+  logs: TrainingConsoleLog[];
+  oldest_sequence: number | null;
+  latest_sequence: number | null;
+  next_sequence: number;
+  truncated: boolean;
+  has_more: boolean;
+};
+
 export type TrainingRun = {
   id: string;
   name: string;
@@ -64,4 +83,9 @@ export type TrainerModelsResponse = {
   models: TrainerModelSummary[];
   total: number;
   fetched_at: string;
+};
+
+export type TrainingLoadError = {
+  message: string;
+  status: number | null;
 };

@@ -24,6 +24,7 @@ import type {
 } from "../types/recordings";
 import type {
   TrainerModelsResponse,
+  TrainingConsoleLogsResponse,
   TrainingRun,
   TrainingRunsResponse,
 } from "../types/training";
@@ -135,7 +136,29 @@ export function fetchTrainingRun(
 ): Promise<TrainingRun> {
   return request<TrainingRun>(`/api/trainer/runs/${encodeURIComponent(runId)}`, {
     signal,
+    cache: "no-store",
   });
+}
+
+export function fetchTrainingConsoleLogs({
+  runId,
+  afterSequence,
+  limit = 200,
+  signal,
+}: {
+  runId: string;
+  afterSequence?: number;
+  limit?: number;
+  signal?: AbortSignal;
+}): Promise<TrainingConsoleLogsResponse> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (afterSequence !== undefined) {
+    query.set("after_sequence", String(afterSequence));
+  }
+  return request<TrainingConsoleLogsResponse>(
+    `/api/trainer/runs/${encodeURIComponent(runId)}/logs?${query.toString()}`,
+    { signal, cache: "no-store" },
+  );
 }
 
 export function fetchTrainerModels(

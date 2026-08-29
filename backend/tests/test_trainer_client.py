@@ -37,6 +37,17 @@ def test_client_methods_send_the_documented_requests() -> None:
         requests.append(request)
         if request.method == "GET" and request.url.path == "/api/trainer/runs":
             return httpx.Response(200, json={"runs": [_run()]})
+        if request.url.path.endswith("/logs"):
+            return httpx.Response(
+                201,
+                json={
+                    "sequence": 1,
+                    "source": "stderr",
+                    "line": "checkpoint pending",
+                    "step": 10,
+                    "timestamp": "2026-08-29T00:00:00Z",
+                },
+            )
         return httpx.Response(200, json=_run())
 
     transport = httpx.MockTransport(handler)
@@ -46,11 +57,19 @@ def test_client_methods_send_the_documented_requests() -> None:
         client.get_run(RUN_ID)
         client.update_run(RUN_ID, status="running", output_model_repo=None)
         client.log_metrics(RUN_ID, step=10, metrics={"loss": 0.5})
+        logged = client.log_console(
+            RUN_ID,
+            source="stderr",
+            line="checkpoint pending",
+            step=10,
+        )
         client.register_checkpoint(
             RUN_ID, repo_id="acme/model", revision="a" * 40, step=10
         )
         assert not client.is_closed
     assert client.is_closed
+    assert logged["sequence"] == 1
+    assert logged["timestamp"] == "2026-08-29T00:00:00Z"
 
     assert [(request.method, request.url.path) for request in requests] == [
         ("POST", "/api/trainer/runs"),
@@ -58,6 +77,7 @@ def test_client_methods_send_the_documented_requests() -> None:
         ("GET", f"/api/trainer/runs/{RUN_ID}"),
         ("PATCH", f"/api/trainer/runs/{RUN_ID}"),
         ("POST", f"/api/trainer/runs/{RUN_ID}/metrics"),
+        ("POST", f"/api/trainer/runs/{RUN_ID}/logs"),
         ("POST", f"/api/trainer/runs/{RUN_ID}/checkpoints"),
     ]
     assert dict(requests[1].url.params) == {"status": "running"}
@@ -68,6 +88,11 @@ def test_client_methods_send_the_documented_requests() -> None:
     assert json.loads(requests[4].content) == {
         "step": 10,
         "metrics": {"loss": 0.5},
+    }
+    assert json.loads(requests[5].content) == {
+        "source": "stderr",
+        "line": "checkpoint pending",
+        "step": 10,
     }
 
 

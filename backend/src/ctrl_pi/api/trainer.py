@@ -5,8 +5,9 @@ import copy
 import json
 import math
 import re
+import unicodedata
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -27,8 +28,35 @@ from ctrl_pi.models import TrainingRun
 router = APIRouter(prefix="/api/trainer", tags=["trainer"])
 
 RunStatus = Literal["created", "running", "completed", "failed", "cancelled"]
+ConsoleLogSource = Literal["stdout", "stderr", "system"]
 _METRIC_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.\-/]{0,63})")
 _REVISION = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?")
+_CONSOLE_ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
+    r"\s*[:=](?=\s*\S+)"
+)
+_SECRET_TOKEN = re.compile(
+    r"(?i)(?:\bhf_[a-z0-9]{8,}\b|\b(?:ak|as|wk|ws)-[a-z0-9_-]{8,}\b|"
+    r"://[^/\s:@]+:[^/\s@]+@|\bbearer\s+\S+)"
+)
+_CONSOLE_SENSITIVE_KEY_PARTS = {
+    "authorization",
+    "cookie",
+    "credential",
+    "dsn",
+    "passwd",
+    "password",
+    "secret",
+}
+_CONSOLE_SENSITIVE_KEY_SUFFIXES = {
+    "accesstoken",
+    "apikey",
+    "databaseurl",
+    "dburl",
+    "hftoken",
+    "modaltoken",
+    "privatekey",
+}
 _SENSITIVE_PARTS = {
     "auth",
     "authorization",
@@ -96,6 +124,29 @@ _MAX_CONFIG_BYTES = 64 * 1024
 _MAX_METRIC_NAMES = 128
 _MAX_METRIC_POINTS = 10_000
 _MAX_CHECKPOINTS = 512
+_MAX_CONSOLE_LOGS = 1_000
+_MAX_CONSOLE_LOG_BYTES = 512 * 1024
+_MAX_CONSOLE_LINE_BYTES = 4 * 1024
+_MAX_CONSOLE_SEQUENCE = 9_007_199_254_740_991
+
+
+def _contains_secret_assignment(value: str) -> bool:
+    for match in _CONSOLE_ASSIGNMENT.finditer(value):
+        key = match.group("key")
+        separated_key = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+        separated_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated_key)
+        parts = {
+            part
+            for part in re.split(r"[^a-z0-9]+", separated_key.casefold())
+            if part
+        }
+        normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
+        if parts.intersection(_CONSOLE_SENSITIVE_KEY_PARTS) or any(
+            normalized.endswith(suffix)
+            for suffix in _CONSOLE_SENSITIVE_KEY_SUFFIXES
+        ):
+            return True
+    return False
 
 
 class MetricPointRead(BaseModel):
@@ -107,6 +158,21 @@ class CheckpointRead(BaseModel):
     repo_id: str
     revision: str
     step: int
+
+
+class ConsoleLogRead(BaseModel):
+    sequence: int = Field(ge=1, le=_MAX_CONSOLE_SEQUENCE)
+    source: ConsoleLogSource
+    line: str = Field(min_length=1, max_length=_MAX_CONSOLE_LINE_BYTES)
+    step: int | None = Field(default=None, ge=0, le=_MAX_STEP, strict=True)
+    timestamp: datetime
+
+    @field_validator("timestamp")
+    @classmethod
+    def validate_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("console timestamp must include a timezone")
+        return value.astimezone(UTC)
 
 
 class TrainingRunRead(BaseModel):
@@ -129,6 +195,15 @@ class TrainingRunRead(BaseModel):
 
 class TrainingRunsRead(BaseModel):
     runs: list[TrainingRunRead]
+
+
+class ConsoleLogsRead(BaseModel):
+    logs: list[ConsoleLogRead]
+    oldest_sequence: int | None
+    latest_sequence: int | None
+    next_sequence: int
+    truncated: bool
+    has_more: bool
 
 
 class RunCreate(BaseModel):
@@ -264,6 +339,29 @@ class CheckpointCreate(BaseModel):
             raise ValueError("revision is required")
         return result
 
+
+class ConsoleLogCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: ConsoleLogSource = "stdout"
+    line: str = Field(min_length=1, max_length=_MAX_CONSOLE_LINE_BYTES, strict=True)
+    step: int | None = Field(default=None, ge=0, le=_MAX_STEP, strict=True)
+
+    @field_validator("line")
+    @classmethod
+    def validate_line(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("console line must not be blank")
+        if len(value.encode("utf-8")) > _MAX_CONSOLE_LINE_BYTES:
+            raise ValueError("console line must be at most 4 KiB")
+        if any(
+            character != "\t" and unicodedata.category(character).startswith("C")
+            for character in value
+        ):
+            raise ValueError("console line must contain printable single-line text")
+        if _contains_secret_assignment(value) or _SECRET_TOKEN.search(value):
+            raise ValueError("console line must not contain secret-like values")
+        return value
 
 class ModelCardRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -410,6 +508,60 @@ def _safe_config(value: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(value)
 
 
+def _append_console_log(
+    stored_logs: list[dict[str, Any]], payload: ConsoleLogCreate
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    logs = copy.deepcopy(stored_logs)
+    last_sequence = 0
+    for entry in logs:
+        sequence = entry.get("sequence") if isinstance(entry, dict) else None
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence <= last_sequence
+            or sequence > _MAX_CONSOLE_SEQUENCE
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Stored training console metadata is invalid.",
+            )
+        last_sequence = sequence
+    if last_sequence >= _MAX_CONSOLE_SEQUENCE:
+        raise HTTPException(
+            status_code=409,
+            detail="Training run console sequence limit was reached.",
+        )
+    entry = {
+        "sequence": last_sequence + 1,
+        "source": payload.source,
+        "line": payload.line,
+        "step": payload.step,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    logs.append(entry)
+    while len(logs) > _MAX_CONSOLE_LOGS:
+        logs.pop(0)
+    try:
+        while (
+            len(
+                json.dumps(
+                    logs,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            > _MAX_CONSOLE_LOG_BYTES
+        ):
+            logs.pop(0)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Stored training console metadata is invalid.",
+        ) from error
+    return logs, entry
+
+
 def _run_or_404(db: Session, run_id: uuid.UUID, *, lock: bool) -> TrainingRun:
     statement = select(TrainingRun).where(TrainingRun.id == run_id)
     if lock:
@@ -466,6 +618,7 @@ def create_run(payload: RunCreate, db: Session = Depends(get_db)) -> TrainingRun
         config=payload.config,
         metrics={},
         checkpoints=[],
+        console_logs=[],
     )
     db.add(run)
     _commit(db)
@@ -487,7 +640,12 @@ def list_runs(
 
 
 @router.get("/runs/{run_id}", response_model=TrainingRunRead)
-def get_run(run_id: uuid.UUID, db: Session = Depends(get_db)) -> TrainingRunRead:
+def get_run(
+    run_id: uuid.UUID,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> TrainingRunRead:
+    response.headers["Cache-Control"] = "private, no-store"
     return _run_read(_run_or_404(db, run_id, lock=False))
 
 
@@ -579,6 +737,82 @@ def register_checkpoint(
     _commit(db)
     db.refresh(run)
     return _run_read(run)
+
+
+@router.get("/runs/{run_id}/logs", response_model=ConsoleLogsRead)
+def list_console_logs(
+    run_id: uuid.UUID,
+    response: Response,
+    after_sequence: Annotated[
+        int | None, Query(ge=0, le=_MAX_CONSOLE_SEQUENCE)
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 200,
+    db: Session = Depends(get_db),
+) -> ConsoleLogsRead:
+    run = _run_or_404(db, run_id, lock=False)
+    stored_logs = copy.deepcopy(run.console_logs or [])
+    try:
+        logs = [ConsoleLogRead.model_validate(item) for item in stored_logs]
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Stored training console metadata is invalid.",
+        ) from error
+    sequences = [item.sequence for item in logs]
+    if sequences != sorted(set(sequences)):
+        raise HTTPException(
+            status_code=503,
+            detail="Stored training console metadata is invalid.",
+        )
+    oldest_sequence = sequences[0] if sequences else None
+    latest_sequence = sequences[-1] if sequences else None
+    if after_sequence is None:
+        selected = logs[-limit:]
+        truncated = len(selected) < len(logs) or (
+            oldest_sequence is not None and oldest_sequence > 1
+        )
+    else:
+        selected = [item for item in logs if item.sequence > after_sequence][:limit]
+        truncated = (
+            oldest_sequence is not None
+            and after_sequence < oldest_sequence - 1
+        )
+    next_sequence = (
+        selected[-1].sequence
+        if selected
+        else latest_sequence
+        if latest_sequence is not None
+        else after_sequence or 0
+    )
+    has_more = latest_sequence is not None and latest_sequence > next_sequence
+    response.headers["Cache-Control"] = "private, no-store"
+    return ConsoleLogsRead(
+        logs=selected,
+        oldest_sequence=oldest_sequence,
+        latest_sequence=latest_sequence,
+        next_sequence=next_sequence,
+        truncated=truncated,
+        has_more=has_more,
+    )
+
+
+@router.post(
+    "/runs/{run_id}/logs",
+    response_model=ConsoleLogRead,
+    status_code=201,
+)
+def log_console(
+    run_id: uuid.UUID,
+    payload: ConsoleLogCreate,
+    db: Session = Depends(get_db),
+) -> ConsoleLogRead:
+    run = _run_or_404(db, run_id, lock=True)
+    logs, entry = _append_console_log(run.console_logs or [], payload)
+    run.console_logs = logs
+    if payload.step is not None:
+        run.current_step = max(run.current_step, payload.step)
+    _commit(db)
+    return ConsoleLogRead.model_validate(entry)
 
 
 @router.get("/models", response_model=ModelsRead)
