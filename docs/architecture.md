@@ -1,4 +1,8 @@
-# Architecture
+---
+title: "Architecture"
+description: "Understand ctrl-π boundaries, ownership, persistence, control flows, and recovery."
+icon: "network"
+---
 
 ctrl-π is a single-user, self-hosted control plane for the YAM robot-learning
 workflow. Application traffic and private assets never bypass the backend to

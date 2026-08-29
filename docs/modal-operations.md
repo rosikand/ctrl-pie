@@ -1,4 +1,8 @@
-# Modal operations and emergency cleanup
+---
+title: "Modal operations and emergency cleanup"
+description: "Inspect, stop, and verify cleanup of ctrl-π-owned Modal inference resources."
+icon: "cloud-off"
+---
 
 Use the Inference tab's Stop control for normal shutdown. It stops and joins
 robot actions, finalizes an optional local recording, then stops the owned

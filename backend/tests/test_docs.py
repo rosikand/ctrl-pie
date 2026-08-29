@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -13,7 +15,15 @@ from PIL import Image, ImageChops
 REPOSITORY_ROOT = Path(__file__).parents[2]
 DOCS_ROOT = REPOSITORY_ROOT / "docs"
 README = REPOSITORY_ROOT / "README.md"
-SCREENSHOT = DOCS_ROOT / "assets" / "ctrl-pi-inference.png"
+SCREENSHOTS = {
+    "ctrl-pi-arms.png": ("arms", "joint", "gripper"),
+    "ctrl-pi-record.png": ("record", "session", "camera"),
+    "ctrl-pi-datasets.png": ("datasets", "cards", "episode"),
+    "ctrl-pi-training.png": ("training", "run", "metric"),
+    "ctrl-pi-models.png": ("models", "model", "revision"),
+    "ctrl-pi-inference.png": ("inference", "deployment", "robot"),
+    "ctrl-pi-yam-setup.png": ("settings", "yam", "readiness"),
+}
 
 _MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
 _FENCE = re.compile(
@@ -29,9 +39,25 @@ _SECRET_LITERALS = (
 
 def _markdown_files() -> list[Path]:
     assert README.is_file(), "the top-level README is required"
-    files = [README, *sorted(DOCS_ROOT.rglob("*.md"))]
+    files = [
+        README,
+        *sorted(DOCS_ROOT.rglob("*.md")),
+        *sorted(DOCS_ROOT.rglob("*.mdx")),
+    ]
     assert len(files) >= 11
     return files
+
+
+def test_mintlify_configuration_frontmatter_navigation_and_links_validate() -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "validate_docs.py")],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _relative_target(document: Path, raw_target: str) -> Path | None:
@@ -56,24 +82,49 @@ def test_documentation_relative_links_resolve() -> None:
     assert failures == []
 
 
-def test_inference_screenshot_is_real_and_version_control_visible() -> None:
-    assert SCREENSHOT.is_file()
-    assert SCREENSHOT.stat().st_size >= 50_000
-    with Image.open(SCREENSHOT) as image:
-        image.verify()
-    with Image.open(SCREENSHOT) as image:
-        assert image.format == "PNG"
-        assert image.width >= 1_200
-        assert image.height >= 700
-        rgb = image.convert("RGB")
-        extrema = rgb.getextrema()
-        assert all(high - low >= 32 for low, high in extrema)
-        background = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
-        content_bounds = ImageChops.difference(rgb, background).getbbox()
-        assert content_bounds is not None
-        assert content_bounds[1] < image.height // 4
+def test_screenshot_gallery_assets_are_real_and_version_control_visible() -> None:
+    gallery = (DOCS_ROOT / "screenshots.mdx").read_text(encoding="utf-8")
+    image_tags = re.findall(r"<img\b[^>]*>", gallery, flags=re.DOTALL)
+    referenced_assets: set[str] = set()
+    for tag in image_tags:
+        source_match = re.search(r'\bsrc="/assets/(?P<source>[^"]+)"', tag)
+        alt_match = re.search(r'\balt="(?P<alt>[^"]+)"', tag)
+        assert source_match is not None, f"gallery image is missing a docs asset: {tag}"
+        assert alt_match is not None, f"gallery image is missing alt text: {tag}"
 
-    relative = SCREENSHOT.relative_to(REPOSITORY_ROOT).as_posix()
+        source = source_match.group("source")
+        assert source not in referenced_assets, f"duplicate gallery image: {source}"
+        referenced_assets.add(source)
+        required_alt_words = SCREENSHOTS.get(source)
+        assert required_alt_words is not None, f"unexpected gallery image: {source}"
+        alt = alt_match.group("alt").casefold()
+        assert all(word in alt for word in required_alt_words), (
+            f"gallery alt text for {source} does not describe the visible product state"
+        )
+
+    assert referenced_assets == set(SCREENSHOTS)
+    screenshot_paths = [DOCS_ROOT / "assets" / name for name in SCREENSHOTS]
+    for screenshot in screenshot_paths:
+        assert screenshot.is_file()
+        assert screenshot.stat().st_size >= 50_000
+        with Image.open(screenshot) as image:
+            image.verify()
+        with Image.open(screenshot) as image:
+            assert image.format == "PNG"
+            assert image.width >= 1_200
+            assert image.height >= 700
+            rgb = image.convert("RGB")
+            extrema = rgb.getextrema()
+            assert all(high - low >= 32 for low, high in extrema)
+            background = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
+            content_bounds = ImageChops.difference(rgb, background).getbbox()
+            assert content_bounds is not None
+            assert content_bounds[1] < image.height // 4
+
+    relative_paths = [
+        screenshot.relative_to(REPOSITORY_ROOT).as_posix()
+        for screenshot in screenshot_paths
+    ]
     visible = subprocess.run(
         [
             "git",
@@ -82,21 +133,23 @@ def test_inference_screenshot_is_real_and_version_control_visible() -> None:
             "--others",
             "--exclude-standard",
             "--",
-            relative,
+            *relative_paths,
         ],
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-    assert relative in visible, "screenshot is ignored and would not be committed"
+    assert set(relative_paths).issubset(visible), (
+        "one or more gallery screenshots are ignored and would not be committed"
+    )
     assert "docs/assets/ctrl-pi-inference.png" in README.read_text(encoding="utf-8")
     assert "assets/ctrl-pi-inference.png" in (
         DOCS_ROOT / "inference.md"
     ).read_text(encoding="utf-8")
 
 
-def test_documentation_shell_and_json_examples_parse() -> None:
+def test_documentation_shell_json_and_python_examples_parse() -> None:
     failures: list[str] = []
     for document in _markdown_files():
         source = document.read_text(encoding="utf-8")
@@ -122,6 +175,20 @@ def test_documentation_shell_and_json_examples_parse() -> None:
                     failures.append(
                         f"{document.relative_to(REPOSITORY_ROOT)} "
                         f"JSON block {index}: {error}"
+                    )
+            elif language in {"python", "py"}:
+                try:
+                    ast.parse(
+                        body,
+                        filename=(
+                            f"{document.relative_to(REPOSITORY_ROOT)}:"
+                            f"python-block-{index}"
+                        ),
+                    )
+                except SyntaxError as error:
+                    failures.append(
+                        f"{document.relative_to(REPOSITORY_ROOT)} "
+                        f"Python block {index}: {error}"
                     )
     assert failures == []
 

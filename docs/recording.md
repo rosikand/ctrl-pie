@@ -1,4 +1,8 @@
-# Recording and teleoperation
+---
+title: "Recording and teleoperation"
+description: "Teleoperate one YAM pair, capture durable episodes, and upload LeRobot datasets."
+icon: "video"
+---
 
 The Record tab operates one leader/follower pair and collects demonstrations
 as synchronized camera, observation, and action samples. The active lifecycle

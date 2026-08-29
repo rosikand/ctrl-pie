@@ -1,4 +1,8 @@
-# Trainer API
+---
+title: "Trainer API"
+description: "Report external training runs, metrics, logs, and Hugging Face checkpoints."
+icon: "braces"
+---
 
 This focused reporting client remains compatible for existing training
 scripts. New automation that also needs YAM setup/control, recording,
@@ -384,7 +388,7 @@ write into any existing repository, so a typo cannot replace unrelated model
 files. Pick a new model slug for another run. Optional variables are
 `BASE_MODEL`, `OUTPUT_DIR`, and `STEPS`.
 
-<!-- executable-lerobot-example -->
+{/* <!-- executable-lerobot-example --> */}
 ```python
 from __future__ import annotations
 

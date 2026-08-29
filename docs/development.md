@@ -1,4 +1,8 @@
-# Development
+---
+title: "Development"
+description: "Run ctrl-π from source and execute the frontend and backend quality gates."
+icon: "code-2"
+---
 
 Source development runs FastAPI and Vite as two processes. It uses the same
 service boundaries as production, but leaves `FRONTEND_DIST_DIR` unset so Vite
@@ -108,9 +112,10 @@ Start Vite in a second terminal:
 npm --prefix frontend run dev -- --host 127.0.0.1
 ```
 
-Open <http://127.0.0.1:5173>. Vite proxies `/api` and `/ws` to port 8000.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies `/api` and
+`/ws` to port 8000.
 FastAPI exposes interactive OpenAPI documentation at
-<http://127.0.0.1:8000/docs>.
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
 Do not add `--workers` or run several Uvicorn processes. `RigLease`, live
 telemetry, recording subprocesses, inference tasks, and action queues are
@@ -184,6 +189,24 @@ Check Python import/bytecode errors and whitespace before handoff:
 .venv/bin/python -m compileall -q backend/src/ctrl_pi backend/tests
 git diff --check
 ```
+
+Validate the repository-hosted Mintlify navigation, frontmatter, internal
+routes, anchors, and assets without starting the preview server:
+
+```bash
+npm run docs:check
+```
+
+Preview the site or run Mintlify's pinned strict validation and anchor-aware
+broken-link check:
+
+```bash
+npm run docs:dev
+npm run docs:validate
+```
+
+The Mintlify project root is `docs/`, and its configuration is
+`docs/docs.json`. Commit every navigated page and referenced local asset.
 
 Every milestone also requires Alembic against a real PostgreSQL database and
 both development servers to start cleanly. From Milestone 11 onward, the

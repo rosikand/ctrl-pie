@@ -1,168 +1,119 @@
 # ctrl-π
 
 Self-hosted robot-learning operations for YAM arms: collect demonstrations,
-inspect LeRobot datasets, track external training, and run policies against a
-robot from one engineering-focused web console.
+inspect LeRobot datasets and models, track training, and execute policies from
+one web console or typed Python client.
 
 ![ctrl-π Inference tab in deterministic mock mode](docs/assets/ctrl-pi-inference.png)
 
 > [!WARNING]
 > ctrl-π has no authentication in V1. Bind it to localhost or a trusted,
-> firewalled LAN; never expose the service directly to the public Internet.
+> firewalled LAN. Never expose it directly to the public Internet.
 
-ctrl-π runs on the Linux machine attached to the robot. You operate the
-service and retain its state: PostgreSQL holds small control-plane records,
-your Hugging Face namespace holds datasets and model artifacts, and your
-Modal account runs inference. Live telemetry and action-loop state remain
-ephemeral. There is no hosted ctrl-π service.
+## Product
 
-## Six workflows
+ctrl-π runs on the Linux machine attached to the robot. PostgreSQL stores
+small control-plane records, Hugging Face remains the source of truth for
+datasets and model artifacts, and Modal runs real inference workloads. There
+is no hosted ctrl-π service.
 
-- **Arms** — watch connection and CAN health, joints, end-effector pose,
-  gripper state, and loop diagnostics; issue bounded manual jog commands.
-- **Record / Teleop** — pair leader and follower arms, watch the V1 synthetic
-  camera feed, teleoperate, record episodes, and publish LeRobot v3
-  datasets to your Hugging Face namespace.
-- **Datasets** — discover namespace-scoped LeRobot repositories and inspect
-  cards, revisions, episodes, synchronized state/action values, and proxied
-  private video without sending `HF_TOKEN` to the browser.
-- **Training** — track runs created by external scripts and render their
-  configuration, status, checkpoints, live scalar metric curves, and bounded
-  trainer-reported console output. ctrl-π does **not** launch or run training
-  in V1.
-- **Models** — browse Hugging Face model repositories, revisions, checkpoint
-  files, and card metadata in the configured namespace.
-- **Inference** — deploy one immutable policy revision, verify endpoint
-  identity, explicitly start a follower-arm action loop, optionally record
-  the run, and stop with provider teardown verification.
+The interface has six first-class workflows:
 
-The complete UI and orchestration flow works in mock mode with
-`MockYAMDriver`, the synthetic camera, and Stub compute. Mock mode is for
-development and safe workflow checks; it does not pretend that cloud or
-hardware work occurred.
+- **Arms** — inspect telemetry, bus health, joints, pose, gripper state, and
+  loop diagnostics; send bounded manual jog commands.
+- **Record / Teleop** — operate one leader/follower pair, capture episodes,
+  and publish LeRobot v3 datasets.
+- **Datasets** — browse namespace-scoped repositories and inspect immutable
+  episodes, synchronized state/actions, and proxied video.
+- **Training** — monitor metrics, bounded console output, configuration, and
+  checkpoints reported by external trainer clients. This release does not
+  launch managed training.
+- **Models** — browse Hugging Face model cards, immutable revisions, and
+  checkpoint metadata in a separate read-only catalog.
+- **Inference** — deploy one pinned policy revision, explicitly start robot
+  execution, and stop with provider teardown verification.
 
-The same control plane is available to Python scripts through the typed
-`ctrl_pi.CtrlPiClient`. It calls the exact REST services used by the UI for
-status, YAM setup and bounded control, recording, datasets, models, reported
-training, and inference; it does not provide a privileged motion path. See the
-[Python SDK guide](docs/python-sdk.md).
+Settings provides passive YAM discovery, bounded configuration and
+calibration-artifact preflight, durable single-rig setup, explicit connection,
+and separately acknowledged opt-in restoration after boot or hot-plug.
 
-Settings includes a first-time YAM flow for one leader/follower pair: passive
-device discovery, configuration and calibration-file preflight, PostgreSQL
-persistence, explicit connection, and opt-in boot/hot-plug restoration. Both
-immediate and automatic hardware connection have explicit safety gates because
-the pinned follower controller may engage; neither readiness nor fake-vendor
-tests claim that a physical rig was calibrated or validated.
+## Run locally with Docker
 
-## Quickstart with Docker
-
-Requirements are Docker Engine, a current Compose/Buildx plugin, and a
-PostgreSQL 14+ database reachable from the container.
+Requirements: Docker Engine with current Compose/Buildx, plus PostgreSQL 14+
+reachable from the container.
 
 ```bash
 git clone https://github.com/rosikand/ctrl-pie.git
 cd ctrl-pie
 cp .env.example .env
-$EDITOR .env
+${EDITOR:-vi} .env
 docker compose up --build -d --wait
+curl --fail http://127.0.0.1:8000/api/health
 ```
 
-Leave `CTRL_PI_MOCK_MODE=true` for the deterministic stack. Set at least
-`DATABASE_URL` for persisted workflows; Hugging Face and Modal credentials may
-remain blank while exercising mock arms and Stub inference. Open
-<http://127.0.0.1:8000>.
+Set `DATABASE_URL` and leave `CTRL_PI_MOCK_MODE=true` for the deterministic
+stack. Hugging Face and Modal credentials can remain blank until their cloud
+workflows are needed. Open <http://127.0.0.1:8000>. Migrations run before the
+service starts.
 
-The production image builds Vite once, then runs the built SPA and FastAPI
-from a single non-root Uvicorn worker. Migrations run before the service
-starts. See [Docker deployment](docs/docker-deployment.md) for volume,
-shutdown, USB serial, and SocketCAN guidance.
+For an editable Python 3.11/Node.js 22 setup, see
+[Installation](docs/installation.mdx) and [Development](docs/development.md).
 
-## Quickstart from source
+## Python SDK
 
-Use Python 3.11, Node.js 22, PostgreSQL 14+, and FFmpeg with libx264. The
-[development guide](docs/development.md) includes the CPU-only PyTorch install
-that avoids pulling CUDA wheels onto the control-plane machine.
+`CtrlPiClient` uses the same REST services and safety checks as the browser;
+it has no privileged motion path. From an editable checkout:
 
 ```bash
-git clone https://github.com/rosikand/ctrl-pie.git
-cd ctrl-pie
-
-python3.11 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install \
-  --index-url https://download.pytorch.org/whl/cpu \
-  'torch==2.10.0+cpu' 'torchvision==0.25.0+cpu'
-python -m pip install -e './backend[dev]'
-npm --prefix frontend ci
-
-cp .env.example .env
-$EDITOR .env
-export DATABASE_URL='postgresql://ctrl_pi:password@localhost:5432/ctrl_pi'
-alembic -c alembic.ini upgrade head
-make seed
+python -m pip install -e ./backend
 ```
 
-Start the two development processes in separate terminals:
+```python
+from ctrl_pi import CtrlPiClient
 
-```bash
-PYTHONPATH=backend/src uvicorn ctrl_pi.main:app --reload --port 8000
-npm --prefix frontend run dev
+
+with CtrlPiClient("http://127.0.0.1:8000") as ctrl:
+    print(ctrl.health())
+    print(ctrl.list_arms())
 ```
 
-Open <http://127.0.0.1:5173>. With Hub credentials left blank, `make seed`
-still adds the two mock robots and example training curves while safely
-skipping the sample dataset upload.
+The typed client covers system status, YAM setup and bounded control,
+recording, datasets, models, externally reported training, and inference. See
+the [REST and Python SDK guide](docs/python-sdk.md) for lifecycle and cleanup
+examples.
 
-## Runtime support and evidence
+## Safety and support boundary
 
-Real LeRobot 0.4.4 policy serving on Modal GPU is implemented, not represented
-only by the offline stub. The Milestone 11 proof ran a revision-pinned ACT
-policy on an A10G for 115.6 seconds: 290 inference chunks drove 5,778 mock-arm
-actions at 49.45 Hz with 119.70 ms average inference latency and no dropped
-chunks. It finalized a one-episode LeRobot dataset, stopped the Modal App, and
-then verified zero active ctrl-π resources. The evidence is recorded in
-milestone commit `b34d9a63e16e9642f821e61d4e9a40a28d769e9b`.
-
-The boundaries are deliberately explicit:
-
-- Real Modal inference supports LeRobot on `Modal: A10G`, `Modal: A100`, and
-  `Modal: H100`.
-- OpenPI can be selected for deterministic mock emulation, but a real OpenPI
-  runtime is unavailable in V1 and fails clearly before provider deployment.
-- `CTRL_PI_MOCK_MODE=false` selects the fail-closed real YAM adapter for a
-  standard SocketCAN follower with a crank 4310 gripper and a calibrated
-  GELLO serial leader. Settings can discover, preflight, save, and later
-  restore that one setup. Missing configuration or hardware remains visibly
-  disconnected and never falls back to `MockYAMDriver`.
-- The real adapter is covered with fake-vendor mapping, lifecycle, fault, and
-  concurrency tests, but this cloud workspace has no physical YAM rig. Motor
-  directions/offsets, wrist mapping, gravity compensation, bus permissions,
-  limits, emergency stop, and disconnect recovery must still be validated on
-  the target Ubuntu/YAM box before motion.
-- Training stays on compute you operate through LeRobot, OpenPI, or custom
-  scripts. The Trainer API records progress and artifacts only.
-
-Read [compute targets and inference](docs/inference.md) for the runtime wire
-contract, cost guardrails, model packaging, robot loop, and teardown model.
+- Mock mode supplies `MockYAMDriver`, a synthetic camera, and Stub compute. It
+  exercises the product workflow but does not prove hardware or cloud behavior.
+- Hardware mode fails closed: missing configuration or devices never fall back
+  to mocks. Discovery and preflight do not open devices or start a controller.
+- Connecting a real follower may energize motors and engage gravity
+  compensation. The operator must clear the workspace, verify power and
+  emergency-stop access, and deliberately acknowledge immediate or automatic
+  connection.
+- The real adapter has extensive fake-vendor coverage, but no physical YAM was
+  available in this workspace. Directions, offsets, limits, calibration,
+  model fidelity, bus behavior, E-stop response, and disconnect recovery still
+  require validation on the target Ubuntu/YAM box before motion.
+- The V1 camera remains synthetic. Real OpenPI serving is unavailable and
+  fails before provider deployment; real LeRobot policy serving on Modal is
+  supported.
 
 ## Documentation
 
-| Guide | Contents |
-| --- | --- |
-| [Setup and configuration](docs/setup.md) | Environment variables, service readiness, YAM first-run onboarding, and safe automatic restoration |
-| [Architecture](docs/architecture.md) | Process boundaries, persistence, live state, leases, and safety invariants |
-| [Development](docs/development.md) | Source installation, dev servers, tests, migrations, seeding, and contribution workflow |
-| [Docker deployment](docs/docker-deployment.md) | Production container, storage, graceful shutdown, USB, and SocketCAN |
-| [Record and teleoperate](docs/recording.md) | Pairing, episode lifecycle, metadata, staging, upload, and recovery |
-| [Datasets and inference](docs/inference.md) | Compute targets, Modal serving, runtime adapters, robot execution, and teardown |
-| [Trainer API](docs/trainer-api.md) | Python client, every REST method, metric and console reporting, and a LeRobot fine-tune example |
-| [Python SDK](docs/python-sdk.md) | Typed access to the complete current REST control plane, safety rules, and model-to-inference example |
-| [YAM driver interface](docs/yam-driver.md) | Driver contract, telemetry, command bounds, leases, and the real-hardware boundary |
-| [Modal operations](docs/modal-operations.md) | Owned-App naming and verified emergency cleanup with `make modal-panic` |
-| [Mock smoke gate](docs/smoke-test.md) | The complete record → upload → discover → infer → teardown acceptance flow |
-| [V1 final review](FINAL_REVIEW.md) | Exact release-gate evidence, launch commands, known limitations, and the remaining physical Ubuntu/YAM checklist |
+- [Introduction](docs/index.mdx)
+- [Installation](docs/installation.mdx) and [mock quickstart](docs/quickstart.mdx)
+- [YAM setup](docs/yam-setup.md) and [Arms](docs/arms.md)
+- [Recording](docs/recording.md), [Datasets](docs/datasets.md),
+  [Training](docs/training.md), [Models](docs/models.md), and
+  [Inference](docs/inference.md)
+- [REST and Python SDK](docs/python-sdk.md)
+- [Architecture](docs/architecture.md),
+  [Docker deployment](docs/docker-deployment.md), and
+  [Troubleshooting](docs/troubleshooting.md)
+- [Current UI gallery](docs/screenshots.mdx) and
+  [release notes](docs/release-notes.md)
 
-Start with [setup](docs/setup.md), keep credentials in the backend-only
-gitignored `.env`, and use the Settings checklist to confirm readiness without
-ever returning secret values to the browser.
+Keep credentials in the backend-only, gitignored `.env`; the browser receives
+status and the minimum workflow data, never service secrets.

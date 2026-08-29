@@ -1,4 +1,8 @@
-# Docker deployment
+---
+title: "Docker deployment"
+description: "Build and operate the single-process production container safely."
+icon: "container"
+---
 
 The Docker option runs ctrl-pi as one non-root service. A Node build stage
 compiles the Vite application, then the final Python image serves those static
@@ -34,7 +38,7 @@ docker compose build
 docker compose up -d --wait
 ```
 
-Open <http://127.0.0.1:8000>. `CTRL_PI_PORT` changes the host port and
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). `CTRL_PI_PORT` changes the host port and
 `CTRL_PI_BIND_ADDRESS` changes its bind address:
 
 ```bash

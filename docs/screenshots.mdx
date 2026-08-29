@@ -1,0 +1,105 @@
+---
+title: "Screenshots"
+description: "Tour the six ctrl-π workflows and first-time YAM setup in deterministic mock mode."
+---
+
+These captures show the current ctrl-π interface with `MockYAMDriver`, the
+synthetic camera, and Stub compute. The Datasets and Models views use the
+server-configured Hugging Face namespace. A screenshot demonstrates the UI
+state only; it is not evidence that a physical YAM or a cloud workload was
+validated.
+
+## Arms
+
+Inspect the selected arm's connection, bus, joint state, end-effector pose,
+gripper, and live loop diagnostics. Manual jog commands remain bounded and
+require a connected arm. See [Arms](/arms) for the hardware safety boundary.
+
+<Frame caption="Live MockYAMDriver telemetry on the Arms tab">
+  <img
+    src="/assets/ctrl-pi-arms.png"
+    alt="ctrl-π Arms tab showing six-joint telemetry, end-effector pose, gripper state, and loop diagnostics"
+  />
+</Frame>
+
+## Record and teleoperate
+
+Create a named leader/follower session, inspect the camera, teleoperate, and
+capture structured episodes before uploading them to Hugging Face. See
+[Record and teleoperate](/recording) for the complete session lifecycle.
+
+<Frame caption="A recording session with the synthetic mock camera">
+  <img
+    src="/assets/ctrl-pi-record.png"
+    alt="ctrl-π Record and Teleop tab showing the new-session form, mock camera, and session controls"
+  />
+</Frame>
+
+## Datasets
+
+Browse LeRobot repositories in the configured namespace, then inspect an
+immutable revision's episodes, synchronized state/action values, and video.
+The browser never receives the Hugging Face token. See [Datasets](/datasets).
+
+<Frame caption="Namespace-scoped LeRobot dataset catalog">
+  <img
+    src="/assets/ctrl-pi-datasets.png"
+    alt="ctrl-π Datasets tab showing four LeRobot dataset cards with episode and frame summaries"
+  />
+</Frame>
+
+## Training
+
+Training is a first-class view for runs reported by external trainer clients.
+It renders bounded metrics, checkpoints, and sanitized console lines; this
+version does not launch managed training. See [Training](/training) and the
+[Trainer API](/trainer-api).
+
+<Frame caption="Externally reported training run and scalar metrics">
+  <img
+    src="/assets/ctrl-pi-training.png"
+    alt="ctrl-π Training tab showing reported runs, run metadata, scalar metric charts, and trainer console"
+  />
+</Frame>
+
+## Models
+
+Models is a separate read-only catalog backed by Hugging Face. It shows model
+cards, immutable revisions, and checkpoint metadata; artifact uploads stay in
+the user's existing Hub tooling. See [Models](/models).
+
+<Frame caption="Hugging Face model catalog as its own first-class tab">
+  <img
+    src="/assets/ctrl-pi-models.png"
+    alt="ctrl-π Models tab showing model cards, immutable revisions, metadata, and checkpoint files"
+  />
+</Frame>
+
+## Inference
+
+Select an immutable policy revision, deploy its endpoint, then explicitly
+start robot execution only after endpoint and follower readiness are
+authoritative. Stop performs provider teardown verification. This capture uses
+the deterministic local stub. See [Inference](/inference).
+
+<Frame caption="Pinned policy deployment and explicit robot execution gates">
+  <img
+    src="/assets/ctrl-pi-inference.png"
+    alt="ctrl-π Inference tab showing a pinned model revision, compute selection, deployment history, and robot execution controls"
+  />
+</Frame>
+
+## First-time YAM setup
+
+Settings guides one leader/follower pair through passive discovery, bounded
+configuration, calibration-artifact preflight, persistence, and an explicit
+connection. Hardware connection and automatic restoration require separate
+motion-risk acknowledgements. The mock-ready state below does not detect,
+calibrate, connect, or validate a physical YAM. See [YAM setup](/yam-setup).
+
+<Frame caption="Deterministic mock representation of the YAM onboarding flow">
+  <img
+    src="/assets/ctrl-pi-yam-setup.png"
+    alt="ctrl-π Settings YAM onboarding panel showing readiness, passive discovery, configuration, and connection status"
+  />
+</Frame>

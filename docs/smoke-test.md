@@ -1,4 +1,8 @@
-# Full mock smoke gate
+---
+title: "Full mock smoke gate"
+description: "Run the deterministic end-to-end recording, Hub, inference, and teardown gate."
+icon: "flame"
+---
 
 `make smoke` is the recurring Milestone 11+ acceptance gate. Robot arms,
 camera source, policy runtime, and compute target stay in deterministic mock

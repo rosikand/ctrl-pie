@@ -333,10 +333,14 @@ V1.1 builds on the completed V1 in this order:
    restoration.
 3. The meaningful current control plane becomes available through one typed
    REST/Python SDK, while preserving the focused Trainer client.
+4. The repository-hosted `docs/` tree becomes the production Mintlify
+   documentation site, with a concise README, complete current-product
+   navigation, validated examples and links, a screenshot gallery, and a
+   changelog.
 
-Managed training, the production documentation site, and user-facing AI-agent
-guidance are specified when their later accepted V1.1 issues are implemented;
-they are not implied by the universal client milestone alone.
+Managed training and user-facing AI-agent guidance are specified when their
+later accepted V1.1 issues are implemented; they are not implied by the
+universal client or documentation milestones alone.
 
 ## Decisions
 
@@ -516,3 +520,13 @@ they are not implied by the universal client milestone alone.
   originate in the operator's Hugging Face tooling, while selecting a pinned
   model and starting inference is the supported model-to-YAM path. This
   milestone adds neither arbitrary action submission nor managed training.
+- 2026-08-29 — V1.1 publishes the current product documentation from the
+  repository-owned Mintlify tree under `docs/`. `docs/docs.json` is the
+  navigation source of truth; every content page is navigated, carries
+  Mintlify frontmatter, and is checked locally for broken routes, anchors,
+  assets, shell/JSON examples, and credential leakage. The site covers the
+  six product workflows, installation, YAM onboarding, the REST/Python SDK,
+  architecture, operations, screenshots, troubleshooting, and release notes.
+  The top-level README remains a concise entry point rather than a duplicate
+  manual. Documentation describes only behavior present in the current tree;
+  managed training remains out of scope until its accepted issue is built.

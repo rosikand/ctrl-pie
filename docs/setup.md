@@ -1,4 +1,8 @@
-# Setup and configuration
+---
+title: "Detailed setup reference"
+description: "Configure production services, hardware mode, networking, and operational readiness."
+icon: "list-checks"
+---
 
 ctrl-π runs on a machine connected to the YAM arms and uses services in your
 own accounts. PostgreSQL stores small control-plane state, Hugging Face stores
@@ -247,7 +251,7 @@ This procedure and command have not been executed on a physical YAM in the
 development environment. File creation and structural preflight still do not
 prove physical directions, offsets, limits, bus behavior, model fidelity, or
 emergency-stop operation; complete the target-box checklist in
-[YAM driver interface](yam-driver.md#required-ubuntuyam-validation).
+[YAM driver interface](/yam-driver#required-ubuntu-yam-validation).
 
 Automatic restoration is off on a new physical setup. Enabling it is a
 separate explicit acknowledgment that ctrl-π may automatically connect—and

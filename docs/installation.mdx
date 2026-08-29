@@ -1,0 +1,144 @@
+---
+title: "Installation"
+description: "Install ctrl-π with Docker or from an editable source checkout."
+icon: "download"
+---
+
+Docker is the shortest path to a production-shaped, single-process ctrl-π
+service. A source checkout is better for frontend or backend development.
+Both paths use the same `.env` configuration and external PostgreSQL database.
+The backend package also installs the typed `ctrl_pi.CtrlPiClient` SDK.
+
+## Requirements
+
+<Tabs>
+  <Tab title="Docker">
+    - Linux with Docker Engine
+    - Docker Compose and Buildx plugins
+    - PostgreSQL 14 or newer, reachable from the container
+
+    Real YAM use additionally requires SocketCAN and USB device access on the
+    host. See [Docker deployment](/docker-deployment) before enabling hardware.
+  </Tab>
+  <Tab title="Source">
+    - Python 3.11
+    - Node.js 22 and npm
+    - PostgreSQL 14 or newer
+    - FFmpeg with the `libx264` encoder
+    - `make` and `curl`
+
+    Linux is the production target. macOS development is supported against
+    mock arms, the synthetic camera, and Stub compute.
+  </Tab>
+</Tabs>
+
+## Install with Docker
+
+<Steps>
+  <Step title="Clone and configure">
+
+```bash
+git clone https://github.com/rosikand/ctrl-pie.git
+cd ctrl-pie
+cp .env.example .env
+${EDITOR:-vi} .env
+```
+
+    Set `DATABASE_URL` and leave `CTRL_PI_MOCK_MODE=true` for the first run.
+    Hugging Face and Modal may remain blank until you use those workflows.
+  </Step>
+  <Step title="Build and start">
+
+```bash
+docker compose up --build -d --wait
+```
+
+    The entrypoint applies `alembic upgrade head` when `DATABASE_URL` is set,
+    then starts one non-root Uvicorn worker serving both the API and built UI.
+  </Step>
+  <Step title="Verify the service">
+
+```bash
+curl --fail http://127.0.0.1:8000/api/health
+docker compose ps
+```
+
+    Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
+  </Step>
+</Steps>
+
+<Note>
+  A database URL containing `localhost` points back to the container. Use a
+  hosted URL or a host/LAN address that the container can reach.
+</Note>
+
+## Install from source
+
+<Steps>
+  <Step title="Create the Python environment">
+
+```bash
+git clone https://github.com/rosikand/ctrl-pie.git
+cd ctrl-pie
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install \
+  --index-url https://download.pytorch.org/whl/cpu \
+  'torch==2.10.0+cpu' \
+  'torchvision==0.25.0+cpu'
+python -m pip install -e './backend[dev]'
+```
+
+    Installing the CPU Torch wheels first avoids pulling CUDA runtimes onto
+    the arm-connected control-plane machine.
+  </Step>
+  <Step title="Install the frontend">
+
+```bash
+npm --prefix frontend ci
+```
+  </Step>
+  <Step title="Create the environment file and migrate">
+
+```bash
+cp .env.example .env
+${EDITOR:-vi} .env
+export DATABASE_URL='postgresql://ctrl_pi:password@localhost:5432/ctrl_pi'
+.venv/bin/alembic -c alembic.ini upgrade head
+```
+
+    Alembic reads `DATABASE_URL` from the process environment; it does not
+    load `.env` itself.
+  </Step>
+  <Step title="Start both development servers">
+
+```bash
+PYTHONPATH=backend/src .venv/bin/uvicorn ctrl_pi.main:app \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --reload
+```
+
+    In a second terminal:
+
+```bash
+npm --prefix frontend run dev -- --host 127.0.0.1
+```
+
+    Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies `/api`
+    and `/ws` to the backend.
+  </Step>
+</Steps>
+
+Never add multiple Uvicorn workers. Robot ownership, recording tasks, live
+telemetry, inference queues, and `RigLease` are intentionally process-local.
+
+## Next steps
+
+- Follow the [mock quickstart](/quickstart) to exercise every primary tab.
+- Review [YAM onboarding](/yam-setup) before connecting physical hardware.
+- Configure accounts and secrets in [Configuration and credentials](/configuration).
+- Automate the same workflows through the [REST and Python SDK](/python-sdk).
+- Use the [detailed setup reference](/setup) for production and operator checks.
+- For contributor tooling and tests, continue to [Development](/development).

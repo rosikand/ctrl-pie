@@ -1,4 +1,8 @@
-# Python SDK
+---
+title: "REST and Python SDK"
+description: "Automate ctrl-π workflows through the typed client and shared REST control plane."
+icon: "code-xml"
+---
 
 `CtrlPiClient` is the typed, synchronous Python interface to the same ctrl-π
 REST services used by the web console. It covers the current system, YAM setup,
@@ -110,8 +114,8 @@ before retrying. If the API cannot perform verified cleanup, follow
 [`make modal-panic`](modal-operations.md) from the arm-connected box.
 
 Mock mode uses the built-in `ctrl-pi/mock-policy` identity, the `stub` runtime,
-and `CPU`. Real LeRobot/OpenPI serving uses a Modal GPU. Real OpenPI serving is
-not available in V1.1 hardware mode.
+and `CPU`. Real LeRobot serving uses a Modal GPU; a real-mode OpenPI choice is
+rejected before deployment because that runtime is unavailable in V1.1.
 
 ## YAM setup and arm control
 

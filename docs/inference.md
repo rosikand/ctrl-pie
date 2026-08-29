@@ -1,4 +1,8 @@
-# Compute targets and inference
+---
+title: "Inference"
+description: "Deploy revision-pinned policies, run follower-arm inference, and verify teardown."
+icon: "radio-tower"
+---
 
 ctrl-π separates **deployment** from **robot motion**. Deploying creates and
 verifies a compute endpoint, but it never moves an arm. Starting inference is
@@ -12,17 +16,21 @@ The screenshot shows mock mode. Mock mode exercises the same browser and
 orchestration lifecycle without Hugging Face or Modal calls; it is not
 evidence of a real GPU deployment.
 
+Select the immutable artifact in the first-class [Models](/models) page. The
+same deploy/start/state/stop lifecycle is available through the typed
+[REST and Python SDK](/python-sdk).
+
 ## Supported combinations
 
-| Target | Runtime | Compute | V1 behavior |
+| Target | Runtime | Compute | Current behavior |
 | --- | --- | --- | --- |
 | Stub target (`CTRL_PI_MOCK_MODE=true`) | Stub | CPU | Deterministic in-process policy and compute lifecycle; no external call. |
 | Stub target | LeRobot or OpenPI selection | Modal GPU label | Deterministic stub emulates that runtime's typed identity for UI/tests; no framework is loaded. |
 | Modal target (`CTRL_PI_MOCK_MODE=false`) | Stub | CPU | Trivial CPU workload used to prove Modal lifecycle. |
 | Modal target | LeRobot | `Modal: A10G`, `Modal: A100`, or `Modal: H100` | Real revision-pinned LeRobot 0.4.4 policy on one GPU container. |
-| Modal target | OpenPI | Modal GPU label | Rejected explicitly. A real OpenPI runtime is unavailable in V1. |
+| Modal target | OpenPI | Modal GPU label | Rejected explicitly. A real OpenPI runtime is unavailable in V1 and remains unavailable in V1.1. |
 
-Modal is the only real compute provider in V1. `ComputeTarget` keeps provider
+Modal is the only real compute provider in this release. `ComputeTarget` keeps provider
 operations behind a small deploy/health/inspect/stop boundary, but ctrl-π does
 not implement BYOC, queues, warm pools, or another cloud target.
 

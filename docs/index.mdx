@@ -1,0 +1,113 @@
+---
+title: "Introduction"
+description: "A self-hosted control plane for collecting YAM demonstrations, tracking training, and running policies."
+icon: "house"
+---
+
+ctrl-π is an engineering console and typed Python API for the YAM
+robot-learning loop. It brings arm telemetry, demonstration capture, LeRobot
+datasets, external training reports, model artifacts, and policy execution
+into one control plane.
+
+You run ctrl-π on the Linux machine connected to the arms. PostgreSQL,
+Hugging Face, and Modal stay in infrastructure and accounts you control;
+ctrl-π is not a hosted intermediary. It retains control-plane metadata and
+pre-upload recording staging only in the storage you configure.
+
+<Warning>
+  ctrl-π has no authentication in V1. Bind it to localhost or a trusted,
+  firewalled LAN. Never expose port 8000 or the Vite development server
+  directly to the public Internet.
+</Warning>
+
+<Frame caption="The Inference workflow configured for deterministic mock compute">
+  <img
+    src="/assets/ctrl-pi-inference.png"
+    alt="ctrl-π Inference page with a mock policy deployment and follower-arm controls"
+  />
+</Frame>
+
+## One control plane, six workflows
+
+<Columns cols={2}>
+  <Card title="Arms" icon="bot" href="/arms">
+    Inspect live connection, joint, pose, gripper, timing, and bus state. Send
+    bounded manual jog commands.
+  </Card>
+  <Card title="Record / Teleop" icon="video" href="/recording">
+    Mirror a leader to a follower, capture synchronized episodes, and publish
+    LeRobot v3 datasets.
+  </Card>
+  <Card title="Datasets" icon="database" href="/datasets">
+    Browse namespace-scoped datasets and scrub private video with synchronized
+    observation and action values.
+  </Card>
+  <Card title="Training" icon="brain-circuit" href="/training">
+    Follow runs reported by external scripts and inspect scalar metrics,
+    bounded console output, configuration, and checkpoint metadata.
+  </Card>
+  <Card title="Models" icon="package" href="/models">
+    Browse Hugging Face model repositories and select immutable revisions for
+    inference.
+  </Card>
+  <Card title="Inference" icon="radio-tower" href="/inference">
+    Deploy an immutable policy revision, explicitly start robot execution, and
+    stop with provider teardown verification.
+  </Card>
+  <Card title="Settings" icon="settings" href="/yam-setup">
+    Check mode-aware readiness and edit non-secret recording and inference
+    defaults.
+  </Card>
+</Columns>
+
+The browser and [`CtrlPiClient`](/python-sdk) call the same backend REST
+services. Settings remains available from the gear icon rather than becoming
+a seventh primary workflow tab.
+
+## Where state lives
+
+| State | Owner | Examples |
+| --- | --- | --- |
+| Control-plane metadata | Your PostgreSQL database | Robots, recording summaries, training runs, deployments, non-secret settings |
+| Artifact bytes | Your Hugging Face namespace | LeRobot parquet/video/metadata, model cards, policy weights |
+| Pre-upload recordings | The ctrl-π host or Docker volume | Finalized MP4, synchronized JSONL, durable episode manifest |
+| Live state | One ctrl-π backend process | Telemetry, camera frames, rig leases, action queues, latency |
+| Inference compute | Your Modal account | One ephemeral, exactly owned App per real deployment |
+
+The backend is the only component that talks to hardware or receives service
+credentials. Private Hub media is proxied at an immutable revision, and Modal
+endpoint credentials never enter browser code.
+
+## Mock and hardware modes
+
+Mock mode is the default. It supplies a leader, follower, synthetic camera,
+and deterministic Stub inference while still exercising real FFmpeg,
+recording, database, and LeRobot conversion paths. Hugging Face calls remain
+real unless a test explicitly selects the fake Hub.
+
+Hardware mode selects the fail-closed standard-YAM adapter and real Modal
+compute. A missing device or credential remains visibly unavailable; ctrl-π
+never silently substitutes mock hardware after a real-mode failure.
+
+<Note>
+  The V1 camera is synthetic in both modes. Real hardware support is limited
+  to one standard SocketCAN YAM follower, one calibrated GELLO leader, and the
+  `crank_4310` gripper. Complete the physical validation checklist before
+  enabling motion.
+</Note>
+
+## Start here
+
+<Columns cols={3}>
+  <Card title="Install ctrl-π" icon="download" href="/installation">
+    Choose Docker or an editable source checkout.
+  </Card>
+  <Card title="Run the mock loop" icon="rocket" href="/quickstart">
+    Walk through the product safely without a robot or Modal account.
+  </Card>
+  <Card title="Configure services" icon="key-round" href="/configuration">
+    Connect PostgreSQL, Hugging Face, Modal, and eventually YAM hardware.
+  </Card>
+</Columns>
+
+For scripts and notebooks, continue to the [REST and Python SDK guide](/python-sdk).

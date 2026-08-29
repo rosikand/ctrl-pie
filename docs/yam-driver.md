@@ -1,4 +1,8 @@
-# YAM driver interface
+---
+title: "YAM driver interface"
+description: "Review the mock and real YAM boundary, safety limits, restoration, and validation checklist."
+icon: "cpu"
+---
 
 `YAMDriver` is ctrl-π's synchronous boundary around arm hardware. HTTP
 handlers, teleoperation, recording, and inference use this interface; vendor
@@ -8,12 +12,12 @@ application instead selects `RealYAMDriver`; hardware mode never falls back to
 mock arms after a configuration, import, calibration, or connection failure.
 
 The authoritative types are in
-[`drivers/yam.py`](../backend/src/ctrl_pi/drivers/yam.py). The two
+[`drivers/yam.py`](https://github.com/rosikand/ctrl-pie/blob/main/backend/src/ctrl_pi/drivers/yam.py). The two
 implementations are
-[`drivers/mock_yam.py`](../backend/src/ctrl_pi/drivers/mock_yam.py) and
-[`drivers/real_yam.py`](../backend/src/ctrl_pi/drivers/real_yam.py).
+[`drivers/mock_yam.py`](https://github.com/rosikand/ctrl-pie/blob/main/backend/src/ctrl_pi/drivers/mock_yam.py) and
+[`drivers/real_yam.py`](https://github.com/rosikand/ctrl-pie/blob/main/backend/src/ctrl_pi/drivers/real_yam.py).
 Single-process command arbitration is in
-[`rig.py`](../backend/src/ctrl_pi/rig.py).
+[`rig.py`](https://github.com/rosikand/ctrl-pie/blob/main/backend/src/ctrl_pi/rig.py).
 
 ## Interface contract
 
@@ -278,7 +282,7 @@ safe identity/connection/bus state and always attempts the driver's bounded
 shutdown path. A vendor I/O thread that does not return still requires the
 operator to make the hardware safe and terminate the process.
 
-## Required Ubuntu/YAM validation
+## Required Ubuntu-YAM validation
 
 No physical YAM is attached to the cloud development environment. Fake-vendor
 tests validate adapter logic but cannot establish physical safety or device
