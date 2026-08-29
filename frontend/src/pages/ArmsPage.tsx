@@ -60,7 +60,8 @@ function optionalFixed(
   return value === null ? "—" : `${value.toFixed(digits)}${suffix}`;
 }
 
-function busRate(bitrate: number): string {
+function busRate(bitrate: number | null): string {
+  if (bitrate === null) return "bitrate unavailable";
   return bitrate >= 1_000_000
     ? `${(bitrate / 1_000_000).toFixed(0)} Mbps`
     : `${(bitrate / 1_000).toFixed(1)} kbps`;
@@ -134,7 +135,7 @@ function ArmSelector({
       >
         {arms.map((arm) => (
           <option key={arm.id} value={arm.id}>
-            {arm.name} · {arm.role}
+            {arm.name} · {arm.role}{arm.side ? ` · ${arm.side}` : ""}
           </option>
         ))}
       </select>
@@ -147,26 +148,30 @@ function ArmSelector({
 }
 
 function StatusStrip({ arm }: { arm: ArmTelemetry }) {
-  const busHealthy = arm.can.state === "active";
+  const busHealthy = arm.can?.state === "active";
   const items = [
     {
       label: "Connection",
-      value: arm.connected ? "Connected" : "Disconnected",
-      detail: arm.driver,
+      value: arm.control_state.replaceAll("_", " "),
+      detail: arm.energized
+        ? arm.holding ? "Energized · holding position" : "Energized"
+        : "Not energized",
       ready: arm.connected,
       icon: Wifi,
     },
     {
       label: "Device bus",
-      value: arm.can.state,
-      detail: `${arm.can.interface} · ${busRate(arm.can.bitrate)}`,
+      value: arm.can?.state ?? arm.transport_kind,
+      detail: arm.can
+        ? `${arm.can.interface} · ${busRate(arm.can.bitrate)}`
+        : arm.transport_kind === "serial" ? "Stable serial transport" : "CAN unresolved",
       ready: busHealthy,
       icon: Network,
     },
     {
       label: "Role",
       value: arm.role,
-      detail: "YAM arm",
+      detail: [arm.side, arm.pair_id ? `pair ${arm.pair_id}` : null, arm.group_id ? `group ${arm.group_id}` : null].filter(Boolean).join(" · ") || "Unpaired YAM arm",
       ready: true,
       icon: Bot,
     },
@@ -307,7 +312,7 @@ function GripperCard({ arm }: { arm: ArmTelemetry }) {
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Grip className="h-4 w-4 text-slate-400" strokeWidth={1.8} />
-          <h2 className="text-sm font-semibold text-slate-900">Gripper</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{arm.end_effector_kind === "linear_4310" ? "Linear jaw" : "Gripper"}</h2>
         </div>
         <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${arm.gripper.is_closed ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-600"}`}>
           {arm.gripper.is_closed ? "Closed" : "Open"}
@@ -323,6 +328,7 @@ function GripperCard({ arm }: { arm: ArmTelemetry }) {
           <div className="h-full rounded-full bg-brand-500 transition-[width] duration-150" style={{ width: `${percent}%` }} />
         </div>
       </div>
+      <p className="mt-3 text-[10px] leading-4 text-slate-400">Normalized command: 0 closed · 1 open</p>
       <div className="mt-5 grid grid-cols-2 gap-3">
         <div className="rounded-lg bg-slate-50 px-3 py-2.5">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Force</p>
@@ -341,28 +347,66 @@ function GripperCard({ arm }: { arm: ArmTelemetry }) {
   );
 }
 
+function HandleCard({ arm }: { arm: ArmTelemetry }) {
+  const handle = arm.handle;
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-panel sm:p-6">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2"><Grip className="h-4 w-4 text-slate-400" /><h2 className="text-sm font-semibold text-slate-900">Teaching handle</h2></div>
+        <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${handle?.range_status === "healthy" ? "bg-emerald-50 text-emerald-700" : handle?.range_status === "unhealthy" ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-600"}`}>{handle?.range_status.replaceAll("_", " ") ?? "Unavailable"}</span>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <div className="rounded-lg bg-slate-50 px-3 py-2.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Trigger</p><p className="mt-1 font-mono text-sm font-semibold text-slate-700">{handle?.trigger_position?.toFixed(3) ?? "—"}</p></div>
+        <div className="rounded-lg bg-slate-50 px-3 py-2.5"><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Encoder</p><p className="mt-1 text-xs font-semibold text-slate-700">{handle?.reachable ? "Reachable" : "Not verified"}</p></div>
+      </div>
+      <p className="mt-3 text-[10px] leading-4 text-slate-400">CAN connectivity and handle health are separate. Run the explicit range check in Settings; ctrl-π does not re-zero handles.</p>
+      {handle?.calibration_warning && <p className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[10px] leading-4 text-rose-700">{handle.calibration_warning}</p>}
+    </section>
+  );
+}
+
+function PairDeltas({ arm, mate }: { arm: ArmTelemetry; mate: ArmTelemetry }) {
+  const leader = arm.role === "leader" ? arm : mate;
+  const follower = arm.role === "follower" ? arm : mate;
+  if (follower.frame_map_active) {
+    return (
+      <section className="rounded-xl border border-amber-200 bg-amber-50 p-5 shadow-panel sm:p-6">
+        <h2 className="text-sm font-semibold text-amber-950">Mapped pair alignment</h2>
+        <p className="mt-2 text-xs leading-5 text-amber-900">
+          This pair has an active follower frame map, so raw leader and follower joint values are not directly comparable. Start observation-only teleop in Record and inspect its driver-prepared mapped deltas before approving synchronization.
+        </p>
+      </section>
+    );
+  }
+  const followerByName = new Map(follower.joints.map((joint) => [joint.name, joint.position_radians]));
+  return (
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-panel">
+      <div className="border-b border-slate-100 px-5 py-4 sm:px-6"><h2 className="text-sm font-semibold text-slate-900">Live pair alignment</h2><p className="mt-1 text-xs text-slate-400">Identity-mapped leader − follower physical joint deltas for pair {arm.pair_id}. Inspect before explicitly enabling sync in Record.</p></div>
+      <div className="grid grid-cols-2 gap-px bg-slate-100 sm:grid-cols-3 xl:grid-cols-6">{leader.joints.map((joint, index) => { const delta = joint.position_radians - (followerByName.get(joint.name) ?? joint.position_radians); return <div key={joint.name} className="bg-white px-4 py-3"><p className="text-[10px] font-semibold uppercase text-slate-400">J{index + 1}</p><p className="mt-1 font-mono text-sm font-semibold text-slate-800">{degrees(delta)}</p><p className="mt-0.5 font-mono text-[9px] text-slate-400">{signed(delta, 3)} rad</p></div>; })}</div>
+    </section>
+  );
+}
+
 function Diagnostics({ arm }: { arm: ArmTelemetry }) {
   const loop = arm.control_loop;
-  const targetDelta = Math.abs(loop.frequency_hz - loop.target_frequency_hz);
-  const onTarget = targetDelta <= loop.target_frequency_hz * 0.05;
-  const txErrors = arm.can.tx_error_count;
-  const rxErrors = arm.can.rx_error_count;
+  const txErrors = arm.can?.tx_error_count ?? null;
+  const rxErrors = arm.can?.rx_error_count ?? null;
   const errors =
     txErrors === null || rxErrors === null ? null : txErrors + rxErrors;
   const stats = [
     {
       label: "Loop frequency",
       value: `${loop.frequency_hz.toFixed(1)} Hz`,
-      detail: `Target ${loop.target_frequency_hz.toFixed(0)} Hz`,
+      detail: `${loop.source} observation · reference only`,
       icon: CircleGauge,
-      healthy: onTarget,
+      healthy: null,
     },
     {
       label: "Cycle time",
       value: `${loop.cycle_time_ms.toFixed(2)} ms`,
       detail: `${loop.jitter_ms.toFixed(2)} ms jitter`,
       icon: Gauge,
-      healthy: loop.jitter_ms < 2,
+      healthy: null,
     },
     {
       label: "Dropped cycles",
@@ -372,11 +416,11 @@ function Diagnostics({ arm }: { arm: ArmTelemetry }) {
       healthy: loop.dropped_cycles === 0,
     },
     {
-      label: "Bus errors",
+      label: arm.can ? "Bus errors" : "Bus counters",
       value: errors === null ? "—" : errors.toLocaleString(),
       detail: errors !== null
         ? `${txErrors} TX · ${rxErrors} RX`
-        : "Counters unavailable from driver",
+        : arm.can ? "Counters unavailable from driver" : "Not a CAN transport",
       icon: Zap,
       healthy: errors === null ? null : errors === 0,
     },
@@ -682,6 +726,9 @@ export function ArmsPage() {
     [arms, selectedId],
   );
   const controlsDisabled = connectionState !== "live" || !arm?.connected;
+  const pairMate = arm?.pair_id
+    ? arms.find((candidate) => candidate.id !== arm.id && candidate.pair_id === arm.pair_id && candidate.role !== arm.role)
+    : undefined;
 
   return (
     <div className="mx-auto max-w-7xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
@@ -690,7 +737,7 @@ export function ArmsPage() {
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-600">Hardware</p>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">Arms</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-            Inspect live YAM telemetry and apply small manual jog commands.
+            Inspect every logical arm, its durable identity, live transport, pair metadata, and control state.
           </p>
         </div>
         <div className="flex items-center gap-2 self-start">
@@ -722,23 +769,40 @@ export function ArmsPage() {
 
           <div className="mt-4 space-y-5">
             <StatusStrip arm={arm} />
+            <section className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-panel sm:px-6">
+              <div className="grid gap-3 text-xs sm:grid-cols-2 xl:grid-cols-4">
+                <div><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Logical ID</p><p className="mt-1 break-all font-mono font-semibold text-slate-700">{arm.id}</p></div>
+                <div><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Stable identity</p><p className="mt-1 break-all font-mono font-semibold text-slate-700">{arm.stable_identity ?? "Not exposed"}</p></div>
+                <div><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Transport</p><p className="mt-1 font-semibold text-slate-700">{arm.transport_kind} · runtime {arm.can?.interface ?? "n/a"}</p></div>
+                <div><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">End effector</p><p className="mt-1 font-semibold text-slate-700">{arm.end_effector_kind}</p></div>
+              </div>
+              {arm.warnings.length > 0 && <div className="mt-3 space-y-2">{arm.warnings.map((warning) => <p key={warning} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${warning.includes("NO SASH GUARD") ? "border-rose-300 bg-rose-50 text-rose-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>{warning}</p>)}</div>}
+            </section>
+            {pairMate && <PairDeltas arm={arm} mate={pairMate} />}
             <div className="grid gap-5 xl:grid-cols-[minmax(0,1.5fr)_minmax(300px,0.8fr)]">
               <JointState arm={arm} />
               <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-1">
                 <PoseCard arm={arm} />
-                <GripperCard arm={arm} />
+                {arm.handle ? <HandleCard arm={arm} /> : <GripperCard arm={arm} />}
               </div>
             </div>
             <Diagnostics arm={arm} />
-            <ManualControls
-              key={arm.id}
-              arm={arm}
-              disabled={controlsDisabled}
-              pending={commandPending}
-              error={commandError}
-              lastCommandAt={lastCommandAt}
-              onJog={(command) => void sendJog(arm.id, command)}
-            />
+            {arm.driver === "i2rt-worker" ? (
+              <section aria-label="Manual jog unavailable" className="rounded-xl border border-amber-200 bg-amber-50 px-5 py-5 text-amber-950 shadow-panel sm:px-6">
+                <h2 className="text-sm font-semibold">Manual jog is unavailable for supervised i2rt cell arms</h2>
+                <p className="mt-2 max-w-3xl text-xs leading-5">One-shot jog commands are intentionally disabled because they cannot maintain the worker&apos;s fresh-command watchdog. Use Record / Teleop with its separate synchronization boundary, or a supervised inference session, for continuously refreshed follower motion. Mock and legacy drivers retain manual jog.</p>
+              </section>
+            ) : (
+              <ManualControls
+                key={arm.id}
+                arm={arm}
+                disabled={controlsDisabled}
+                pending={commandPending}
+                error={commandError}
+                lastCommandAt={lastCommandAt}
+                onJog={(command) => void sendJog(arm.id, command)}
+              />
+            )}
           </div>
         </>
       ) : (

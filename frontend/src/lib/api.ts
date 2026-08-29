@@ -14,6 +14,7 @@ import type {
 } from "../types/inference";
 import type {
   CreateRecordingRequest,
+  EnableTeleopSyncRequest,
   Recording,
   RecordingsResponse,
   RecordingState,
@@ -30,7 +31,10 @@ import type {
 } from "../types/training";
 import type {
   ConnectYamSetupRequest,
+  DisconnectYamSetupRequest,
   SaveYamSetupRequest,
+  YamHandleCheckRequest,
+  YamHandleRangeResult,
   YamSetupConfig,
   YamSetupDiscovery,
   YamSetupPreflight,
@@ -228,6 +232,23 @@ export function stopTeleop(recordingId: string): Promise<RecordingState> {
   );
 }
 
+export function enableTeleopSync(
+  recordingId: string,
+  payload: EnableTeleopSyncRequest,
+): Promise<RecordingState> {
+  return request<RecordingState>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/teleop/sync/enable`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export function disableTeleopSync(recordingId: string): Promise<RecordingState> {
+  return request<RecordingState>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/teleop/sync/disable`,
+    { method: "POST" },
+  );
+}
+
 export function startEpisode(
   recordingId: string,
   payload: StartEpisodeRequest,
@@ -277,14 +298,14 @@ export function savePublicSettings(
 }
 
 export function fetchYamSetup(signal?: AbortSignal): Promise<YamSetupStatus> {
-  return request<YamSetupStatus>("/api/yam/setup", {
+  return request<YamSetupStatus>("/api/yam/cell", {
     signal,
     cache: "no-store",
   });
 }
 
 export function discoverYamSetup(signal?: AbortSignal): Promise<YamSetupDiscovery> {
-  return request<YamSetupDiscovery>("/api/yam/setup/discover", {
+  return request<YamSetupDiscovery>("/api/yam/cell/discover", {
     method: "POST",
     signal,
   });
@@ -294,7 +315,7 @@ export function preflightYamSetup(
   config: YamSetupConfig,
   signal?: AbortSignal,
 ): Promise<YamSetupPreflight> {
-  return request<YamSetupPreflight>("/api/yam/setup/preflight", {
+  return request<YamSetupPreflight>("/api/yam/cell/preflight", {
     method: "POST",
     body: JSON.stringify({ config }),
     signal,
@@ -305,7 +326,7 @@ export function saveYamSetup(
   payload: SaveYamSetupRequest,
   signal?: AbortSignal,
 ): Promise<YamSetupStatus> {
-  return request<YamSetupStatus>("/api/yam/setup", {
+  return request<YamSetupStatus>("/api/yam/cell", {
     method: "PUT",
     body: JSON.stringify(payload),
     signal,
@@ -316,7 +337,7 @@ export function connectYamSetup(
   payload: ConnectYamSetupRequest,
   signal?: AbortSignal,
 ): Promise<YamSetupStatus> {
-  return request<YamSetupStatus>("/api/yam/setup/connect", {
+  return request<YamSetupStatus>("/api/yam/cell/connect", {
     method: "POST",
     body: JSON.stringify(payload),
     signal,
@@ -324,8 +345,30 @@ export function connectYamSetup(
 }
 
 export function deleteYamSetup(signal?: AbortSignal): Promise<YamSetupStatus> {
-  return request<YamSetupStatus>("/api/yam/setup", {
+  return request<YamSetupStatus>("/api/yam/cell", {
     method: "DELETE",
+    signal,
+  });
+}
+
+export function disconnectYamSetup(
+  payload: DisconnectYamSetupRequest,
+  signal?: AbortSignal,
+): Promise<YamSetupStatus> {
+  return request<YamSetupStatus>("/api/yam/cell/disconnect", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function checkYamHandle(
+  payload: YamHandleCheckRequest,
+  signal?: AbortSignal,
+): Promise<YamHandleRangeResult> {
+  return request<YamHandleRangeResult>("/api/yam/cell/handle-check", {
+    method: "POST",
+    body: JSON.stringify(payload),
     signal,
   });
 }

@@ -66,7 +66,7 @@ used.
 
 Check `/api/arms` and the backend log. Hardware mode intentionally stays
 disconnected after a configuration, plugin, device, sample, or worker failure;
-it never falls back to mock arms. Open **Settings → YAM onboarding** and read
+it never falls back to mock arms. Open **Settings → YAM Cell** and read
 the sanitized diagnostic.
 
 - For a missing device, choose **Discover devices**, correct host visibility,
@@ -79,7 +79,8 @@ the sanitized diagnostic.
   restart the backend. Automatic restoration does not retry vendor failures in
   a loop.
 
-Run the non-opening preflight before touching a real bus:
+For an all-CAN cell, use Settings/API passive preflight. The following retained
+probe applies only to the serial-GELLO legacy adapter:
 
 ```bash
 make yam-probe
@@ -89,17 +90,20 @@ The command-line probe uses the process configuration. The Settings flow is
 the authoritative path for the persisted physical setup and its connection
 consent; see [YAM setup](/yam-setup).
 
-### A jog, teleop start, or inference start returns HTTP 409
+### A control start returns HTTP 409
 
 Another mode owns the process-local `RigLease`, or the selected lifecycle is
 already changing. Stop the active episode before teleop, stop teleop before a
 different owner, and stop inference with verified teardown. Commands are not
 queued.
 
-### Cartesian jog is rejected on real YAM
+### One-shot jog is rejected on an all-CAN YAM cell
 
-This is expected. The pinned real follower accepts joint-space and gripper
-commands only. Cartesian jog remains available in the complete mock driver.
+This is expected in V1.2. The supervised all-CAN adapter accepts follower
+actions only through explicit pair synchronization and inference lifecycle;
+it rejects joint, Cartesian, and gripper one-shot jog. Bounded jog remains in
+the complete mock driver and retained legacy adapter; legacy Cartesian jog is
+still unsupported.
 
 ## Recording and upload
 

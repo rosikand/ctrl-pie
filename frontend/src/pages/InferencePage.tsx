@@ -530,6 +530,7 @@ export function InferencePage() {
     () => arms.arms.filter((arm) => arm.role === "follower" && arm.connected),
     [arms.arms],
   );
+  const selectedFollower = followers.find((arm) => arm.id === armId) ?? null;
   const selectedModel = availableModels.find((model) => model.repo_id === modelRepo) ?? null;
   const selectedState = inference.state?.id === inference.selectedDeploymentId ? inference.state : null;
   const selectedDeployment = inference.selectedDeployment;
@@ -599,12 +600,12 @@ export function InferencePage() {
   }
 
   async function start() {
-    if (!selectedState || !armId || !task.trim()) return;
+    if (!selectedState || !selectedFollower || !task.trim()) return;
     const metadata: { operator?: string; notes?: string } = {};
     if (operator.trim()) metadata.operator = operator.trim();
     if (recordingNotes.trim()) metadata.notes = recordingNotes.trim();
     await inference.start(selectedState.id, {
-      arm_id: armId,
+      arm_id: selectedFollower.id,
       task: task.trim(),
       record_session: recordSession,
       recording_name: recordSession && recordingName.trim() ? recordingName.trim() : null,
@@ -631,7 +632,7 @@ export function InferencePage() {
       selectedState.status === "running" &&
       selectedState.endpoint_healthy &&
       selectedState.session_status === "idle" &&
-      armId &&
+      selectedFollower !== null &&
       task.trim() &&
       !sessionLocked,
   );
@@ -678,7 +679,7 @@ export function InferencePage() {
             <div className="border-b border-slate-100 px-5 py-4 sm:px-6"><div className="flex items-center gap-2"><Bot className="h-4 w-4 text-slate-400" /><h2 className="text-sm font-semibold text-slate-900">2. Start robot execution</h2></div><p className="mt-1 text-xs text-slate-400">Start is enabled only after a healthy endpoint snapshot and a connected follower are authoritative.</p></div>
             <div className="space-y-4 p-5 sm:p-6">
               <div className="grid gap-4 md:grid-cols-2">
-                <label className="block text-xs font-medium text-slate-700">Connected follower<select required disabled={sessionLocked || !selectedState || selectedState.session_status !== "idle"} value={armId} onChange={(event) => setArmId(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none ring-brand-100 focus:border-brand-500 focus:ring-4 disabled:bg-slate-50">{followers.length === 0 && <option value="">No connected follower</option>}{followers.map((arm: ArmTelemetry) => <option key={arm.id} value={arm.id}>{arm.name} · {arm.id}</option>)}</select><span className="mt-1.5 block text-[10px] text-slate-400">Arm telemetry: {arms.connectionState}</span></label>
+                <label className="block text-xs font-medium text-slate-700">Connected logical follower<select required disabled={sessionLocked || !selectedState || selectedState.session_status !== "idle"} value={armId} onChange={(event) => setArmId(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none ring-brand-100 focus:border-brand-500 focus:ring-4 disabled:bg-slate-50">{followers.length === 0 && <option value="">No connected follower</option>}{followers.map((arm: ArmTelemetry) => <option key={arm.id} value={arm.id}>{arm.name} · {arm.id}{arm.side ? ` · ${arm.side}` : ""}{arm.pair_id ? ` · pair ${arm.pair_id}` : ""}{arm.group_id ? ` · ${arm.group_id}` : ""}</option>)}</select><span className="mt-1.5 block text-[10px] text-slate-400">Only connected arms whose authoritative role is follower are eligible. Telemetry: {arms.connectionState}</span>{selectedFollower?.warnings.some((warning) => warning.includes("NO SASH GUARD")) && <span className="mt-1.5 block font-bold text-rose-700">NO SASH GUARD</span>}</label>
                 <label className="block text-xs font-medium text-slate-700">Task<textarea required rows={2} maxLength={512} disabled={sessionLocked || !selectedState || selectedState.session_status !== "idle"} value={task} onChange={(event) => setTask(event.target.value)} placeholder="Pick up the blue block and place it on the target." className="mt-1.5 w-full resize-none rounded-lg border border-slate-200 px-3 py-2.5 text-sm leading-5 outline-none ring-brand-100 placeholder:text-slate-300 focus:border-brand-500 focus:ring-4 disabled:bg-slate-50" /></label>
               </div>
               {arms.error && <p className="text-xs text-rose-600">{arms.error}</p>}

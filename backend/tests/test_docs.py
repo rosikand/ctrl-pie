@@ -305,6 +305,12 @@ def test_milestone_13_reference_contracts_are_documented() -> None:
 
     smoke = (DOCS_ROOT / "smoke-test.md").read_text(encoding="utf-8")
     assert "make smoke" in smoke
+    assert "[smoke] topology: PASS" in smoke
+    assert "four reference mock arms" in smoke
+    assert "observation-only" in smoke
+    assert "explicit slow synchronization" in smoke
+    assert "yam-leader-left" in smoke
+    assert "yam-follower-left" in smoke
     assert "exactly 100 successful arm writes" in smoke
     assert "--fake-hub" in smoke
     assert "actual `make smoke` target does not pass `--fake-hub`" in smoke

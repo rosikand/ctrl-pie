@@ -120,6 +120,10 @@ rejected before deployment because that runtime is unavailable in V1.1.
 
 ## YAM setup and arm control
 
+The following code is specifically the retained V1.1 GELLO compatibility
+adapter. Its bounded follower jog remains supported; do not translate this
+one-shot jog to the supervised all-CAN adapter, which rejects it.
+
 Discovery and preflight are passive/read-only. A physical setup can be saved
 only after preflight. Both unattended restoration and explicit connection have
 separate, required risk acknowledgements:
@@ -176,7 +180,24 @@ YAM and arm methods:
 | `connect_yam(*, acknowledge_hardware_motion_risk)` | Explicitly open the configured rig. |
 | `reset_yam_setup()` | In hardware mode, disconnect and forget the saved physical setup; mock mode preserves any physical row. |
 | `list_arms()` / `get_arm(arm_id)` | Read arm telemetry snapshots. |
-| `jog_arm(arm_id, *, kind, axis, delta)` | Send one server-bounded relative jog. |
+| `jog_arm(arm_id, *, kind, axis, delta)` | Send one bounded relative jog in mock or retained legacy mode. The supervised all-CAN adapter rejects it. |
+
+Canonical V1.2 cell methods:
+
+| Method | Purpose |
+| --- | --- |
+| `get_yam_cell()` | Read normalized cell, per-arm connection/control state, and diagnostics. |
+| `discover_yam_cell()` | Passively enumerate stable identities and current runtime resolution. |
+| `preflight_yam_cell(config)` | Validate topology, exact local i2rt identity, links, maps, and limits without opening devices. |
+| `save_yam_cell(config, *, auto_restore, acknowledge_automatic_motion_risk, acknowledge_gripper_calibration_motion)` | Persist/apply one normalized cell with explicit unattended-motion consent. |
+| `connect_yam_arms(*, arm_ids, acknowledge_hardware_motion_risk, acknowledge_gripper_calibration_motion)` | Connect selected/all arms with backend-enforced motion gates. |
+| `disconnect_yam_arms(*, arm_ids)` | Revoke writes and safely stop selected/all local workers. |
+| `check_yam_handle(arm_id, *, duration_seconds, acknowledge_active_can_diagnostic)` | Run the bounded detection-only teaching-handle range diagnostic. |
+
+Teleop starts observation-only. The distinct methods
+`enable_teleop_sync(recording_id, *, acknowledge_slow_sync_motion)` and
+`disable_teleop_sync(recording_id)` cross and close the follower-write boundary;
+episode start requires synchronization to have completed.
 
 ## Recording and datasets
 

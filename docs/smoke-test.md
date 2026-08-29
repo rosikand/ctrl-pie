@@ -36,25 +36,30 @@ make smoke
 
 The command performs these operations in order:
 
-1. create a temporary workspace and one `MockYAMDriver`, `MockCamera`, shared
-   `RigLease`, and `RecordingManager`;
-2. record at least five wall-clock seconds from `yam-leader` to
-   `yam-follower` at 10 fps, finalize a real non-empty H.264 MP4, and retain
-   synchronized samples;
+1. create a temporary workspace and one `MockYAMDriver` with four reference mock arms,
+   `MockCamera`, resource-scoped `RigLease`, and `RecordingManager`; verify
+   stable identities and independent declared pairs, including
+   `yam-leader-left` and `yam-follower-left`;
+2. start the right mock pair observation-only and assert zero follower writes,
+   then perform explicit slow synchronization before recording at least five wall-clock
+   seconds from `yam-leader` to `yam-follower` at 10 fps; disable sync and
+   finalize a real non-empty H.264 MP4 with synchronized samples;
 3. convert the episode through LeRobot 0.4.4 into a LeRobot v3 dataset;
 4. create a unique `HF_NAMESPACE/ctrl-pi-smoke-<timestamp>-<nonce>` private
    dataset and upload it with ctrl-π's ownership marker;
 5. read the exact returned 40-character commit SHA, verify the repository is
    private, and list the same repo/SHA/episode/frame count through the normal
    Datasets service;
-6. deploy the deterministic Stub CPU policy, start one mock follower session,
-   and execute exactly 100 successful arm writes; and
+6. deploy the deterministic Stub CPU policy, select only one logical mock
+   follower, and execute exactly 100 successful arm writes without touching
+   the other pair; and
 7. stop the robot loop and compute target, then prove that no task, queued
    action, lease, upload, repository, or temporary workspace remains.
 
 Successful output contains one evidence line for each phase:
 
 ```text
+[smoke] topology: PASS arms=4 pairs=2
 [smoke] record: PASS ...
 [smoke] upload: PASS mode=real private=true ...
 [smoke] datasets: PASS ...

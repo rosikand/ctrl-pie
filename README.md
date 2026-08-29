@@ -19,8 +19,9 @@ LeRobot training workloads. There is no hosted ctrl-π service.
 
 The interface has six first-class workflows:
 
-- **Arms** — inspect telemetry, bus health, joints, pose, gripper state, and
-  loop diagnostics; send bounded manual jog commands.
+- **Arms** — inspect telemetry, stable bus identity, joints, pose, gripper/
+  handle state, and loop diagnostics. Bounded jog is available in mock and
+  retained legacy mode; the supervised all-CAN adapter rejects one-shot jog.
 - **Record / Teleop** — operate one leader/follower pair, capture episodes,
   and publish LeRobot v3 datasets.
 - **Datasets** — browse namespace-scoped repositories and inspect immutable
@@ -33,9 +34,12 @@ The interface has six first-class workflows:
 - **Inference** — deploy one pinned policy revision, explicitly start robot
   execution, and stop with provider teardown verification.
 
-Settings provides passive YAM discovery, bounded configuration and
-calibration-artifact preflight, durable single-rig setup, explicit connection,
-and separately acknowledged opt-in restoration after boot or hot-plug.
+Settings provides passive YAM-cell discovery, stable USB-CAN identity
+assignment, typed pair/group/side configuration, per-arm preflight and
+explicit connect/disconnect. A deterministic four-arm mock cell exercises two
+independent pairs. Calibrating a real `linear_4310` or `crank_4310` follower
+requires a jaw-motion acknowledgement in addition to the general connection
+or unattended-restoration consent.
 
 ## Run locally with Docker
 
@@ -54,7 +58,17 @@ curl --fail http://127.0.0.1:8000/api/health
 Set `DATABASE_URL` and leave `CTRL_PI_MOCK_MODE=true` for the deterministic
 stack. Hugging Face and Modal credentials can remain blank until their cloud
 workflows are needed. Open <http://127.0.0.1:8000>. Migrations run before the
-service starts.
+service starts. `CTRL_PI_LISTEN_PORT` changes Uvicorn's container port;
+`CTRL_PI_PORT` independently changes the published bridge-mode host port.
+
+The all-CAN hardware deployment is an explicit override using host
+networking, `/sys:ro`, one operator-owned i2rt checkout mounted read-only, and
+`NET_RAW` only. It never pulls i2rt from public upstream or selects a latest
+revision. Build it through the exact-source `make docker-yam-cell` workflow.
+A checked-in constraint carries i2rt's `scikit-build-core<0.10` requirement
+into the isolated ruckig build. A separate legacy override passes exactly one
+GELLO serial device.
+See [Docker deployment](docs/docker-deployment.md) before hardware mode.
 
 For an editable Python 3.11/Node.js 22 setup, see
 [Installation](docs/installation.mdx) and [Development](docs/development.md).
@@ -85,18 +99,26 @@ examples. Before delegating those workflows, give your automation the
 
 ## Safety and support boundary
 
-- Mock mode supplies `MockYAMDriver`, a synthetic camera, and Stub compute. It
-  exercises the product workflow but does not prove hardware or cloud behavior.
+- Mock mode supplies a four-arm `MockYAMDriver`, a synthetic camera, and Stub
+  compute. It exercises two declared pairs but does not prove hardware or cloud
+  behavior.
 - Hardware mode fails closed: missing configuration or devices never fall back
   to mocks. Discovery and preflight do not open devices or start a controller.
-- Connecting a real follower may energize motors and engage gravity
-  compensation. The operator must clear the workspace, verify power and
-  emergency-stop access, and deliberately acknowledge immediate or automatic
-  connection.
-- The real adapter has extensive fake-vendor coverage, but no physical YAM was
-  available in this workspace. Directions, offsets, limits, calibration,
-  model fidelity, bus behavior, E-stop response, and disconnect recovery still
-  require validation on the target Ubuntu/YAM box before motion.
+- Connecting a real follower can energize/hold the arm, and calibrating a
+  `linear_4310` or `crank_4310` follower moves the jaws. Teleop starts with synchronization disabled and
+  performs no follower write; slow synchronization is a second explicit
+  motion boundary.
+- All-CAN inference Stop clears writes, safe-idles to gravity compensation,
+  and releases the motion lease, but leaves the follower connected/holding.
+  Explicit Settings Disconnect must reap its worker and return it to the
+  de-energized/limp state.
+- The all-CAN adapter supervises one pinned-checkout i2rt worker per connected
+  arm. No physical YAM was available in this workspace. Container access,
+  directions, offsets, limits, calibration, loop behavior, E-stop response,
+  and disconnect recovery still require the ordered
+  [H0–H7 field session](V1_2_FIELD_TEST_HANDOFF.md).
+- A missing frame map means intentional identity mapping. Missing follower
+  soft limits are shown as `NO SASH GUARD`; ctrl-π never invents limits.
 - Managed training can allocate up to eight A100 or H100 GPUs in the user's
   Modal account. It is SDK-only, cost-acknowledged, limited to one nonterminal
   job, and terminal only after provider teardown is verified. Use
@@ -118,6 +140,7 @@ examples. Before delegating those workflows, give your automation the
 - [Architecture](docs/architecture.md),
   [Docker deployment](docs/docker-deployment.md), and
   [Troubleshooting](docs/troubleshooting.md)
+- [V1.2 physical field-test handoff](V1_2_FIELD_TEST_HANDOFF.md)
 - [Current UI gallery](docs/screenshots.mdx) and
   [release notes](docs/release-notes.md)
 

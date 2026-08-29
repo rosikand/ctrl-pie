@@ -21,15 +21,15 @@ FastAPI control plane ───────────────► PostgreSQ
   │       └──────────────────────────► Modal
   │                                    inference + managed SmolVLA training
   ▼
-YAMDriver (mock or real standard-YAM adapter) + V1 MockCamera
+YAMDriver (four-arm mock or cell/legacy hardware adapter) + V1 MockCamera
   │
 CAN / USB / local mock rig
 ```
 
 The production container serves the built Vite application and API from one
-origin on port 8000. Source development runs Vite on port 5173 and proxies
-`/api` and `/ws` to Uvicorn on port 8000. See [Development](development.md)
-and [Docker deployment](docker-deployment.md) for the two launch paths.
+origin. Its Uvicorn port is configurable; bridge mode defaults to 8000 and the
+host-network YAM-cell path normally uses 8010. Source development runs Vite on
+5173 and proxies `/api` and `/ws` to Uvicorn on 8000.
 
 ## Boundaries and components
 
@@ -38,7 +38,7 @@ and [Docker deployment](docker-deployment.md) for the two launch paths.
 | React frontend | Six workflow tabs plus Settings and YAM onboarding; renders typed API state only | `frontend/src/` |
 | Python SDK | Typed, bounded access to the same public REST workflows; no direct hardware, Hub-token, or provider access | `client.py`, `sdk_models.py` |
 | FastAPI routers | Validate browser input, return sanitized errors, and serialize public state | `backend/src/ctrl_pi/api/` |
-| Hardware boundary | Typed cached arm snapshots, bounded jogs/actions, and fail-closed lifecycle | `drivers/yam.py`, `drivers/mock_yam.py`, `drivers/real_yam.py` |
+| Hardware boundary | Typed multi-arm snapshots, stable CAN identity, supervised i2rt workers, bounded actions, and fail-closed lifecycle | `drivers/yam.py`, `drivers/mock_yam.py`, `drivers/yam_cell*.py`, `drivers/yam_i2rt_worker.py`, `drivers/real_yam.py` |
 | Recording service | Teleop, camera capture, FFmpeg lifecycle, and synchronized samples | `recording.py`, `camera.py` |
 | Hub services | LeRobot conversion/upload and SHA-pinned dataset/model browsing | `hf.py`, `hf_datasets.py`, `hf_episodes.py`, `hf_models.py` |
 | Training control plane | External run reporting plus durable managed-job supervision and bounded event ingestion | `api/trainer.py`, `api/managed_training.py`, `managed_training.py`, `training_store.py` |
@@ -57,13 +57,15 @@ ctrl-π deliberately separates four kinds of state.
 
 ### PostgreSQL: durable control-plane metadata
 
-PostgreSQL stores robots, the one non-secret physical `yam_setups` record,
-recording summaries, training runs and their bounded metric/checkpoint/log
+PostgreSQL stores robots, one non-secret `yam_cells` row plus normalized
+`yam_cell_arms`, the readable legacy `yam_setups` row, recording summaries,
+training runs and their bounded metric/checkpoint/log
 metadata, durable managed-training lifecycle/identity/deadline state, inference
 endpoints/deployments, and non-secret settings. Alembic
 owns the schema. Robot rows use a database UUID internally
 and a stable hardware-facing `driver_id` such as `yam-follower` at API and
-driver boundaries.
+driver boundaries. SocketCAN arms store USB-adapter serial; runtime `canN`
+never becomes durable identity.
 
 PostgreSQL never stores live joint telemetry, camera frames, raw observation
 images, action queues, full policy artifacts, MP4 bytes, or LeRobot parquet
@@ -112,42 +114,54 @@ not safe until the exact App is stopped or absent with zero running tasks.
 
 ### Arms and teleoperation
 
-`YAMDriver` returns typed point-in-time snapshots. `/ws/arms` publishes those
-snapshots without persistence. Mock mode selects the complete in-memory
-`MockYAMDriver`. Hardware mode selects the lazy real adapter for one standard
-YAM SocketCAN follower, one GELLO/Dynamixel leader, and the `crank_4310`
-gripper. It never substitutes the mock after a hardware failure.
+`YAMDriver` returns typed point-in-time snapshots. `/ws/arms` publishes copies
+without persistence. Mock mode selects a four-arm, two-pair `MockYAMDriver`.
+Hardware mode selects a cell-aware adapter for configurable CAN teaching-handle
+leaders and followers, with the narrow serial-GELLO adapter retained for
+compatibility. It never substitutes a mock after hardware failure.
 
-The real adapter owns vendor devices in one backend process and refreshes a
-cache on a 50 Hz target loop. Public telemetry reads copy that cache; they do
-not discover devices or send commands. Pose is model-derived MuJoCo forward
-kinematics. Leader effort is absent and temperatures may be absent, while
-gripper force and bus error counters are unavailable in the pinned plugin and
-cross the API as `null`. Driver-reported timing measures ctrl-π's sampling loop
-rather than motor firmware. A sample, vendor-worker, or command failure marks
-both arms disconnected and latches motion unavailable.
+Passive discovery maps stable USB-CAN serials to current kernel interfaces
+through bounded read-only sysfs inspection. For each explicitly connected CAN
+arm, ctrl-π spawns one supervised Python child. That child verifies and imports
+the exact operator-mounted i2rt checkout only when its filesystem reports the
+kernel `ST_RDONLY` flag (Docker `/opt/i2rt:ro`); chmod and effective permissions
+are not accepted as read-only proof. The child owns the YAM object and its
+nested control threads, and exchanges bounded telemetry/actions over local IPC.
+No Lux shell process or unauthenticated pair server is part of the product
+boundary. Runtime faults revoke writes, latch the arm/pair, and never blindly
+respawn.
 
-`YAMSetupManager` keeps that same driver object stable while Settings performs
-passive candidate discovery, read-only preflight, in-place setup selection,
-explicit connection, and reset. One physical setup can be persisted; mock
-setup exercises the same boundary without mutating it. Enabling boot/hot-plug
-automatic connection and connecting immediately require separate backend-
-enforced hardware-motion acknowledgments because either connection can engage
-the follower gravity-compensation controller. Setup operations share the
-process `RigLease`; they cannot race teleop, recording, inference, or jog.
+The parent refreshes an active all-CAN target on a strict cadence. It
+safe-idles after 125 ms without a refreshed action, before the child watchdog;
+the child independently refuses commands older than 250 ms. After that
+boundary, policy motion requires a fresh identity-checked command lifecycle
+and teleop requires a fresh explicit sync boundary. No stale target is replayed
+and one-shot all-CAN jog is disabled. These deadlines are command-age guards,
+not field-measured loop-rate thresholds.
+
+`YAMSetupManager` keeps the driver object stable while Settings discovers,
+preflights, applies, and connects/disconnects selected logical arms. Mock setup
+does not mutate the physical rows. General connection, unattended restoration,
+and calibrated `linear_4310`/`crank_4310` jaw motion have backend-enforced
+acknowledgements.
+Resource-scoped `RigLease` ownership permits disjoint arms/pairs and rejects
+overlap instead of treating every multi-arm workflow as one global lock.
 
 The camera remains `MockCamera` in V1 even when real arms are selected, so
 recordings from hardware mode still contain the documented synthetic video.
 
-Manual jog, teleoperation, and inference all write through the same driver and
-compete for one process-local `RigLease`. The lease fails immediately on a
-conflict; it is not a distributed lock or a queue. The real adapter accepts
-only follower joint/gripper commands; Cartesian jog is unsupported.
+Teleoperation and inference write through the same driver and own explicit
+logical-arm resource sets. The lease fails immediately on an overlap; it is not
+a distributed lock or queue. The supervised all-CAN adapter rejects one-shot
+jog in V1.2. Mock and retained legacy adapters keep bounded follower jog for
+compatibility; teaching-handle leaders never accept it.
 
-Teleop samples the leader, converts it to an absolute `ArmAction`, and applies
-that action to the follower. Recording adds camera capture and synchronized
-observation/action samples without changing the driver boundary. The complete
-lifecycle is in [Recording and teleoperation](recording.md).
+Teleop first validates/acquires one declared leader/follower pair and observes
+it with synchronization disabled. It performs no follower write. A separate
+freshly acknowledged action interpolates toward the latest mapped/clamped
+leader pose over approximately three seconds before tracking. Disable stops
+writes but retains pair telemetry. Recording captures post-map follower
+commands plus camera/observation samples without changing the driver boundary.
 
 ### Dataset and model browsing
 
@@ -224,10 +238,10 @@ operation. Details are in [Compute and inference](inference.md).
 
 FastAPI lifespan startup performs these ordered operations:
 
-1. restore the saved physical setup into the selected stable driver and, only
-   when explicitly enabled, attempt its acknowledged automatic connection. If
-   no physical row exists, environment values may select configuration but the
-   hardware remains closed until an acknowledged explicit save/connect flow;
+1. restore the normalized physical cell (or readable legacy setup) into the
+   stable driver and, only when explicitly enabled with all required consent,
+   attempt its acknowledged automatic connection. A new cell remains closed
+   until explicit save/connect;
 2. enable and reconcile the recording manager;
 3. tear down unattended resources through the provider adapter named by each
    row's persisted target kind, including rows left by a mock/hardware mode
@@ -237,15 +251,15 @@ FastAPI lifespan startup performs these ordered operations:
 5. start the deployment-lifetime watchdog while the setup manager passively
    watches a missing saved rig for prerequisites to appear.
 
-Real-driver construction and imports are lazy. Hardware discovery and preflight
-do not open devices. An acknowledged connection validates the narrow standard-
-YAM/GELLO/crank configuration, connects with interactive calibration disabled,
-takes a first sample, and then starts cached sampling. A configuration, plugin,
-file, permission, or connection failure leaves the API running with stable
-disconnected arm identities and a sanitized Settings diagnostic. It never
-falls back to mock hardware. A saved auto-connect setup passively rechecks only
-`missing` prerequisites and makes one serialized attempt when they become
-ready; a latched `error` is not automatically retried.
+Real-device construction and i2rt import are lazy and child-process isolated.
+Discovery/preflight do not open devices. An acknowledged selected-arm connect
+re-resolves stable identity, starts one owner per bus, accepts only an exact
+ready handshake, and then publishes cached telemetry. Calibrated `linear_4310`
+and `crank_4310` followers need a distinct calibration-motion acknowledgement. A configuration, source,
+file, permission, worker, or connection failure leaves stable logical arms
+visible with a sanitized diagnostic and never falls back to mocks. Missing
+prerequisites may be passively rechecked; latched runtime/vendor faults are not
+automatically retried.
 
 No teleop, recording, inference, or policy-action loop is auto-resumed after a
 crash or restart. Interrupted upload statuses
@@ -262,33 +276,30 @@ running provider job, bounded by its immutable provider/deployment deadline,
 for exact restart reattachment. A job already cancelling or finalizing still
 receives an exact cleanup attempt. Shutdown then asks the inference session
 manager to stop arm writes and verify inference compute teardown, joins or
-aborts recording work, closes
-FFmpeg, and releases rig ownership before driver shutdown rejects commands,
-stops sampling, asks the follower plugin for its safe mode, and closes both
-devices. That plugin call is not an electrical torque-free guarantee; physical
-emergency-stop and firmware safety remain independent requirements. Compose
+aborts recording work, closes FFmpeg, and safe-idles before releasing rig
+ownership. Driver shutdown revokes each worker, requests cooperative
+safe-idle/close, then terminates, kills, and reaps on bounded deadlines. An
+uncertain survivor keeps its bus blocked/error. No software call is an
+electrical torque-free guarantee; physical emergency-stop and firmware safety
+remain independent requirements. Compose
 supplies a 90-second grace period. If Modal cleanup remains uncertain, use the
 procedure in [Modal operator cleanup](modal-operations.md).
 
-The default `make yam-probe` checks hardware-mode configuration, exact pinned
-package metadata, a readable model, bounded structural calibration JSON,
-leader character-device permissions, and Linux ARPHRD_CAN type. It does so
-without importing vendor modules, constructing their devices, or opening a
-bus. The explicit
-`python -m ctrl_pi.yam_probe --connect` path then opens both devices, obtains
-connected telemetry, emits a sanitized summary, and always attempts bounded
-driver shutdown. It does not issue an application jog/action but does start
-vendor bus/control behavior. The real adapter has been tested with fake vendor
-objects only in this cloud workspace.
-Joint mapping, calibration contents, CAN type/bitrate, physical limits, failure
-response, and container device access still require the Ubuntu/YAM procedure
-in [YAM driver interface](yam-driver.md).
+Cell preflight checks stable topology/resolution, link state, the exact local
+read-only i2rt checkout/dependency marker, and optional map/limit artifacts
+without importing or opening i2rt hardware. The separate handle check opens
+only the acknowledged read-only encoder path. Connect, sync, and inference are
+explicit all-CAN active boundaries; one-shot jog is disabled there. V1.2 has
+fake-worker/mock validation only;
+joint mapping, calibration, loop behavior, physical limits, failure response,
+and least-privileged container access require the ordered Ubuntu-box procedure
+in [YAM cell field acceptance](/yam-field-test).
 
 ## Trust and security boundary
 
-V1.1 has no ctrl-π login, API key, or multi-user authorization. Run it only on a
-trusted, firewalled host or LAN; do not publish port 8000 or the Vite
-development server directly to the Internet.
+V1.2 has no ctrl-π login, API key, or multi-user authorization. Run it only on
+a trusted, firewalled host or LAN; do not publish Uvicorn ports 8000/8010 or
+the Vite development server directly to the Internet.
 
 Secrets come from the backend environment or Modal's local profile. They are
 never accepted through Settings, stored in PostgreSQL, serialized in API

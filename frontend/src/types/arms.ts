@@ -29,7 +29,7 @@ export type GripperTelemetry = {
 export type CanTelemetry = {
   interface: string;
   state: CanState;
-  bitrate: number;
+  bitrate: number | null;
   tx_error_count: number | null;
   rx_error_count: number | null;
 };
@@ -40,20 +40,57 @@ export type ControlLoopTelemetry = {
   cycle_time_ms: number;
   jitter_ms: number;
   dropped_cycles: number;
+  source: string;
 };
+
+export type TeachingHandleTelemetry = {
+  reachable: boolean;
+  trigger_position: number | null;
+  buttons: boolean[];
+  range_status: "not_tested" | "healthy" | "unhealthy";
+  observed_minimum: number | null;
+  observed_maximum: number | null;
+  calibration_warning: string | null;
+};
+
+export type ArmControlState =
+  | "disconnected"
+  | "connecting"
+  | "gravity_comp"
+  | "position_control"
+  | "stopping"
+  | "error";
 
 export type ArmTelemetry = {
   id: string;
   name: string;
   role: ArmRole;
+  pair_id: string | null;
+  group_id: string | null;
+  side: string | null;
+  transport_kind: "socketcan" | "serial" | "mock";
+  stable_identity: string | null;
+  end_effector_kind:
+    | "yam_teaching_handle"
+    | "linear_4310"
+    | "crank_4310"
+    | "gello"
+    | "none";
   driver: string;
   connected: boolean;
+  control_state: ArmControlState;
+  energized: boolean;
+  holding: boolean;
   timestamp: string;
   joints: JointTelemetry[];
   pose: EndEffectorPose;
   gripper: GripperTelemetry;
-  can: CanTelemetry;
+  can: CanTelemetry | null;
   control_loop: ControlLoopTelemetry;
+  handle: TeachingHandleTelemetry | null;
+  frame_map_active: boolean;
+  soft_limits_active: boolean;
+  warnings: string[];
 };
 
 export type ArmsResponse = {

@@ -70,8 +70,9 @@ Default to read-only inspection. Before any mutation, read current state,
 explain the exact operation and bounded effect, and obtain the required human
 approval. Never synthesize, cache, or infer a safety acknowledgement.
 
-Require fresh human approval before hardware connection, auto-restore, jog,
-teleoperation, episode recording, inference motion, cloud deployment, managed
+Require fresh human approval before hardware connection, auto-restore,
+calibrated-4310 gripper motion, teleop synchronization, jog, episode recording,
+inference motion, cloud deployment, managed
 training, private-to-public publication, YAM setup reset, or modal-panic.
 
 Never request, read, print, transmit, or log DATABASE_URL, HF_TOKEN, Modal credentials,
@@ -109,7 +110,10 @@ a fresh confirmation that names the exact action.
 | Health, status, settings reads, passive YAM discovery/preflight, lists and detail reads | May run read-only without confirmation if the agent already has permission to access ctrl-π. |
 | External run creation, bounded metric/log reporting, or private metadata updates | Require task-scoped operator authorization; scrub text before reporting it. |
 | Settings update, recording creation, episode lifecycle, or private Hub upload | Show the exact change or destination and obtain task-scoped approval. Keep uploads private unless separately approved. |
-| `save_yam_setup` with auto-restore, `connect_yam`, `jog_arm`, teleoperation, or inference start | Require fresh human confirmation while the operator is present, the workspace is clear, and the physical emergency stop is reachable. |
+| `save_yam_cell` with auto-restore, `connect_yam_arms`, `enable_teleop_sync`, or inference start | Require fresh human confirmation naming the exact arms/pair while the operator is present, the workspace/jaws are clear, and the physical emergency stop is reachable. Calibrated `linear_4310` and `crank_4310` followers require distinct calibration-motion confirmation. Teleop start itself must remain unsynced and write-free. |
+| `jog_arm` | Available only in mock and retained legacy modes. Require fresh motion confirmation there. Never retry or work around the supervised all-CAN adapter's explicit one-shot-jog rejection. |
+| `disconnect_yam_arms` or `disable_teleop_sync` | Cleanup of resources the agent just started follows the approved cleanup plan. Support/clear the arm because control release changes holding state; uncertain worker teardown is not safe-disconnect proof. |
+| Inference Stop | Stop and verify writes, queues, lease release, recording finalization, and provider teardown. An all-CAN follower remains connected/energized/holding in gravity compensation; complete the approved cleanup with explicit `disconnect_yam_arms` and verify worker reap plus de-energized/limp state. |
 | Real inference deployment or managed training | Require fresh approval of the exact runtime, model revision, GPU size, hard deadline, and expected cost. |
 | Public dataset/model output | Require fresh approval naming the exact repository. Do not infer a license or treat an earlier public choice as reusable consent. |
 | `reset_yam_setup`, cancellation/stop of a resource the agent did not start, or `make modal-panic` | Require fresh approval and explain the impact. Cleanup of a resource the agent just started should follow the pre-approved cleanup plan automatically. |
@@ -117,6 +121,8 @@ a fresh confirmation that names the exact action.
 The API acknowledgement fields are final enforcement gates, not substitutes
 for approval. Set `acknowledge_hardware_motion_risk=True`,
 `acknowledge_automatic_motion_risk=True`,
+`acknowledge_gripper_calibration_motion=True`,
+`acknowledge_slow_sync_motion=True`,
 `acknowledge_compute_cost=True`, or
 `acknowledge_public_model_risk=True` only after the corresponding fresh human
 decision. Never default one to `True`.
@@ -193,25 +199,19 @@ with CtrlPiClient("http://127.0.0.1:8000") as ctrl:
     if not connected.connected:
         raise RuntimeError(connected.diagnostic.detail)
 
-    follower = ctrl.get_arm("yam-follower")
-    require_exact_confirmation(
-        "JOG yam-follower shoulder_yaw +0.010",
-        f"Current shoulder state will be read from {follower.id}; keep the "
-        "workspace clear and remain at the emergency stop.",
-    )
-    ctrl.jog_arm(
-        follower.id,
-        kind="joint",
-        axis="shoulder_yaw",
-        delta=0.010,
-    )
+    print(ctrl.get_arm("yam-follower"))
 ```
+
+This compatibility example stops after connection and telemetry. The
+supervised all-CAN adapter rejects one-shot jog; an agent must not substitute a
+`jog_arm` call. Mock and retained legacy jog require their own fresh motion
+approval under the operator policy.
 
 Do not use `reset_yam_setup()` as an emergency stop. It is a configuration
 reset that can disconnect and forget the saved physical setup. Use the
 physical emergency stop for immediate danger, then let a human diagnose the
 rig. The target Ubuntu/YAM box must complete the [physical validation
-checklist](/yam-driver#required-ubuntu-yam-validation) before relying on agent
+checklist](/yam-field-test) before relying on agent
 motion.
 
 ## Mock-first inference with verified cleanup
@@ -492,9 +492,9 @@ but must apply the same state, approval, idempotency, and cleanup rules.
 | Surface | SDK | REST family |
 | --- | --- | --- |
 | System and settings | `health`, `get_system_status`, `get_settings`, `update_settings` | `GET /api/health`, `GET /api/settings/status`, `/api/settings` |
-| YAM setup | `get_yam_setup`, `discover_yam`, `preflight_yam`, `save_yam_setup`, `connect_yam`, `reset_yam_setup` | `/api/yam/setup...` |
+| YAM cell | `get_yam_cell`, `discover_yam_cell`, `preflight_yam_cell`, `save_yam_cell`, `connect_yam_arms`, `disconnect_yam_arms`, `check_yam_handle` | `/api/yam/cell...` (legacy `/api/yam/setup...` remains compatible) |
 | Arms | `list_arms`, `get_arm`, `jog_arm` | `/api/arms...` |
-| Recordings | recording and teleop/episode lifecycle methods | `/api/recordings...` |
+| Recordings | recording, observation-only teleop, explicit sync enable/disable, and episode lifecycle methods | `/api/recordings...` |
 | Datasets | `list_datasets`, `list_dataset_episodes`, `get_dataset_episode` | `/api/datasets...` |
 | Models | `list_models` | `GET /api/models` |
 | External training reports | run, metric, log, and checkpoint methods | `/api/trainer/runs...` |

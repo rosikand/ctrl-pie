@@ -19,13 +19,14 @@ Recording requires:
 
 - a migrated PostgreSQL database;
 - FFmpeg with the `libx264` encoder;
-- a connected arm with role `leader` and a different connected arm with role
+- one exact declared pair containing a connected `leader` and connected
   `follower`;
 - a writable `RECORDING_STAGING_DIR` with enough free space; and
-- a free process-local robot rig.
+- free resource leases for those two logical arms.
 
-The normal mock pair is `yam-leader` and `yam-follower`. Creating a session
-looks up both live arms, validates their roles and connection flags, then
+The reference mock pairs are `yam-leader` / `yam-follower` and
+`yam-leader-left` / `yam-follower-left`. Creating a session looks up both live
+arms, rejects cross-pair routing, validates roles/connections, then
 upserts their stable `driver_id` mapping into PostgreSQL. The recording row
 stores robot UUID foreign keys while the API continues to show driver IDs.
 
@@ -40,22 +41,36 @@ Use the controls in this order:
 
 1. Select the leader and follower, enter a bounded name and task, and create
    the session. Its stable status is `draft`.
-2. Start teleoperation. The backend acquires the shared rig lease, applies one
-   initial leader action before reporting success, then continuously maps the
-   leader's absolute six-joint and gripper state to the follower. Status is
+2. Start teleoperation. The backend acquires leases for exactly that declared
+   pair and starts observation-only. Synchronization is disabled and no
+   follower write occurs. Inspect the live per-joint deltas. Status is
    `teleop`.
-3. Start an episode. The backend opens exclusive partial files and FFmpeg,
+3. Clear the follower workspace, then separately **Enable Sync** with a fresh
+   slow-motion acknowledgement. The backend maps the latest leader state,
+   applies follower frame/limit guards, and interpolates the follower toward
+   it over approximately three seconds before live latest-state tracking.
+4. Start an episode only after synchronization completes. The backend opens
+   exclusive partial files and FFmpeg,
    captures an initial synchronized sample, then reports `recording`.
-4. Stop the episode with its success flag and optional notes. The backend
+5. Stop the episode with its success flag and optional notes. The backend
    stops accepting samples, closes FFmpeg outside the event loop, validates
    completion, atomically renames both partial files, publishes a durable
    bounded manifest, then commits aggregate metadata. Teleop remains active so
    another episode can begin.
-5. Repeat episode start/stop as needed.
-6. Stop teleoperation. The rig lease is released and the stable status becomes
+6. Repeat episode start/stop as needed.
+7. **Disable Sync** to stop follower writes while keeping pair telemetry, then
+   stop teleoperation. The backend safe-idles before releasing the pair lease;
+   stable status becomes
    `ready` once at least one episode exists.
-7. Upload explicitly. Upload never starts implicitly when teleop or an episode
+8. Upload explicitly. Upload never starts implicitly when teleop or an episode
    stops.
+
+<Warning>
+  Teleop start is not a motion action. If the follower moves or receives a
+  write before the separate sync acknowledgement, stop and treat it as a
+  blocker. A connected follower may still be energized/holding independently
+  of synchronization; never force it by hand.
+</Warning>
 
 An episode may include only optional trimmed `operator` and `notes` metadata.
 The stop request accepts `success` and final notes. Recording creation reserves
@@ -73,20 +88,22 @@ The public statuses are:
 | `uploaded` | Hub commit and required remote files were verified. |
 | `failed` | Capture, persistence, teleop, or upload stopped safely; correct the safely reported cause and retry only where allowed. |
 
-Transient flags such as `teleop_active`, `episode_active`, current episode
-index, and current duration come from the in-memory manager. They are not
-durable database fields.
+Transient fields such as `teleop_active`, `sync_enabled`, `sync_in_progress`,
+`joint_deltas_radians`, `episode_active`, current episode index, and current
+duration come from the in-memory manager. They are not durable database fields.
 
 ## Rig ownership and conflicts
 
-Manual jog, teleop, and inference share one non-blocking `RigLease`. A second
-control mode receives HTTP 409; commands are never queued behind an owner.
-Only the exact lease token may release the rig.
+Teleop owns the selected leader/follower resource set. Inference owns one
+selected follower; mock/legacy jog can own one follower. Disjoint pairs can
+operate independently; an
+overlapping owner receives HTTP 409 and commands are never queued. Only the
+exact lease token may release those resources.
 
-Teleop start is rejected when another recording or inference session owns the
-rig. Stop teleop is rejected while an episode is active or finalizing; stop the
-episode first so no sample is silently lost. Starting another episode while
-the previous FFmpeg finalizer is running is also rejected.
+Teleop start is rejected for an undeclared/cross pair or overlapping lease.
+Episode start is rejected until slow sync completes. Stop teleop is rejected
+while an episode is active/finalizing; stop the episode first. Starting another
+episode while the previous FFmpeg finalizer is running is also rejected.
 
 If a driver or teleop step fails, the task records a safe failure and releases
 its lease. Episode finalization does not restore a stale `teleop` state when
@@ -113,8 +130,9 @@ names, and atomically publishes `episode.json` only after both artifacts are
 durable. Failed starts and finalization remove partial or mixed files so they
 cannot be mistaken for an uploadable episode.
 
-Each due sample pairs one camera frame with leader observation, the absolute
-action sent to the follower, and the resulting follower observation. Sample
+Each due sample pairs one camera frame with leader observation, the post-map
+and post-limit absolute action actually routed to the follower, and the
+resulting follower observation. Sample
 indexes and timestamps are monotonic. The final episode metadata records its
 relative artifact key, sample count, FPS, duration, success flag, notes, and
 UTC start/end timestamps. Absolute host paths are never persisted or returned.
@@ -203,7 +221,10 @@ target for a safe retry.
 
 Before a real demonstration:
 
-- verify the selected arm roles and live CAN state;
+- verify exact pair/group/side metadata, stable identities, handle health, and
+  live CAN state;
+- inspect live joint deltas before the separately acknowledged slow sync;
+- heed `NO SASH GUARD` and keep an unguarded cell out of the hood;
 - confirm no inference or manual control owns the rig;
 - confirm recording FPS and available staging disk;
 - perform a short test episode and verify video playback;
@@ -213,7 +234,7 @@ Before a real demonstration:
 
 After the session:
 
-- stop and finalize every episode before stopping teleop;
+- stop/finalize every episode, disable sync, then stop teleop;
 - verify episode count and duration;
 - upload private unless publication is intentional;
 - record the returned repository and immutable revision; and

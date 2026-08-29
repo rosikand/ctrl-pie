@@ -1,215 +1,204 @@
 ---
-title: "YAM setup"
-description: "Discover, preflight, save, and safely restore one supported YAM leader/follower pair."
+title: "YAM cell setup"
+description: "Discover stable identities, configure a YAM cell, preflight passively, and connect selected arms explicitly."
 icon: "cable"
 ---
 
-ctrl-π supports one standard YAM follower over SocketCAN, one calibrated
-GELLO/Dynamixel leader over a stable serial path, and the `crank_4310`
-gripper. YAM Pro, YAM Ultra, linear grippers, other leaders, and multiple
-pairs are outside this release. The camera remains synthetic in both modes.
+V1.2 configures one primary YAM-specific cell containing up to 16 typed arms.
+It supports multiple CAN-connected YAM leaders/followers and retains the V1.1
+serial-GELLO topology through a compatibility adapter. The deterministic mock
+cell has two independent leader/follower pairs; product logic is not hard-coded
+to four arms, those pair names, adapter serials, or Linux `canN` values.
 
 <Warning>
-  No physical YAM was available in the development environment. Fake-vendor
-  and mock tests validate software behavior, not calibration accuracy, joint
-  directions, controller state, bus behavior, limits, or the emergency stop.
-  Complete the [Ubuntu/YAM validation checklist](/yam-driver#required-ubuntu-yam-validation)
-  before normal motion.
+  No physical YAM was available in the V1.2 development environment. Mock and
+  fake-worker tests validate software boundaries, not controller behavior,
+  directions, offsets, gravity compensation, gripper calibration, limits,
+  E-stop response, container permissions, or safe disconnect on the real rig.
 </Warning>
 
-## Before onboarding
+## Cell and arm identity
 
-Install the hardware extras and retain the versions pinned by ctrl-π:
+Each cell arm records:
 
-- `lerobot==0.4.4`
-- `lerobot-robot-yam==0.1.1`
-- `lerobot-teleoperator-yam-gello==0.1.1`
-- `yam-common==0.1.1`
+- stable `logical_id` and display name;
+- `leader` or `follower` role;
+- optional `pair_id`, `group_id`, and `side`;
+- `socketcan` or retained `serial` transport;
+- durable physical identity;
+- end effector (`yam_teaching_handle`, `linear_4310`, `crank_4310`, or legacy
+  `gello` as allowed by role/transport);
+- follower-only frame-map and soft-limit paths; and
+- optional legacy model/calibration fields.
 
-Configure the selected SocketCAN interface on the Ubuntu host. Verify the
-bitrate for your rig; this example uses 1 Mbit/s:
+For SocketCAN, durable identity is the USB-CAN adapter serial. Discovery maps
+that serial to the current kernel interface. `can0`, `can1`, and similar names
+are telemetry only and are never saved as identity. Missing, duplicate, or
+colliding identities fail closed; ctrl-π does not substitute another arm.
 
-```bash
-export YAM_CAN_INTERFACE=can0
-sudo ip link set "$YAM_CAN_INTERFACE" down
-sudo ip link set "$YAM_CAN_INTERFACE" type can bitrate 1000000
-sudo ip link set "$YAM_CAN_INTERFACE" up
-ip -details -statistics link show "$YAM_CAN_INTERFACE"
+A declared pair contains exactly one leader and one follower and has consistent
+side/group metadata. Pair ports, when supplied, must be unique. Pair identity
+prevents a left leader from accidentally controlling a right follower.
+
+## Passive discovery and preflight
+
+Settings → YAM Cell follows this order:
+
+1. **Discover hardware** — enumerate bounded sysfs SocketCAN devices and
+   stable legacy serial candidates.
+2. **Assign arms** — enter logical role, pair/group/side, stable identity, and
+   end-effector type.
+3. **Preflight** — validate topology, identity resolution, link state, exact
+   local i2rt source, and configured artifacts.
+4. **Save cell** — persist normalized cell/arm rows without opening hardware.
+5. **Connect selected arms** — a separate acknowledged active operation.
+
+Discovery/preflight may inspect bounded files, sysfs, link state, and Git
+identity. It must not:
+
+- open a CAN/serial device or construct an i2rt/vendor YAM object;
+- ping, enable, zero, or command a motor;
+- calibrate a gripper;
+- bring a CAN link up/down or change bitrate; or
+- start gravity compensation or a control loop.
+
+The Ubuntu host owns working CAN link configuration. A down/missing link is a
+readiness result, not permission for ctrl-π to mutate it.
+
+## Exact local i2rt source
+
+All-CAN workers load only an operator-mounted read-only checkout. Enter its
+container path (normally `/opt/i2rt`) and one full lowercase 40-character
+commit in the cell. Preflight accepts read-only status only when the mounted
+filesystem reports the kernel `ST_RDONLY` flag; host `chmod`, ownership, or an
+effective-permission check is not sufficient. Docker's `/opt/i2rt:ro` bind
+supplies that flag. Preflight also rejects dirty, missing, or different source.
+The hardware Docker image records the commit whose dependencies it contains;
+all identities must match.
+
+ctrl-π never fetches i2rt, resolves a branch name, or chooses latest. In
+particular, the earlier field-tested commit is not advertised by public
+upstream; see [Docker deployment](/docker-deployment) for the local-source
+build contract.
+
+## Frame maps and soft limits
+
+Follower commands use this order:
+
+1. apply the six-joint frame map;
+2. apply the six-joint soft-limit clamp; and
+3. preserve the separately normalized gripper command.
+
+A frame map has exactly six `sign` and `offset` entries. Signs are `+1` or
+`-1`; a `+1` entry requires zero offset so the mapping remains involutive. An
+absent frame-map path means intentional 1:1 mapping and is valid.
+
+Soft limits have six nullable lower/upper entries; `null` means unbounded. An
+absent artifact does not create a default. Preflight and Arms display:
+
+```text
+NO SASH GUARD
 ```
 
-Use a stable leader path under `/dev/serial/by-id/` and grant the ctrl-π
-process read/write permission through the appropriate device group. Provide
-an absolute MuJoCo XML path whose relative assets are present and whose model
-contains `joint1` through `joint6` and `grasp_site`.
+The reference cell has no current soft-limit artifacts. Historical limits
+belonged to a failed/different mount and must not be restored. Open-table
+development may proceed under the reviewed operator policy; in-hood operation
+remains blocked until limits are measured for the current mount.
 
-Start the backend in hardware mode with a migrated PostgreSQL database:
+## Teaching-handle range health
 
-```dotenv
-CTRL_PI_MOCK_MODE=false
+Adapter/link connectivity does not prove a CAN `yam_teaching_handle` is ready.
+After passive preflight, run the separate range test for one leader. It requires
+an acknowledgement because it opens an active, read-only CAN diagnostic. Move
+the trigger released → squeezed → released; ctrl-π reports reachability,
+observed minimum/maximum, and healthy/stuck status independently of arm
+connectivity.
+
+The test never zeros an encoder. A pinned value such as `1.000 .. 1.000` is an
+unhealthy handle. Re-zero remains a separately approved external i2rt encoder
+manager procedure with the trigger mechanically released; there is no UI,
+REST, or SDK zero action in V1.2.
+
+## Explicit connect and disconnect
+
+Connect can target selected logical arm IDs. It requires a fresh general
+hardware-motion acknowledgement. Selecting any `linear_4310` or `crank_4310`
+follower also requires a distinct acknowledgement with this meaning:
+
+```text
+Connecting this follower will enable the arm controller and calibrate its
+4310 gripper. The jaws will move. Clear the jaws and arm workspace.
 ```
 
-The `YAM_*` environment fields remain an optional bootstrap when no physical
-setup row exists. They select a candidate configuration only: they do not
-authorize startup to open a bus or engage a controller. Once a physical setup
-is saved, that database row takes precedence. See [Configuration](/configuration).
+The driver re-resolves stable identity immediately before opening the worker.
+It refuses a second writer to the same bus. A connected follower is visibly
+energized/holding and may resist manual motion. Never force it by hand.
 
-## Create the leader calibration outside ctrl-π
+Disconnect first revokes writes, then requests safe-idle/device close and
+joins/reaps the worker. If bounded cleanup is uncertain, the bus remains
+blocked and status remains an error; do not claim the arm is limp merely
+because the request returned or a container stopped. Support the arm when
+torque/control releases.
 
-Onboarding requires an existing LeRobot calibration JSON. ctrl-π never opens
-an interactive calibration prompt and always constructs the leader with
-`calibrate=False`.
+Automatic restoration is off for a new cell. Enabling it requires separate
+unattended-motion consent and the 4310-gripper calibration acknowledgement
+where applicable. Missing hardware is passively rechecked, but a runtime or
+vendor error latches for manual review and is not blindly retried.
 
-Stop ctrl-π and every process that might own the leader port. Secure the
-workspace, verify independent power and motion controls, keep an operator at
-the emergency stop, and run the pinned LeRobot CLI with the same stable port,
-ID, and directory you will enter in Settings:
+## Pair teleop boundary
 
-```bash
-.venv/bin/lerobot-calibrate \
-  --teleop.type=yam_leader \
-  --teleop.port=/dev/serial/by-id/REPLACE_WITH_LEADER \
-  --teleop.id=yam-leader \
-  --teleop.calibration_dir=/absolute/path/to/leader-calibration
-```
+Start Teleop acquires one declared pair and reads both arms. It starts with
+sync disabled, exposes live joint deltas, and performs zero follower writes.
+After inspecting those deltas and clearing the workspace, **Enable Sync** is a
+second freshly acknowledged motion action. It slowly interpolates the follower
+toward the latest mapped leader target over approximately three seconds, then
+begins tracking. **Disable Sync** stops writes while pair telemetry remains.
 
-For that example, onboarding expects
-`/absolute/path/to/leader-calibration/yam-leader.json`. This interactive
-command opens and configures the leader; it neither connects nor validates the
-follower. Do not proceed if the detected device, prompts, or movement differ
-from the reviewed YAM procedure.
+This lifecycle is required; merely selecting the correct pair is not enough.
+See [Recording and teleoperation](/recording) and the ordered
+[field acceptance](/yam-field-test).
 
-## Onboard in Settings
+## REST and Python SDK
 
-Open **Settings → YAM onboarding** and follow the three numbered stages.
+The canonical routes are:
 
-<Steps>
-  <Step title="Discover host-visible devices">
-    Choose **Discover devices**. The backend returns a bounded list of Linux
-    network interfaces and stable serial candidates. Discovery does not
-    import vendor modules, open a device, start a controller, or move an arm.
-    ctrl-π never auto-selects an ambiguous list; identify the intended pair.
-  </Step>
-  <Step title="Configure and check readiness">
-    Select one follower CAN interface and leader serial path. Enter the
-    absolute MuJoCo XML path, calibration directory, and calibration ID, then
-    choose **Run read-only preflight**. Paths resolve on the backend host, not
-    in the browser.
+| Operation | Route |
+| --- | --- |
+| Status | `GET /api/yam/cell` |
+| Passive discovery | `POST /api/yam/cell/discover` |
+| Passive preflight | `POST /api/yam/cell/preflight` |
+| Save | `PUT /api/yam/cell` |
+| Connect selected/all | `POST /api/yam/cell/connect` |
+| Disconnect selected/all | `POST /api/yam/cell/disconnect` |
+| Handle range | `POST /api/yam/cell/handle-check` |
+| Reset | `DELETE /api/yam/cell` |
 
-    Preflight checks pinned package metadata, file bounds and readability,
-    Linux ARPHRD_CAN type, serial character-device visibility, and the
-    calibration JSON's pinned structural fields. It does not import vendor
-    modules, open either bus, configure a motor, or prove that calibration is
-    physically correct.
-  </Step>
-  <Step title="Save, then connect explicitly">
-    Choose **Save YAM setup**. ctrl-π persists one bounded, non-secret setup
-    row and applies it to the existing `YAMDriver` without opening hardware.
-    A rejected change leaves the prior saved selection intact.
+The typed client exposes `get_yam_cell()`, `discover_yam_cell()`,
+`preflight_yam_cell()`, `save_yam_cell()`, `connect_yam_arms()`,
+`disconnect_yam_arms()`, and `check_yam_handle()`. The V1.1
+`/api/yam/setup` and setup client methods remain compatibility aliases; new
+multi-arm integrations should use the cell names.
 
-    Secure the rig, clear the workspace, verify independent power/motion
-    controls, and place an operator at the emergency stop. Check the explicit
-    motion-risk acknowledgment, then choose **Connect and verify one sample**.
-    Connection can configure the leader bus and engage the follower's pinned
-    gravity-compensation/control worker even though ctrl-π sends no jog or
-    application action.
-  </Step>
-</Steps>
+Both UI and SDK call the same backend checks. Neither exposes raw CAN/motor
+commands or bypasses motion acknowledgements.
 
-A changed saved configuration safely disconnects the old selection. Changing
-only the automatic-restoration preference for the same connected setup does
-not interrupt that connection.
+## Mock behavior
 
-## Automatic restoration and hot-plug
+The default mock cell has two declared pairs and four stable logical arms:
 
-Automatic connection is off for every newly saved physical setup. Enabling it
-requires a separate acknowledgment that a later boot or hot-plug may connect
-the saved rig—and therefore engage the follower controller—without another
-prompt.
+- `yam-leader` / `yam-follower` (right pair);
+- `yam-leader-left` / `yam-follower-left` (left pair).
 
-With that consent enabled, the backend loads the saved configuration, performs
-passive preflight while prerequisites are missing, and makes one serialized
-connection attempt when readiness changes to ready. It never substitutes
-`MockYAMDriver`, never opens devices during discovery or preflight, and never
-blindly retries a latched runtime or vendor error. Settings refreshes the
-sanitized waiting state, so a newly plugged-in saved rig becomes visible.
+It supplies fake stable adapter identities, shuffled-runtime-map test seams,
+healthy/unhealthy handle fixtures, per-arm holding state, and calibrated-4310
+metadata. Mock mode does not request physical motion acknowledgements. Mock
+save/reset never overwrites or deletes the persisted physical cell. Mock
+success is not discovery, calibration, or physical validation.
 
-You can revoke future automatic-connection consent while the rig is absent:
-uncheck it and choose **Disable automatic connection**. That no-I/O update
-does not require preflight and does not disconnect an already connected rig.
-Enabling it again or changing the selected configuration requires a current
-passing preflight; re-enabling also requires the automatic-motion
-acknowledgment again.
+## Legacy topology
 
-Use **Forget saved YAM setup** in hardware mode to disable restoration, close
-any setup-owned connection, and delete the saved physical row. In mock mode,
-setup and reset operations are deterministic but never overwrite or delete a
-saved physical rig.
-
-## Independent command-line probes
-
-The onboarding preflight and this source-checkout command are non-opening:
-
-```bash
-make yam-probe
-```
-
-The command-line probe reads the process environment rather than the saved
-PostgreSQL setup row. It checks required values, pinned packages, readable model/calibration
-files, serial permissions, and network-interface existence. It does not prove
-interface bitrate, import vendor modules, construct a device, or parse a
-physical calibration for correctness.
-
-Only after the passive checks pass and the rig is independently safe, run one
-connected sample if your validation plan calls for it:
-
-```bash
-PYTHONPATH=backend/src \
-  .venv/bin/python -m ctrl_pi.yam_probe --connect
-```
-
-The connected probe sends no application jog or action, but it is not
-electrically read-only. It configures the leader serial bus, starts the
-follower controller, reads one sample, and attempts bounded shutdown. If
-vendor I/O does not return, make the hardware safe independently; process
-output is not proof of electrical torque state.
-
-For a container, first apply the scoped device/model override from
-[Docker deployment](/docker-deployment), then run:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.yam.yml \
-  run --rm --no-deps app python -m ctrl_pi.yam_probe
-```
-
-## Failure and recovery
-
-Configuration, import, calibration, connection, sampling, worker, and command
-failures leave the API available but mark both stable arm IDs disconnected.
-Motion fails before vendor mutation, and hardware mode never falls back to
-mock arms.
-
-- If saved auto-restore is waiting on missing prerequisites, correct or
-  reconnect them; passive preflight can detect the ready transition once.
-- If an explicit connection or runtime/vendor operation is latched as an
-  error, inspect the rig and use manual **Connect** after correction, or
-  restart the backend. There is no uncontrolled retry loop.
-- If the setup fields changed, discover again, rerun read-only preflight, and
-  save before connecting.
-
-Before teleoperation, verify joint offsets, signs, units, wrist ordering,
-MuJoCo forward kinematics, gripper inversion, firmware limits, disconnect and
-shutdown behavior, and the emergency stop. Then issue one-at-a-time low-speed
-joint and gripper jogs from **Arms**. Real Cartesian jog is unsupported.
-
-## REST and Python access
-
-The public setup endpoints are `GET`, `PUT`, and `DELETE /api/yam/setup` plus
-`POST /api/yam/setup/discover`, `/preflight`, and `/connect`. The typed SDK
-exposes `get_yam_setup()`, `discover_yam()`, `preflight_yam()`,
-`save_yam_setup()`, `connect_yam()`, and `reset_yam_setup()` through the same
-services. Both hardware connection paths require their acknowledgments in the
-backend; bypassing the UI does not bypass the safety gates. See
-[REST and Python SDK](/python-sdk).
-
-For detailed mapping, limits, threading, cleanup, and the physical validation
-checklist, continue to [YAM driver interface](/yam-driver).
+The retained adapter continues to support one stable
+`/dev/serial/by-id/...` GELLO leader with one SocketCAN `crank_4310` follower
+and existing LeRobot model/calibration artifacts. It remains available through
+the old setup model and [separate Docker override](/docker-deployment#retained-legacy-gello-deployment).
+Do not use it to describe or connect the four-CAN reference cell.

@@ -152,32 +152,49 @@ function SessionSetup({
   disabled: boolean;
   onCreate: (payload: CreateRecordingRequest) => Promise<Recording | null>;
 }) {
-  const leaders = arms.filter((arm) => arm.role === "leader");
-  const followers = arms.filter((arm) => arm.role === "follower");
+  const pairs = useMemo(() => {
+    const byPair = new Map<string, ArmTelemetry[]>();
+    arms.forEach((arm) => {
+      if (arm.pair_id) byPair.set(arm.pair_id, [...(byPair.get(arm.pair_id) ?? []), arm]);
+    });
+    const declared = [...byPair.entries()].flatMap(([pairId, pairArms]) => {
+      const leaders = pairArms.filter((arm) => arm.role === "leader");
+      const followers = pairArms.filter((arm) => arm.role === "follower");
+      if (leaders.length !== 1 || followers.length !== 1) return [];
+      return [{ key: pairId, pairId, leader: leaders[0], follower: followers[0] }];
+    });
+    if (declared.length > 0) return declared;
+    // V1.1 compatibility: its only leader and follower had no pair metadata.
+    const leaders = arms.filter((arm) => arm.role === "leader");
+    const followers = arms.filter((arm) => arm.role === "follower");
+    return leaders.length === 1 && followers.length === 1
+      ? [{ key: "legacy-pair", pairId: null, leader: leaders[0], follower: followers[0] }]
+      : [];
+  }, [arms]);
   const [name, setName] = useState("");
   const [task, setTask] = useState("");
-  const [leaderId, setLeaderId] = useState("");
-  const [followerId, setFollowerId] = useState("");
+  const [pairKey, setPairKey] = useState("");
   const [operator, setOperator] = useState("");
   const [notes, setNotes] = useState("");
 
   useEffect(() => {
-    if (!leaders.some((arm) => arm.id === leaderId)) setLeaderId(leaders[0]?.id ?? "");
-    if (!followers.some((arm) => arm.id === followerId)) {
-      setFollowerId(followers[0]?.id ?? "");
-    }
-  }, [followerId, followers, leaderId, leaders]);
+    if (!pairs.some((pair) => pair.key === pairKey)) setPairKey(pairs[0]?.key ?? "");
+  }, [pairKey, pairs]);
+  const selectedPair = pairs.find((pair) => pair.key === pairKey) ?? null;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const metadata: Record<string, unknown> = {};
     if (operator.trim()) metadata.operator = operator.trim();
     if (notes.trim()) metadata.notes = notes.trim();
+    if (selectedPair?.pairId) metadata.pair_id = selectedPair.pairId;
+    if (selectedPair?.leader.group_id) metadata.group_id = selectedPair.leader.group_id;
+    if (selectedPair?.leader.side) metadata.side = selectedPair.leader.side;
     const created = await onCreate({
       name: name.trim(),
       task: task.trim(),
-      leader_robot_id: leaderId,
-      follower_robot_id: followerId,
+      leader_robot_id: selectedPair?.leader.id ?? "",
+      follower_robot_id: selectedPair?.follower.id ?? "",
       metadata,
     });
     if (created) {
@@ -190,9 +207,9 @@ function SessionSetup({
   const canSubmit =
     name.trim().length > 0 &&
     task.trim().length > 0 &&
-    leaderId.length > 0 &&
-    followerId.length > 0 &&
-    leaderId !== followerId;
+    selectedPair !== null &&
+    selectedPair.leader.connected &&
+    selectedPair.follower.connected;
 
   return (
     <section className="rounded-xl border border-slate-200 bg-white shadow-panel">
@@ -239,37 +256,24 @@ function SessionSetup({
             className="mt-1.5 w-full resize-none rounded-lg border border-slate-200 px-3 py-2.5 text-sm leading-5 outline-none ring-brand-100 transition placeholder:text-slate-300 focus:border-brand-500 focus:ring-4"
           />
         </label>
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div>
           <label className="block text-xs font-medium text-slate-700">
-            Leader arm
+            Declared leader / follower pair
             <select
               required
               disabled={disabled}
-              value={leaderId}
-              onChange={(event) => setLeaderId(event.target.value)}
+              value={pairKey}
+              onChange={(event) => setPairKey(event.target.value)}
               className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none ring-brand-100 focus:border-brand-500 focus:ring-4"
             >
-              {leaders.length === 0 && <option value="">No leader available</option>}
-              {leaders.map((arm) => (
-                <option key={arm.id} value={arm.id}>{arm.name}</option>
+              {pairs.length === 0 && <option value="">No complete declared pair</option>}
+              {pairs.map((pair) => (
+                <option key={pair.key} value={pair.key}>{pair.pairId ?? "Legacy pair"} · {pair.leader.name} → {pair.follower.name}{pair.leader.side ? ` · ${pair.leader.side}` : ""}{pair.leader.group_id ? ` · ${pair.leader.group_id}` : ""}</option>
               ))}
             </select>
           </label>
-          <label className="block text-xs font-medium text-slate-700">
-            Follower arm
-            <select
-              required
-              disabled={disabled}
-              value={followerId}
-              onChange={(event) => setFollowerId(event.target.value)}
-              className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none ring-brand-100 focus:border-brand-500 focus:ring-4"
-            >
-              {followers.length === 0 && <option value="">No follower available</option>}
-              {followers.map((arm) => (
-                <option key={arm.id} value={arm.id}>{arm.name}</option>
-              ))}
-            </select>
-          </label>
+          <p className="mt-1.5 text-[10px] leading-4 text-slate-400">Pair routing comes from saved cell metadata. Cross-pair leader/follower combinations cannot be selected.</p>
+          {selectedPair && (!selectedPair.leader.connected || !selectedPair.follower.connected) && <p className="mt-2 text-[10px] font-medium text-amber-700">Connect both arms in this pair before creating a session.</p>}
         </div>
         <label className="block text-xs font-medium text-slate-700">
           Session notes <span className="font-normal text-slate-400">(optional)</span>
@@ -477,7 +481,7 @@ function DatasetUploadControls({
     return (
       <div className="border-t border-slate-100 pt-5">
         <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
-          3 · Hugging Face
+          4 · Hugging Face
         </p>
         <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3" role="status">
           <div className="flex items-start gap-2.5">
@@ -515,7 +519,7 @@ function DatasetUploadControls({
     <div className="border-t border-slate-100 pt-5">
       <div className="flex items-center justify-between gap-3">
         <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
-          3 · Hugging Face
+          4 · Hugging Face
         </p>
         <span className={`rounded-full px-2 py-0.5 text-[9px] font-semibold ${isPrivate ? "bg-slate-100 text-slate-500" : "bg-amber-100 text-amber-700"}`}>
           {isPrivate ? "Private" : "Public"}
@@ -696,6 +700,8 @@ function SessionControls({
   namespaceError,
   onStartTeleop,
   onStopTeleop,
+  onEnableSync,
+  onDisableSync,
   onStartEpisode,
   onStopEpisode,
   onUpload,
@@ -710,6 +716,8 @@ function SessionControls({
   namespaceError: string | null;
   onStartTeleop: () => Promise<RecordingState | null>;
   onStopTeleop: () => Promise<RecordingState | null>;
+  onEnableSync: () => Promise<RecordingState | null>;
+  onDisableSync: () => Promise<RecordingState | null>;
   onStartEpisode: (payload: { metadata?: { operator?: string; notes?: string } }) => Promise<RecordingState | null>;
   onStopEpisode: (payload: { success?: boolean; notes?: string }) => Promise<RecordingState | null>;
   onUpload: (payload: UploadRecordingRequest) => Promise<UploadRecordingResponse | null>;
@@ -718,6 +726,7 @@ function SessionControls({
   const [operator, setOperator] = useState("");
   const [notes, setNotes] = useState("");
   const [success, setSuccess] = useState(true);
+  const [syncConfirmed, setSyncConfirmed] = useState(false);
   const stateReady = recording !== null && state !== null;
   const lifecycleStatus = state?.status ?? recording?.status;
   const lifecycleClosed =
@@ -777,17 +786,19 @@ function SessionControls({
         <div>
           <div className="flex items-center justify-between">
             <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">1 · Teleoperation</p>
-            {state?.teleop_active && <span className="text-[10px] font-medium text-blue-600">Leader mirroring</span>}
+            {state?.teleop_active && <span className={`text-[10px] font-medium ${state.sync_enabled ? "text-emerald-600" : "text-amber-600"}`}>{state.sync_enabled ? "Sync enabled" : "Observing · sync disabled"}</span>}
           </div>
           <button
             type="button"
-            disabled={!stateReady || busy || state?.episode_active || lifecycleClosed}
+            disabled={!stateReady || busy || state?.episode_active || state?.sync_enabled || state?.sync_in_progress || lifecycleClosed}
             onClick={() => void (state?.teleop_active ? onStopTeleop() : onStartTeleop())}
             className={`mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${state?.teleop_active ? "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50" : "bg-ink text-white hover:bg-slate-700"}`}
           >
             {busy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : state?.teleop_active ? <Square className="h-3 w-3" /> : <Play className="h-3.5 w-3.5" />}
-            {state?.teleop_active ? "Stop teleop" : "Start teleop"}
+            {state?.teleop_active ? "Stop teleop" : "Start teleop (sync off)"}
           </button>
+          {!state?.teleop_active && !lifecycleClosed && <p className="mt-1.5 text-[10px] leading-4 text-slate-400">Starting teleop only observes the declared pair. It makes zero follower writes and synchronization begins disabled.</p>}
+          {state?.sync_enabled && <p className="mt-1.5 text-[10px] text-amber-700">Disable sync cleanly before stopping teleop.</p>}
           {state?.episode_active && <p className="mt-1.5 text-[10px] text-amber-600">Stop the active episode before stopping teleop.</p>}
           {lifecycleClosed && (
             <p className="mt-1.5 text-[10px] leading-4 text-slate-400">
@@ -801,8 +812,17 @@ function SessionControls({
         </div>
 
         <div className="border-t border-slate-100 pt-5">
+          <div className="flex items-center justify-between"><p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">2 · Pair synchronization</p>{state?.sync_in_progress && <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700"><LoaderCircle className="h-3 w-3 animate-spin" />Slow correction</span>}</div>
+          {state?.teleop_active ? <>
+            <div className="mt-3 grid grid-cols-3 gap-1.5">{Object.entries(state.joint_deltas_radians).map(([joint, delta], index) => <div key={joint} className="rounded-md bg-slate-50 px-2 py-2 text-center"><p className="text-[8px] font-semibold uppercase text-slate-400">J{index + 1}</p><p className="mt-0.5 font-mono text-[10px] font-semibold text-slate-700">{degrees(delta)}</p></div>)}</div>
+            {!state.sync_enabled && !state.sync_in_progress && <label className="mt-3 flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50 p-3 text-[10px] leading-4 text-amber-950"><input type="checkbox" checked={syncConfirmed} onChange={(event) => setSyncConfirmed(event.target.checked)} className="mt-0.5 h-3.5 w-3.5 rounded border-amber-400 text-amber-600" /><span>I inspected the live leader/follower deltas and cleared the workspace. Enabling sync will move the follower slowly toward the leader over approximately 3 seconds.</span></label>}
+            <button type="button" disabled={busy || (!state.sync_enabled && !state.sync_in_progress && !syncConfirmed)} onClick={() => void ((state.sync_enabled || state.sync_in_progress) ? onDisableSync().then((updated) => { if (updated) setSyncConfirmed(false); }) : onEnableSync())} className={`mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold disabled:opacity-40 ${state.sync_enabled || state.sync_in_progress ? "border border-rose-200 bg-white text-rose-700" : "bg-amber-600 text-white"}`}>{state.sync_in_progress ? <Square className="h-3 w-3" /> : state.sync_enabled ? <Square className="h-3 w-3" /> : <Play className="h-3.5 w-3.5" />}{state.sync_in_progress ? "Stop correction now" : state.sync_enabled ? "Disable sync" : "Enable slow sync"}</button>
+          </> : <p className="mt-2 text-[10px] leading-4 text-slate-400">Start teleop to inspect live deltas. No follower command is sent until this separate boundary is acknowledged.</p>}
+        </div>
+
+        <div className="border-t border-slate-100 pt-5">
           <div className="flex items-center justify-between">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">2 · Episode</p>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">3 · Episode</p>
             {state?.episode_active && <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-semibold text-rose-600"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-500" />EP {(state.current_episode_index ?? 0) + 1} · REC {formatDuration(state.episode_duration_seconds)}</span>}
           </div>
           <div className="mt-3 grid gap-3">
@@ -836,14 +856,14 @@ function SessionControls({
           </div>
           <button
             type="button"
-            disabled={!stateReady || busy || lifecycleClosed || (!state?.teleop_active && !state?.episode_active)}
+            disabled={!stateReady || busy || lifecycleClosed || (!state?.sync_enabled && !state?.episode_active) || state?.sync_in_progress}
             onClick={() => void (state?.episode_active ? finishEpisode() : beginEpisode())}
             className={`mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-40 ${state?.episode_active ? "bg-rose-600 hover:bg-rose-700" : "bg-brand-600 hover:bg-brand-700"}`}
           >
             {busy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : state?.episode_active ? <Square className="h-3 w-3" /> : <Radio className="h-3.5 w-3.5" />}
             {state?.episode_active ? "Stop & save episode" : "Record episode"}
           </button>
-          {!lifecycleClosed && !state?.teleop_active && !state?.episode_active && recording && <p className="mt-1.5 text-[10px] text-slate-400">Start teleop before recording an episode.</p>}
+          {!lifecycleClosed && !state?.sync_enabled && !state?.episode_active && recording && <p className="mt-1.5 text-[10px] text-slate-400">Start teleop, inspect alignment, and explicitly enable sync before recording an episode.</p>}
         </div>
         <DatasetUploadControls
           key={recording?.id ?? "no-recording"}
@@ -933,6 +953,8 @@ export function RecordPage() {
     createRecording,
     startTeleop,
     stopTeleop,
+    enableSync,
+    disableSync,
     startEpisode,
     stopEpisode,
     uploadRecording,
@@ -1019,6 +1041,8 @@ export function RecordPage() {
           namespaceError={hfNamespaceError}
           onStartTeleop={startTeleop}
           onStopTeleop={stopTeleop}
+          onEnableSync={enableSync}
+          onDisableSync={disableSync}
           onStartEpisode={startEpisode}
           onStopEpisode={stopEpisode}
           onUpload={uploadRecording}

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   createRecording as createRecordingRequest,
+  disableTeleopSync as disableTeleopSyncRequest,
+  enableTeleopSync as enableTeleopSyncRequest,
   fetchRecordings,
   fetchRecordingState,
   startEpisode as startEpisodeRequest,
@@ -20,7 +22,7 @@ import type {
   UploadRecordingResponse,
 } from "../types/recordings";
 
-type RecordingAction = "create" | "teleop" | "episode" | "upload" | null;
+type RecordingAction = "create" | "teleop" | "sync" | "episode" | "upload" | null;
 
 export function useRecordings() {
   const [recordings, setRecordings] = useState<Recording[]>([]);
@@ -215,6 +217,16 @@ export function useRecordings() {
     stopTeleop: () =>
       selectedId
         ? runStateAction("teleop", () => stopTeleopRequest(selectedId))
+        : Promise.resolve(null),
+    enableSync: () =>
+      selectedId
+        ? runStateAction("sync", () => enableTeleopSyncRequest(selectedId, {
+            acknowledge_slow_sync_motion: true,
+          }))
+        : Promise.resolve(null),
+    disableSync: () =>
+      selectedId
+        ? runStateAction("sync", () => disableTeleopSyncRequest(selectedId))
         : Promise.resolve(null),
     startEpisode: (payload: StartEpisodeRequest) =>
       selectedId

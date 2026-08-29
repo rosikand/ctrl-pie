@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  checkYamHandle,
   connectYamSetup,
   deleteYamSetup,
+  disconnectYamSetup,
   discoverYamSetup,
   fetchYamSetup,
   preflightYamSetup,
@@ -11,6 +13,7 @@ import {
 import type {
   YamSetupConfig,
   YamSetupDiscovery,
+  YamHandleRangeResult,
   YamSetupPreflight,
   YamSetupStatus,
 } from "../types/yamSetup";
@@ -21,6 +24,8 @@ export type YamSetupOperation =
   | "preflight"
   | "save"
   | "connect"
+  | "disconnect"
+  | "handle-check"
   | "forget"
   | null;
 
@@ -32,6 +37,7 @@ export function useYamSetup() {
   const [setup, setSetup] = useState<YamSetupStatus | null>(null);
   const [discovery, setDiscovery] = useState<YamSetupDiscovery | null>(null);
   const [preflight, setPreflight] = useState<YamSetupPreflight | null>(null);
+  const [handleResult, setHandleResult] = useState<YamHandleRangeResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [operation, setOperation] = useState<YamSetupOperation>(null);
   const [error, setError] = useState<string | null>(null);
@@ -118,7 +124,7 @@ export function useYamSetup() {
       || setup.mode !== "hardware"
       || !setup.saved
       || !setup.auto_restore
-      || setup.connected
+      || setup.all_connected
       || setup.state === "error"
       || operation !== null
     ) return;
@@ -185,6 +191,7 @@ export function useYamSetup() {
     config: YamSetupConfig,
     autoRestore: boolean,
     acknowledgeAutomaticMotionRisk: boolean,
+    acknowledgeGripperCalibrationMotion: boolean,
   ) => {
     const controller = startRequest("save");
     if (!controller) return null;
@@ -194,6 +201,7 @@ export function useYamSetup() {
         config,
         auto_restore: autoRestore,
         acknowledge_automatic_motion_risk: acknowledgeAutomaticMotionRisk,
+        acknowledge_gripper_calibration_motion: acknowledgeGripperCalibrationMotion,
       }, controller.signal);
       if (!mounted.current || !isCurrent(controller)) return null;
       setSetup(result);
@@ -211,18 +219,73 @@ export function useYamSetup() {
     }
   }, [captureError, finishRequest, isCurrent, startRequest]);
 
-  const connect = useCallback(async (acknowledgeHardwareMotionRisk: boolean) => {
+  const connect = useCallback(async (
+    armIds: string[] | null,
+    acknowledgeHardwareMotionRisk: boolean,
+    acknowledgeGripperCalibrationMotion: boolean,
+  ) => {
     const controller = startRequest("connect");
     if (!controller) return null;
     setError(null);
     try {
       const result = await connectYamSetup({
+        arm_ids: armIds,
         acknowledge_hardware_motion_risk: acknowledgeHardwareMotionRisk,
+        acknowledge_gripper_calibration_motion: acknowledgeGripperCalibrationMotion,
       }, controller.signal);
       if (!mounted.current || !isCurrent(controller)) return null;
       setSetup(result);
       hasSetup.current = true;
       setStale(false);
+      return result;
+    } catch (reason) {
+      if (isCurrent(controller)) captureError(reason);
+      return null;
+    } finally {
+      const latest = isCurrent(controller);
+      finishRequest(controller);
+      if (mounted.current && latest) setOperation(null);
+    }
+  }, [captureError, finishRequest, isCurrent, startRequest]);
+
+  const disconnect = useCallback(async (armIds: string[] | null) => {
+    const controller = startRequest("disconnect");
+    if (!controller) return null;
+    setError(null);
+    try {
+      const result = await disconnectYamSetup({ arm_ids: armIds }, controller.signal);
+      if (!mounted.current || !isCurrent(controller)) return null;
+      setSetup(result);
+      hasSetup.current = true;
+      setStale(false);
+      return result;
+    } catch (reason) {
+      if (isCurrent(controller)) captureError(reason);
+      return null;
+    } finally {
+      const latest = isCurrent(controller);
+      finishRequest(controller);
+      if (mounted.current && latest) setOperation(null);
+    }
+  }, [captureError, finishRequest, isCurrent, startRequest]);
+
+  const checkHandle = useCallback(async (
+    armId: string,
+    durationSeconds: number,
+    acknowledgeActiveCanDiagnostic: boolean,
+  ) => {
+    const controller = startRequest("handle-check");
+    if (!controller) return null;
+    setError(null);
+    setHandleResult(null);
+    try {
+      const result = await checkYamHandle({
+        arm_id: armId,
+        duration_seconds: durationSeconds,
+        acknowledge_active_can_diagnostic: acknowledgeActiveCanDiagnostic,
+      }, controller.signal);
+      if (!mounted.current || !isCurrent(controller)) return null;
+      setHandleResult(result);
       return result;
     } catch (reason) {
       if (isCurrent(controller)) captureError(reason);
@@ -245,6 +308,7 @@ export function useYamSetup() {
       hasSetup.current = true;
       setDiscovery(null);
       setPreflight(null);
+      setHandleResult(null);
       setStale(false);
       return result;
     } catch (reason) {
@@ -263,6 +327,7 @@ export function useYamSetup() {
     setup,
     discovery,
     preflight,
+    handleResult,
     loading,
     operation,
     error,
@@ -272,6 +337,8 @@ export function useYamSetup() {
     check,
     save,
     connect,
+    disconnect,
+    checkHandle,
     forget,
     clearPreflight,
   };

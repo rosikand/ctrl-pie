@@ -1,0 +1,21 @@
+services:
+  app:
+    build:
+      target: yam-cell-runtime
+      additional_contexts:
+        i2rt-source: "${CTRL_PI_I2RT_CHECKOUT:?set CTRL_PI_I2RT_CHECKOUT to the exact local i2rt checkout}"
+      args:
+        CTRL_PI_I2RT_DEPENDENCY_COMMIT: "${CTRL_PI_I2RT_DEPENDENCY_COMMIT:?set CTRL_PI_I2RT_DEPENDENCY_COMMIT to a full commit}"
+    network_mode: host
+    ports: !reset []
+    environment:
+      CTRL_PI_MOCK_MODE: "false"
+      CTRL_PI_LISTEN_PORT: "${CTRL_PI_LISTEN_PORT:-8010}"
+    volumes:
+      - /sys:/sys:ro
+      - "${CTRL_PI_I2RT_CHECKOUT:?set CTRL_PI_I2RT_CHECKOUT to the exact local i2rt checkout}:/opt/i2rt:ro"
+    cap_add:
+      - NET_RAW
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m

@@ -29,11 +29,18 @@ export type RecordingsResponse = {
 export type RecordingState = {
   recording_id: string;
   teleop_active: boolean;
+  sync_enabled: boolean;
+  sync_in_progress: boolean;
+  joint_deltas_radians: Record<string, number>;
   episode_active: boolean;
   current_episode_index: number | null;
   episode_duration_seconds: number;
   episode_count: number;
   status: RecordingStatus;
+};
+
+export type EnableTeleopSyncRequest = {
+  acknowledge_slow_sync_motion: true;
 };
 
 export type CreateRecordingRequest = {

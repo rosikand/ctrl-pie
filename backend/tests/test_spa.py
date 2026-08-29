@@ -67,43 +67,70 @@ def test_settings_exposes_service_backed_yam_onboarding_without_browser_device_l
     app_source = (REPOSITORY_ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
     settings_source = (REPOSITORY_ROOT / "frontend/src/pages/SettingsPage.tsx").read_text(encoding="utf-8")
     panel_source = (REPOSITORY_ROOT / "frontend/src/components/YamSetupPanel.tsx").read_text(encoding="utf-8")
+    arms_source = (REPOSITORY_ROOT / "frontend/src/pages/ArmsPage.tsx").read_text(encoding="utf-8")
     hook_source = (REPOSITORY_ROOT / "frontend/src/hooks/useYamSetup.ts").read_text(encoding="utf-8")
     api_source = (REPOSITORY_ROOT / "frontend/src/lib/api.ts").read_text(encoding="utf-8")
     type_source = (REPOSITORY_ROOT / "frontend/src/types/yamSetup.ts").read_text(encoding="utf-8")
 
     assert "<YamSetupPanel onSettingsRefresh={refresh} />" in settings_source
     assert 'id="yam-setup"' in panel_source
-    assert "Discovery only lists network interfaces and stable serial candidates" in panel_source
-    assert "It does not open a bus, start a controller, or move an arm." in panel_source
-    assert "calibration file is readiness evidence only" in panel_source
+    assert "Configure a multi-arm YAM cell" in panel_source
+    assert "Assign stable physical identities to logical arms" in panel_source
+    assert "Read-only OS inspection" in panel_source
+    assert "Roles are never inferred" in panel_source
+    assert "without opening hardware" in panel_source
+    assert "Never save canN here" in panel_source
+    assert "NO SASH GUARD" in panel_source
     assert "I secured the workspace" in panel_source
     assert "emergency stop" in panel_source
-    assert "requires_physical_validation" in panel_source or "Physical directions, offsets" in panel_source
-    assert "Multiple candidates are intentionally not auto-selected" in panel_source
-    assert "Mock mode provides a deterministic leader" in panel_source
+    calibrated_set = panel_source.split(
+        "const CALIBRATED_4310_END_EFFECTORS", 1
+    )[1].split("]);", 1)[0]
+    assert '"linear_4310"' in calibrated_set
+    assert '"crank_4310"' in calibrated_set
+    assert "CALIBRATED_4310_END_EFFECTORS" in panel_source
+    assert "selectedConfigs.some(requiresJawCalibrationConsent)" in panel_source
+    assert panel_source.count("normalized.arms.some(requiresJawCalibrationConsent)") == 3
+    assert "linear_4310 or crank_4310 followers" in type_source
+    assert "Connect selected" in panel_source
+    assert "Disconnect selected" in panel_source
+    assert "Assign at least one physical device to the cell." not in panel_source
+    assert "This saved cell is an empty topology draft." in panel_source
+    assert "const hasArms = normalized.arms.length > 0;" in panel_source
+    assert "(!hasArms && yam.preflight?.i2rt_ready === true)" in panel_source
+    assert "const revokingAutoRestoreOnly = Boolean(" in panel_source
+    assert "Revoking automatic connection is a database-only consent change." in panel_source
+    assert "It is never connect-ready." in panel_source
+    assert "disabled={busy || !hasArms}" in panel_source
+    assert "never re-zeros the encoder" in panel_source
     assert "const [autoRestore, setAutoRestore] = useState(false);" in panel_source
     assert "yam.setup.auto_restore || !yam.setup.saved" not in panel_source
-    assert "canDisableAutomaticConnection" in panel_source
-    assert "It does not disconnect hardware that is already connected." in panel_source
-    assert 'setup.saved ? "Waiting for saved devices" : "Configured hardware missing"' in panel_source
-    assert "Another robot operation is active" not in panel_source
     assert "{yam.error}" in panel_source
-    assert "dirty || autoRestoreDirty || !yam.setup.calibration_ready" in panel_source
     assert "acknowledge_automatic_motion_risk" in type_source
     assert "acknowledge_hardware_motion_risk" in type_source
+    assert "acknowledge_gripper_calibration_motion" in type_source
+    assert "acknowledge_active_can_diagnostic" in type_source
     assert "acknowledge_automatic_motion_risk" in hook_source
     assert "acknowledge_hardware_motion_risk" in hook_source
-    assert 'maxLength={15}' in panel_source
+    assert "disconnectYamSetup" in hook_source
+    assert "checkYamHandle" in hook_source
 
-    assert '"/api/yam/setup"' in api_source
-    assert '"/api/yam/setup/discover"' in api_source
-    assert '"/api/yam/setup/preflight"' in api_source
-    assert '"/api/yam/setup/connect"' in api_source
+    assert '"/api/yam/cell"' in api_source
+    assert '"/api/yam/cell/discover"' in api_source
+    assert '"/api/yam/cell/preflight"' in api_source
+    assert '"/api/yam/cell/connect"' in api_source
+    assert '"/api/yam/cell/disconnect"' in api_source
+    assert '"/api/yam/cell/handle-check"' in api_source
     assert '`/api/models${suffix}`' in api_source
     assert '`/api/trainer/models${suffix}`' not in api_source
     assert "navigator.serial" not in panel_source
     assert "navigator.usb" not in panel_source
     assert "new WebSocket" not in panel_source
+
+    assert 'arm.driver === "i2rt-worker"' in arms_source
+    assert 'aria-label="Manual jog unavailable"' in arms_source
+    assert "One-shot jog commands are intentionally disabled" in arms_source
+    assert "Mock and legacy drivers retain manual jog." in arms_source
 
     # Refresh remains stable after state updates and every request is abortable.
     assert "const hasSetup = useRef(false);" in hook_source
@@ -113,8 +140,9 @@ def test_settings_exposes_service_backed_yam_onboarding_without_browser_device_l
     assert 'document.visibilityState !== "visible"' in hook_source
     assert 'document.addEventListener("visibilitychange"' in hook_source
     assert 'setup.state === "error"' in hook_source
+    assert "setup.all_connected" in hook_source
     assert "}, [setup]);" not in hook_source
-    assert "lastGlobalStatus" in panel_source
+    assert "const lastStatus = useRef<string | null>(null);" in panel_source
     assert "onSettingsRefresh();" in panel_source
     assert "fetchYamSetup" in app_source
     assert 'location.pathname === "/settings"' in app_source
@@ -201,6 +229,8 @@ def test_api_and_websocket_routes_take_precedence_over_spa_fallback(
     assert [arm["id"] for arm in telemetry["arms"]] == [
         "yam-leader",
         "yam-follower",
+        "yam-leader-left",
+        "yam-follower-left",
     ]
 
 

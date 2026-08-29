@@ -8,7 +8,8 @@ ctrl-π separates **deployment** from **robot motion**. Deploying creates and
 verifies a compute endpoint, but it never moves an arm. Starting inference is
 a second operation that selects one connected follower, acquires the shared
 rig lease, re-verifies the deployed policy identity, and only then permits
-actions. Stopping joins arm writes before tearing down the provider.
+actions. Stopping joins arm writes before tearing down the provider. On the
+supervised all-CAN path it does not disconnect the already connected follower.
 
 ![Inference tab with a verified deterministic mock deployment](assets/ctrl-pi-inference.png)
 
@@ -200,6 +201,20 @@ per-step limits are `0.35` radians and `0.20` gripper units, in addition to
 global mock joint/gripper bounds. Non-seven-dimensional policies are projected
 only when a `MockYAMDriver` is explicitly in use; real arms fail closed.
 
+### Supervised all-CAN command cadence
+
+The all-CAN parent must refresh the active action at least every 125 ms. If no
+refreshed action arrives, it stops writes and safe-idles into the follower's
+gravity-compensation state before the child fault watchdog. The child
+independently refuses an action older than 250 ms. No queued or last accepted
+target remains authority to move after either deadline.
+
+Policy execution can resume only through a fresh identity-checked command
+boundary; teleop can resume only through a fresh explicit synchronization
+boundary using current leader state. One-shot all-CAN jog is disabled. The
+125/250 ms values are command-age safety deadlines, not field-measured
+control-loop pass/fail thresholds.
+
 Inference recording does not start teleoperation and does not acquire a
 second lease. Its start hook opens the camera/episode after runtime identity
 verification but before the action task is scheduled, and its observer records
@@ -214,10 +229,18 @@ Normal Stop is deliberately ordered:
 
 1. signal the robot loop and join it, including any already in-flight network
    call;
-2. clear queued actions, close the transport, and release the rig lease;
+2. clear queued actions, close the runtime transport, request driver safe-idle,
+   and release the rig lease;
 3. finalize or fail the optional local recording; and
 4. in an unconditional cancellation-deferring path, stop the owned provider
    App and verify a stopped/absent lifecycle with zero running tasks.
+
+For a supervised all-CAN follower, inference Stop leaves its worker connected
+and the controller energized/holding in gravity compensation; it is not a
+worker-disconnect or torque-off operation. Do not manually reposition it.
+After Stop, explicitly use **Settings → YAM Cell → Disconnect** and verify
+the worker was reaped and the arm became de-energized/limp before treating
+hardware cleanup as complete.
 
 If local cleanup fails, provider stop is still attempted. If provider proof
 fails, the session/deployment remains failed and retryable; ctrl-π never

@@ -11,6 +11,27 @@ the detailed engineering record.
 
 ### Product
 
+- Replaced the narrow single-pair hardware setup with one configurable,
+  normalized YAM cell: stable USB-CAN identities, current-interface
+  resolution, typed arm roles/end effectors, pair/group/side metadata, CAN
+  teaching-handle leaders, calibrated `linear_4310`/`crank_4310` followers,
+  and a deterministic four-arm/two-pair mock fixture. The serial-GELLO pair
+  remains compatible.
+- Added a supervised direct-i2rt worker per connected CAN arm. Hardware images
+  and preflight require an exact clean operator checkout, baked dependency
+  commit, and read-only runtime mount; ctrl-π never fetches public upstream or
+  selects latest. Runtime faults latch without blind respawn.
+- Made connect/disconnect and rig ownership per arm. General connection,
+  unattended restoration, and calibrated-4310 jaw motion have distinct
+  acknowledgements. CAN connectivity and teaching-handle range health are
+  reported separately; handle zeroing remains an external maintenance action.
+- Made teleop start observation-only with synchronization disabled and zero
+  follower writes. Live deltas precede a separate acknowledged approximately
+  three-second sync correction. Cross-pair routing fails closed; one follower
+  remains the inference target.
+- Added configurable Uvicorn listen port, a least-privileged host-network
+  all-CAN Compose override, a separate single-device legacy GELLO override,
+  and the exact H0–H7 physical field-test handoff.
 - Promoted **Training** and **Models** into separate first-class routes and
   primary tabs. The application now has exactly six workflow tabs, with
   Settings remaining behind the gear icon.
@@ -31,10 +52,14 @@ the detailed engineering record.
   teardown verification. The Training UI observes but does not launch jobs.
 
 Physical YAM behavior remains unvalidated until the target Ubuntu/YAM
-checklist is completed.
+H0–H7 checklist is completed. Earlier Lux/i2rt field evidence is behavioral
+reference, not validation of this ctrl-π adapter.
 
 ### Documentation
 
+- Added cell-centric setup/driver/Docker guidance, exact pinned local i2rt
+  source handling, pair-safe sync lifecycle, `NO SASH GUARD` semantics, and a
+  navigated physical acceptance guide.
 - Added the repository-hosted Mintlify site and production navigation.
 - Split installation, quickstart, first-run setup, credentials, YAM onboarding,
   and product workflows into focused guides.

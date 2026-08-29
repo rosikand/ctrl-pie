@@ -70,7 +70,8 @@
         "pages": [
           "architecture",
           "setup",
-          "yam-driver"
+          "yam-driver",
+          "yam-field-test"
         ]
       },
       {

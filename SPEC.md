@@ -237,7 +237,8 @@ Browser / Python SDK ── LAN ──► ctrl-π backend (Ubuntu box) ── CA
 
 Key interfaces/components:
 
-- `YAMDriver` / `MockYAMDriver` plus the single-rig `YAMSetupManager`
+- `YAMDriver` / `MockYAMDriver`, a multi-arm `YAMCellDriver`, and the
+  cell-aware `YAMSetupManager`
 - `LeRobotRuntime`, `OpenPIRuntime` (runtime adapters)
 - `ModalComputeTarget` (behind a generic `ComputeTarget` abstraction)
 - `ManagedTrainingManager` / `ManagedTrainingTarget` (Modal plus a complete
@@ -254,11 +255,14 @@ SDK code.
 Three categories:
 
 1. **PostgreSQL** — source of truth for small mutable control-plane state:
-   robots/arms config, the one persisted physical YAM setup, recording
+   robots/arms config, the one persisted physical YAM cell, recording
    metadata, training runs and managed-job lifecycle, inference
    endpoints/deployments, settings.
-   Suggested tables: `robots`, `yam_setups`, `recordings`, `training_runs`,
-   `managed_training_jobs`, `inference_endpoints`, `deployments`, `settings`.
+   Suggested tables: `robots`, `yam_cells`, `yam_cell_arms`, `recordings`,
+   `training_runs`, `managed_training_jobs`, `inference_endpoints`,
+   `deployments`, `settings`. The V1.1 `yam_setups` table remains readable as
+   a legacy single-pair compatibility source, but new cell setup never stores
+   an ephemeral `canN` as physical identity.
    SQLAlchemy + Alembic; depend only on standard Postgres via `DATABASE_URL`
    (Supabase is just the recommended host).
 2. **Hugging Face Hub** — source of truth for artifacts: LeRobot datasets,
@@ -278,19 +282,29 @@ Three categories:
   secrets in Postgres or HF.
 - First-run experience: if required config is missing, the UI shows a clear
   setup checklist instead of broken pages.
-- V1.1 YAM onboarding supports one standard leader/follower pair. The backend
-  passively discovers bounded SocketCAN/stable-serial candidates without
-  opening devices, accepts bounded non-secret host configuration, and performs
-  a read-only preflight. Calibration readiness proves only that a bounded JSON
-  artifact matches the pinned structure; physical calibration accuracy remains
-  an Ubuntu/YAM-box validation.
-- A passing physical setup can be persisted in PostgreSQL and applied to the
-  existing `YAMDriver` without a process restart. Explicit Connect can open the
-  devices only after a backend-enforced hardware-motion acknowledgment.
-  Automatic boot/hot-plug connection is off by default and requires a distinct
-  acknowledgment because it can engage the follower gravity-compensation
-  controller. Missing hardware remains fail-closed and is passively rechecked;
-  latched runtime/vendor errors are never blindly retried.
+- V1.2 YAM onboarding supports one configurable, YAM-specific cell containing
+  zero or more leader/follower arms. Each arm has a stable logical ID, role,
+  transport, durable physical identity, end-effector kind, and optional
+  pair/group/side metadata. SocketCAN arms persist the USB-CAN adapter serial;
+  passive discovery resolves that serial to the current runtime `canN` and
+  never persists the interface name as identity. A retained legacy adapter
+  supports the V1.1 serial-GELLO + CAN-follower topology.
+- Passive discovery/preflight may inspect bounded sysfs, link state, files, and
+  the explicitly mounted i2rt checkout, but never opens a device, imports a
+  motion-capable vendor object, pings/enables a motor, calibrates a gripper, or
+  changes CAN link state. Teaching-handle range health is a separate explicit,
+  read-only CAN test; it reports stuck/unhealthy input but exposes no encoder-
+  or joint-zeroing action.
+- A passing physical cell can be persisted in PostgreSQL and applied to the
+  existing `YAMDriver` object without a process restart. Explicit Connect may
+  open only the selected arms and requires backend-enforced motion consent;
+  connecting a calibrated `linear_4310` or `crank_4310` follower requires a
+  distinct acknowledgement that its calibration moves the jaws. Connected followers are visibly holding/live
+  until explicit disconnect joins local loops, returns torque to the safest
+  supported state, and closes devices. Automatic boot/hot-plug connection is
+  off by default and requires separate unattended-motion consent. Missing
+  hardware remains fail-closed and is passively rechecked; latched runtime or
+  vendor errors are never blindly retried.
 - Mock onboarding implements the same discovery/preflight/apply/connect surface
   deterministically but cannot overwrite or delete the persisted physical
   setup and never implies physical discovery, calibration, or validation.
@@ -642,3 +656,79 @@ V1.1 builds on the completed V1 in this order:
   Because V1.1 has no authentication or RBAC, capability restriction and human
   approval enforcement remain responsibilities of the operator and agent tool
   runner.
+
+### V1.2 accepted evolution
+
+V1.2 replaces only the narrow V1.1 physical-YAM topology and setup surface. It
+preserves the Postgres/Hugging Face/Modal, training, deployment, recording,
+inference, and public-control-plane architecture and proceeds in these coherent
+milestones:
+
+15. General YAM cell domain, persistence, stable SocketCAN identity resolution,
+    four-arm mock parity, legacy setup compatibility, and typed REST/SDK models.
+16. Supervised, pinned-checkout i2rt cell adapter; per-arm explicit
+    connect/disconnect and teaching-handle health; pair-safe recording/teleop
+    synchronization and follower-only inference routing.
+17. Cell-centric Settings/Arms/Record/Inference UI, configurable Docker listen
+    port and least-privileged hardware override, production documentation,
+    physical field-test handoff, and final integration review.
+
+- 2026-08-29 — V1.2 models one primary YAM-specific cell with typed arm rows.
+  An empty arm list is a valid saved topology draft, but is not connect-ready
+  and cannot enable automatic connection. Upgrading to V1.2 clears historical
+  `yam_setups.auto_restore` consent while preserving the legacy topology; an
+  operator must review the new boundary and explicitly opt in again before any
+  unattended motion.
+  A SocketCAN arm persists its USB adapter serial and resolves the current
+  `canN` through bounded, read-only sysfs inspection. Logical ID, role,
+  pair/group/side, transport, and end-effector metadata remain independent of
+  enumeration order. Duplicate or missing serials, duplicate runtime buses,
+  cross-pair routing, and pair-port collisions fail closed. A missing frame map
+  means intentional 1:1 mapping; a missing soft-limit artifact is allowed but
+  produces a prominent `NO SASH GUARD` warning and never invents a limit.
+- 2026-08-29 — V1.2 conservatively treats both calibrated 4310 follower kinds,
+  `linear_4310` and `crank_4310`, as jaw-motion operations. Explicit connect
+  and unattended restoration require the same distinct gripper-calibration
+  acknowledgement for either kind; no UI, REST, or SDK client may infer that
+  the crank variant is motion-free.
+- 2026-08-29 — The all-CAN hardware path integrates the field-tested i2rt fork
+  through one supervised Python worker process per connected CAN arm, rather
+  than importing motion-capable objects into FastAPI or supervising the Lux
+  shell/Portal launchers. The operator supplies a read-only i2rt checkout and
+  expected Git commit; preflight verifies both and never fetches public upstream
+  or silently selects latest. The claimed checkout must have a clean tracked
+  worktree/index and no untracked shadow files, and container hardware mode
+  additionally proves that its baked dependency commit matches the mounted
+  source commit. Read-only source is proven only by the filesystem's kernel
+  `ST_RDONLY` mount flag (as provided by Docker's `/opt/i2rt:ro` bind); chmod,
+  ownership, and effective permissions are not accepted as substitutes. Each worker calls the pinned i2rt factory and owns
+  its CAN object and nested control threads. Bounded local IPC carries an exact
+  configuration/identity handshake, fresh telemetry/heartbeats, named loop-rate
+  diagnostics, latest-wins timestamped actions, safe-idle requests, and shutdown;
+  no raw CAN/motor command is public and no unauthenticated pair server is bound.
+  ctrl-π owns worker supervision, stable arm identity, frame-map/soft-limit
+  application, rig leases, pair routing, and fail-closed teardown. It revokes
+  writes first, requests cooperative safe-idle/close, then terminates, kills,
+  and reaps on bounded deadlines; an uncertain survivor keeps the bus blocked
+  and latches an error. A child-side command-stream watchdog enters safe idle
+  when fresh follower commands stop, and Linux parent-death signaling covers an
+  abrupt control-plane exit; runtime faults never auto-respawn. Arms surfaces the
+  observed i2rt CAN/control-loop frequency without treating the field
+  measurements (followers roughly 263–275 Hz and leaders roughly 419–426 Hz at
+  `bilateral_kp=0.0`) as universal health thresholds.
+- 2026-08-29 — Teleop start acquires and observes one declared pair with
+  synchronization disabled and performs no follower write. A separate freshly
+  acknowledged sync action interpolates the follower toward the latest mapped
+  leader pose over approximately three seconds before latest-state tracking;
+  disabling sync stops writes while leaving pair telemetry available. This
+  preserves the proven first-sync boundary and makes live joint deltas visible
+  before motion. Bimanual group identity is plumbed through configuration and
+  selection, while true multi-follower policy execution and bimanual recording
+  remain deferred.
+- 2026-08-29 — The primary all-CAN Docker path uses host networking, read-only
+  `/sys`, a read-only operator i2rt checkout, and only the raw-network capability
+  expected for SocketCAN; it does not use `--privileged`, mutate host links, or
+  require serial-device passthrough. These access assumptions remain H1 field
+  hypotheses. A separate legacy override may pass exactly one GELLO serial
+  device. The internal Uvicorn port is configurable so host-network hardware
+  mode can use 8010 beside an existing service on 8000.

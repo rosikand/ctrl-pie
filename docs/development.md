@@ -146,7 +146,7 @@ With a migrated `DATABASE_URL`, run:
 make seed
 ```
 
-The command idempotently creates the two mock robot rows and two deterministic
+The command idempotently creates four mock robot rows in two declared pairs and two deterministic
 training runs. Existing robot rows are changed only when they carry ctrl-π's
 seed ownership marker. If `HF_TOKEN` and `HF_NAMESPACE` are configured, seed
 also records a small real MP4 and uploads a private LeRobot dataset to the

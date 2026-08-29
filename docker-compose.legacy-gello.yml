@@ -1,0 +1,25 @@
+services:
+  app:
+    network_mode: host
+    ports: !reset []
+    devices:
+      - "${YAM_LEADER_DEVICE:?set YAM_LEADER_DEVICE to one stable GELLO serial device}:/dev/yam-leader:rw"
+    group_add:
+      - "${YAM_LEADER_GID:?set YAM_LEADER_GID to the device group ID}"
+    environment:
+      CTRL_PI_MOCK_MODE: "false"
+      CTRL_PI_LISTEN_PORT: "${CTRL_PI_LISTEN_PORT:-8010}"
+      YAM_CAN_INTERFACE: "${YAM_CAN_INTERFACE:?set YAM_CAN_INTERFACE for the legacy follower}"
+      YAM_LEADER_PORT: /dev/yam-leader
+      YAM_MUJOCO_XML_PATH: "/opt/ctrl-pi/yam-model/${YAM_MODEL_XML:?set YAM_MODEL_XML}"
+      YAM_GRIPPER_TYPE: crank_4310
+      YAM_LEADER_CALIBRATION_ID: "${YAM_LEADER_CALIBRATION_ID:-yam-leader}"
+      YAM_LEADER_CALIBRATION_DIR: /opt/ctrl-pi/yam-calibration
+    volumes:
+      - "${YAM_MODEL_DIR:?set YAM_MODEL_DIR}:/opt/ctrl-pi/yam-model:ro"
+      - "${YAM_CALIBRATION_DIR:?set YAM_CALIBRATION_DIR}:/opt/ctrl-pi/yam-calibration:ro"
+    cap_add:
+      - NET_RAW
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m

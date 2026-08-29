@@ -1,6 +1,6 @@
 ---
 title: "Arms"
-description: "Read live YAM telemetry, diagnostics, and issue bounded manual jog commands."
+description: "Read live YAM telemetry and diagnostics, with mock/legacy bounded jog compatibility."
 icon: "bot"
 ---
 
@@ -10,20 +10,23 @@ are never persisted.
 
 ## Select an arm
 
-Use **Active arm** to switch between the configured leader and follower. In
-mock mode the standard identities are `yam-leader` and `yam-follower`.
-Hardware mode exposes those same stable IDs even when startup fails, making a
-disconnect visible without changing database relationships.
+Use **Active arm** to switch among every configured cell arm. Mock mode exposes
+two declared pairs: `yam-leader` / `yam-follower` and `yam-leader-left` /
+`yam-follower-left`. Hardware logical IDs come from the saved cell and remain
+stable even if USB enumeration changes or startup fails.
 
 The connection strip shows:
 
 - driver connection state;
-- device bus/interface state and configured bitrate;
-- leader or follower role; and
+- transport plus durable adapter identity and current runtime CAN interface;
+- leader/follower role plus pair/group/side;
+- connected control state and explicit energized/holding flags;
+- end-effector and teaching-handle health; and
 - the timestamp of the latest live snapshot.
 
-Manual controls are enabled only while WebSocket telemetry is live and the
-selected arm reports connected.
+Manual controls are enabled only when the selected driver reports that jog is
+supported. The supervised all-CAN adapter rejects one-shot jog even while
+telemetry is live and the arm is connected.
 
 ## Telemetry panels
 
@@ -32,12 +35,16 @@ selected arm reports connected.
 | Joint state | Six named positions in radians/degrees, velocity, effort, and optional motor temperature |
 | End-effector pose | XYZ in millimetres plus roll, pitch, and yaw; real mode derives this from the configured MuJoCo model |
 | Gripper | Normalized position where `0=closed` and `1=open`, derived closed state, velocity, and optional force |
-| Loop diagnostics | ctrl-π sampling frequency, cycle time, jitter, dropped cycles, and available bus counters |
+| Loop diagnostics | Observed i2rt/control-loop source, frequency, cycle time, jitter, dropped cycles, and available bus counters |
 
-An em dash means the active driver cannot supply that field. The pinned real
-leader has no effort measurement; temperatures may be absent; real gripper
-force and CAN error counters are unavailable. Driver timing describes ctrl-π's
-sampling loop, not motor firmware timing.
+An em dash means the active adapter cannot supply that field. The earlier
+field-tested i2rt path observed follower loops around 263–275 Hz and a leader
+around 419–426 Hz at `bilateral_kp=0.0`. Those values are reference
+observations, not product health thresholds. Inspect degradation/instability
+in context rather than declaring failure from one fixed number.
+
+Follower cards show `NO SASH GUARD` when no soft-limit artifact is configured.
+That is a truthful warning, not a synthesized limit.
 
 ## Manual jog
 
@@ -53,17 +60,20 @@ conflicts, and out-of-bounds deltas. Schema maxima are 0.25 radians for a joint,
 travel.
 
 <Warning>
-  The real V1 adapter accepts only follower joint and gripper jogs. Cartesian
-  jog and leader commands fail explicitly. Software bounds do not replace
-  firmware limits, physical guards, or an emergency stop.
+  The supervised all-CAN adapter rejects every one-shot jog in V1.2. Mock mode
+  retains bounded jogs, and the legacy hardware adapter retains follower joint
+  and gripper jog compatibility; Cartesian and leader jogs still fail there.
+  A connected follower may be energized and holding—never force it by hand.
 </Warning>
 
 ## Control ownership
 
-Manual jog, teleoperation, and inference share one process-local `RigLease`.
-A conflicting command fails immediately with HTTP 409; commands are not queued
-behind another owner. Run exactly one Uvicorn worker, since the lease is not a
-distributed lock or CAN arbiter.
+Inference leases one follower; teleop leases its declared leader and follower.
+Mock/legacy jog also leases one follower. Disjoint pairs can remain independent,
+while overlapping resources fail immediately with HTTP 409. Commands are not
+queued. Run exactly one Uvicorn worker; the resource lease is not a distributed
+lock. The hardware adapter additionally refuses a second local writer on one
+resolved bus.
 
 ## Connection recovery
 
@@ -72,13 +82,13 @@ The frontend reconnects its telemetry WebSocket and labels the state as
 mode, a driver sample or worker failure latches motion unavailable rather than
 serving a stale snapshot as healthy.
 
-A saved physical setup reconnects after boot or hot-plug only when the
+A saved physical cell reconnects after boot or hot-plug only when the
 operator explicitly enabled automatic connection and acknowledged its motion
-risk. While prerequisites are missing, the backend repeats passive preflight
-and makes one serialized connection attempt when the rig becomes ready. It
-does not retry a latched runtime or vendor error. After inspecting and
-correcting that failure, use manual **Connect** in Settings or restart the
-backend.
+risk and, where applicable, jaw-calibration motion. While prerequisites are
+missing, the backend repeats passive preflight and makes one serialized
+connection attempt when the selected arms become ready. It does not respawn a
+latched worker/runtime error. After making the rig safe and correcting the
+fault, use explicit **Connect** in Settings.
 
 For real-device mapping and failure semantics, see
 [YAM driver interface](/yam-driver). For a disconnected real rig, begin with

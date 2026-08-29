@@ -36,17 +36,20 @@ ${EDITOR:-vi} .env
 | `MODAL_PROXY_TOKEN_ID` | Real inference endpoint traffic | Distinct Modal Proxy Token ID beginning `wk-`. |
 | `MODAL_PROXY_TOKEN_SECRET` | Real inference endpoint traffic | Distinct Modal Proxy Token secret beginning `ws-`. |
 | `CTRL_PI_MOCK_MODE` | Optional | Defaults to `true`. `false` selects real YAM plus Modal and never falls back to mock implementations. |
-| `YAM_CAN_INTERFACE` | Optional hardware bootstrap | SocketCAN interface for the follower, such as `can0`. |
-| `YAM_LEADER_PORT` | Optional hardware bootstrap | GELLO leader serial device; prefer `/dev/serial/by-id/...`. |
-| `YAM_MUJOCO_XML_PATH` | Optional hardware bootstrap | Explicit YAM MuJoCo XML for gravity compensation and forward kinematics. |
-| `YAM_GRIPPER_TYPE` | Optional hardware bootstrap | Must be `crank_4310` in this release. |
-| `YAM_LEADER_CALIBRATION_ID` | Optional hardware bootstrap | Existing LeRobot calibration ID; defaults to `yam-leader`. |
-| `YAM_LEADER_CALIBRATION_DIR` | Optional hardware bootstrap | Directory containing `<calibration-id>.json`. Startup never calibrates interactively. |
+| `CTRL_PI_I2RT_CHECKOUT` | All-CAN Docker build/runtime | Absolute host path to the operator-controlled local i2rt checkout. Compose mounts it `/opt/i2rt:ro`; ctrl-π never fetches it. |
+| `CTRL_PI_I2RT_DEPENDENCY_COMMIT` | All-CAN Docker build/runtime | Exact lowercase 40-character commit used to build hardware dependencies. The configured and mounted commit must match. |
+| `YAM_CAN_INTERFACE` | Legacy hardware bootstrap only | Ephemeral SocketCAN interface for the retained one-follower adapter. New cell rows persist adapter serial instead. |
+| `YAM_LEADER_PORT` | Legacy hardware bootstrap only | GELLO leader serial device; prefer `/dev/serial/by-id/...`. |
+| `YAM_MUJOCO_XML_PATH` | Legacy hardware bootstrap only | Explicit YAM MuJoCo XML for gravity compensation and forward kinematics. |
+| `YAM_GRIPPER_TYPE` | Legacy hardware bootstrap only | `crank_4310` for the retained GELLO topology. |
+| `YAM_LEADER_CALIBRATION_ID` | Legacy hardware bootstrap only | Existing LeRobot calibration ID; defaults to `yam-leader`. |
+| `YAM_LEADER_CALIBRATION_DIR` | Legacy hardware bootstrap only | Directory containing `<calibration-id>.json`. Startup never calibrates interactively. |
 | `RECORDING_STAGING_DIR` | Optional | Local pre-upload MP4, JSONL, and manifest root; defaults to `.ctrl-pi/recordings`. |
 | `RECORDING_FPS` | Optional | Initial recording rate from 1 to 60; defaults to 20. A saved Settings value takes precedence. |
 | `FRONTEND_DIST_DIR` | Production static serving | Built Vite directory. Docker sets `/app/frontend/dist`; source development leaves it unset. |
+| `CTRL_PI_LISTEN_PORT` | Production Docker | Uvicorn's internal port; defaults to 8000. Use 8010 for host-network hardware mode when 8000 is occupied. |
 | `CTRL_PI_BIND_ADDRESS` | Docker Compose | Published host address; defaults to `127.0.0.1`. |
-| `CTRL_PI_PORT` | Docker Compose | Published host port; defaults to 8000. |
+| `CTRL_PI_PORT` | Bridge-mode Docker Compose | Published host port; defaults to 8000 and is separate from the internal listen port. |
 
 ## PostgreSQL
 
@@ -76,9 +79,9 @@ export DATABASE_URL='postgresql://ctrl_pi:password@localhost:5432/ctrl_pi'
 The Docker entrypoint applies `upgrade head` automatically when the URL is
 nonblank.
 
-PostgreSQL also stores the one bounded, non-secret physical YAM setup selected
-through Settings. Tokens, database credentials, and Modal profile paths are
-never stored there.
+PostgreSQL also stores one non-secret physical YAM cell and its normalized arm
+rows. SocketCAN rows contain stable adapter serials, never current `canN`.
+Tokens, database credentials, and Modal profile paths are never stored there.
 
 ## Hugging Face
 
@@ -149,17 +152,24 @@ Normal `docker compose down` preserves the `ctrl-pi-data` volume.
 ctrl-π deletes raw staging only after the Hub revision is verified and the
 durable `uploaded` database transition commits.
 
-## YAM configuration and consent
+## YAM cell configuration and consent
 
-In hardware mode, use **Settings → YAM onboarding** to discover host-visible
-devices, run read-only preflight, and persist one physical setup. The `YAM_*`
-environment values above are only an initial fallback when no saved physical
-row exists. They do not authorize startup to open hardware, and a saved row
-takes precedence.
+In hardware mode, use **Settings → YAM Cell** to discover stable adapter
+identities, assign logical roles/pairs/groups/sides, run passive preflight, and
+persist one physical cell. All-CAN setup stores its i2rt mount path and exact
+commit in the cell; image dependency marker, configured commit, and mounted
+checkout must match. Changing that commit requires rebuilding the hardware
+image, not merely editing configuration.
+
+The `YAM_*` environment values above are a legacy one-pair bootstrap. They do
+not describe an all-CAN cell, do not authorize startup to open hardware, and a
+saved physical row takes precedence.
 
 Automatic connection is disabled for a new setup. It requires a separate
-motion-risk acknowledgment before ctrl-π may reconnect the saved rig on a
-later boot or hot-plug. Explicit **Connect** requires its own acknowledgment.
+motion-risk acknowledgment before ctrl-π may reconnect selected arms on a
+later boot or hot-plug. Explicit **Connect** requires its own acknowledgment;
+any selected `linear_4310` or `crank_4310` follower also requires a distinct
+acknowledgement that calibration moves its jaws.
 See [YAM setup](/yam-setup) before enabling either path.
 
 ## Network boundary

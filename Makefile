@@ -1,6 +1,6 @@
 PYTHON ?= .venv/bin/python
 
-.PHONY: seed smoke modal-panic yam-probe
+.PHONY: seed smoke modal-panic yam-probe docker-yam-cell
 seed:
 	PYTHONPATH=backend/src $(PYTHON) -m ctrl_pi.seed
 
@@ -12,3 +12,6 @@ modal-panic:
 
 yam-probe:
 	PYTHONPATH=backend/src $(PYTHON) -m ctrl_pi.yam_probe
+
+docker-yam-cell:
+	./docker/build-yam-cell-image.sh
