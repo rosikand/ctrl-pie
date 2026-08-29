@@ -1,4 +1,8 @@
-# Recording and teleoperation
+---
+title: "Record and teleoperate"
+description: "Pair YAM arms, capture durable episodes, and upload verified LeRobot datasets."
+icon: "video"
+---
 
 The Record tab operates one leader/follower pair and collects demonstrations
 as synchronized camera, observation, and action samples. The active lifecycle
@@ -7,7 +11,7 @@ bytes stay in local staging until explicitly uploaded as a LeRobot dataset.
 
 Mock mode exercises this exact flow with `MockYAMDriver`, a synthetic camera,
 real FFmpeg MP4 encoding, and LeRobot 0.4.4 conversion. The driver boundary is
-described in [YAM driver interface](yam-driver.md).
+described in [YAM driver interface](/yam-driver).
 
 ## Before recording
 
@@ -122,7 +126,7 @@ cannot recover unuploaded data.
 
 The production Docker named volume keeps staging across ordinary restarts and
 `docker compose down`. Removing that volume permanently removes local
-unuploaded artifacts. See [Docker deployment](docker-deployment.md).
+unuploaded artifacts. See [Docker deployment](/docker-deployment).
 
 ## LeRobot conversion and Hub upload
 
@@ -218,8 +222,8 @@ After the session:
 
 ## Related guides
 
-- [Architecture](architecture.md)
-- [Setup and configuration](setup.md)
-- [YAM driver interface](yam-driver.md)
-- [Compute and inference](inference.md)
-- [Full mock smoke gate](smoke-test.md)
+- [Architecture](/architecture)
+- [Configuration and credentials](/configuration)
+- [YAM driver interface](/yam-driver)
+- [Inference](/inference)
+- [Full mock smoke gate](/smoke-test)

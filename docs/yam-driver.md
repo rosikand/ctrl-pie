@@ -1,4 +1,8 @@
-# YAM driver interface
+---
+title: "YAM driver interface"
+description: "Reference the hardware contract, units, command bounds, threading, and physical validation checklist."
+icon: "cpu"
+---
 
 `YAMDriver` is ctrl-π's synchronous boundary around arm hardware. HTTP
 handlers, teleoperation, recording, and inference use this interface; vendor
@@ -8,12 +12,12 @@ application instead selects `RealYAMDriver`; hardware mode never falls back to
 mock arms after a configuration, import, calibration, or connection failure.
 
 The authoritative types are in
-[`drivers/yam.py`](../backend/src/ctrl_pi/drivers/yam.py). The two
+[`drivers/yam.py`](https://github.com/rosikand/ctrl-pie/blob/main/backend/src/ctrl_pi/drivers/yam.py). The two
 implementations are
-[`drivers/mock_yam.py`](../backend/src/ctrl_pi/drivers/mock_yam.py) and
-[`drivers/real_yam.py`](../backend/src/ctrl_pi/drivers/real_yam.py).
+[`drivers/mock_yam.py`](https://github.com/rosikand/ctrl-pie/blob/main/backend/src/ctrl_pi/drivers/mock_yam.py) and
+[`drivers/real_yam.py`](https://github.com/rosikand/ctrl-pie/blob/main/backend/src/ctrl_pi/drivers/real_yam.py).
 Single-process command arbitration is in
-[`rig.py`](../backend/src/ctrl_pi/rig.py).
+[`rig.py`](https://github.com/rosikand/ctrl-pie/blob/main/backend/src/ctrl_pi/rig.py).
 
 ## Interface contract
 
@@ -57,7 +61,7 @@ gripper are not supported by this V1 adapter. In particular,
 `YAM_GRIPPER_TYPE` must be `crank_4310`; any other value fails configuration
 before a vendor object or device is opened. Configure the SocketCAN interface,
 leader serial port, MuJoCo model, and existing leader calibration as described
-in [Setup and configuration](setup.md).
+in [YAM setup](/yam-setup).
 
 Vendor imports and device construction are lazy. Merely importing ctrl-π, or
 running the default preflight probe, does not construct a vendor object or
@@ -255,5 +259,5 @@ perform and record all of the following on the target Ubuntu/YAM box:
    Only run a real policy after independently verifying its observation,
    action, and safety compatibility with this YAM pair.
 
-Container setup is in [Docker deployment](docker-deployment.md). Recording
-ownership is in [Recording and teleoperation](recording.md).
+Container setup is in [Docker deployment](/docker-deployment). Recording
+ownership is in [Record and teleoperate](/recording).

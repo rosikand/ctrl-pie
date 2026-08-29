@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -14,6 +15,10 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 DOCS_ROOT = REPOSITORY_ROOT / "docs"
 README = REPOSITORY_ROOT / "README.md"
 SCREENSHOT = DOCS_ROOT / "assets" / "ctrl-pi-inference.png"
+PRODUCT_SCREENSHOTS = tuple(
+    DOCS_ROOT / "assets" / f"ctrl-pi-{page}.png"
+    for page in ("arms", "record", "datasets", "training", "inference", "settings")
+)
 
 _MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
 _FENCE = re.compile(
@@ -29,9 +34,25 @@ _SECRET_LITERALS = (
 
 def _markdown_files() -> list[Path]:
     assert README.is_file(), "the top-level README is required"
-    files = [README, *sorted(DOCS_ROOT.rglob("*.md"))]
+    files = [
+        README,
+        *sorted(DOCS_ROOT.rglob("*.md")),
+        *sorted(DOCS_ROOT.rglob("*.mdx")),
+    ]
     assert len(files) >= 11
     return files
+
+
+def test_mintlify_configuration_routes_and_links_validate() -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "scripts" / "validate_docs.py")],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _relative_target(document: Path, raw_target: str) -> Path | None:
@@ -56,40 +77,42 @@ def test_documentation_relative_links_resolve() -> None:
     assert failures == []
 
 
-def test_inference_screenshot_is_real_and_version_control_visible() -> None:
-    assert SCREENSHOT.is_file()
-    assert SCREENSHOT.stat().st_size >= 50_000
-    with Image.open(SCREENSHOT) as image:
-        image.verify()
-    with Image.open(SCREENSHOT) as image:
-        assert image.format == "PNG"
-        assert image.width >= 1_200
-        assert image.height >= 700
-        rgb = image.convert("RGB")
-        extrema = rgb.getextrema()
-        assert all(high - low >= 32 for low, high in extrema)
-        background = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
-        content_bounds = ImageChops.difference(rgb, background).getbbox()
-        assert content_bounds is not None
-        assert content_bounds[1] < image.height // 4
+def test_product_screenshots_are_real_and_version_control_visible() -> None:
+    for screenshot in PRODUCT_SCREENSHOTS:
+        assert screenshot.is_file()
+        assert screenshot.stat().st_size >= 50_000
+        with Image.open(screenshot) as image:
+            image.verify()
+        with Image.open(screenshot) as image:
+            assert image.format == "PNG"
+            assert image.width >= 1_200
+            assert image.height >= 700
+            rgb = image.convert("RGB")
+            extrema = rgb.getextrema()
+            assert all(high - low >= 32 for low, high in extrema)
+            background = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
+            content_bounds = ImageChops.difference(rgb, background).getbbox()
+            assert content_bounds is not None
+            assert content_bounds[1] < image.height // 4
 
-    relative = SCREENSHOT.relative_to(REPOSITORY_ROOT).as_posix()
-    visible = subprocess.run(
-        [
-            "git",
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            relative,
-        ],
-        cwd=REPOSITORY_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    assert relative in visible, "screenshot is ignored and would not be committed"
+        relative = screenshot.relative_to(REPOSITORY_ROOT).as_posix()
+        visible = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                relative,
+            ],
+            cwd=REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        assert relative in visible, "screenshot is ignored and would not be committed"
+
     assert "docs/assets/ctrl-pi-inference.png" in README.read_text(encoding="utf-8")
     assert "assets/ctrl-pi-inference.png" in (
         DOCS_ROOT / "inference.md"

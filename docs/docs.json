@@ -1,0 +1,87 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "ctrl-π",
+  "description": "Operate YAM robot-learning workflows from recording through inference.",
+  "colors": {
+    "primary": "#2563EB",
+    "light": "#60A5FA",
+    "dark": "#1D4ED8"
+  },
+  "appearance": {
+    "default": "light"
+  },
+  "icons": {
+    "library": "lucide"
+  },
+  "logo": {
+    "light": "/assets/logo-light.svg",
+    "dark": "/assets/logo-dark.svg",
+    "href": "/"
+  },
+  "favicon": "/assets/favicon.svg",
+  "navbar": {
+    "links": [
+      {
+        "type": "github",
+        "href": "https://github.com/rosikand/ctrl-pie"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/rosikand/ctrl-pie"
+    }
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": [
+          "index",
+          "installation",
+          "quickstart",
+          "setup",
+          "configuration"
+        ]
+      },
+      {
+        "group": "Use ctrl-π",
+        "pages": [
+          "yam-setup",
+          "arms",
+          "recording",
+          "datasets",
+          "training",
+          "models",
+          "inference"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "trainer-api",
+          "architecture",
+          "yam-driver"
+        ]
+      },
+      {
+        "group": "Operations",
+        "pages": [
+          "docker-deployment",
+          "development",
+          "modal-operations",
+          "smoke-test",
+          "troubleshooting"
+        ]
+      },
+      {
+        "group": "Resources",
+        "pages": [
+          "screenshots",
+          "release-notes"
+        ]
+      }
+    ]
+  }
+}

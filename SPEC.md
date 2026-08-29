@@ -428,3 +428,9 @@ open issues. Do not expand scope.
   Generated Hugging Face dataset cards leave the license field unset; making a
   repository public remains an explicit exposure choice, and selecting a data
   license remains the operator's responsibility.
+- 2026-08-29 — The production documentation is a Mintlify monorepo project
+  rooted at `docs/` with `docs/docs.json`. Existing deep operational guides
+  remain the canonical sources for their subjects; focused installation,
+  onboarding, and product pages link to those guides instead of copying their
+  recovery and safety contracts. The top-level README stays a concise GitHub
+  entry point.

@@ -1,4 +1,8 @@
-# Compute targets and inference
+---
+title: "Inference"
+description: "Deploy revision-pinned policies, run the robot loop, and verify complete Modal teardown."
+icon: "radio-tower"
+---
 
 ctrl-π separates **deployment** from **robot motion**. Deploying creates and
 verifies a compute endpoint, but it never moves an arm. Starting inference is
@@ -6,7 +10,7 @@ a second operation that selects one connected follower, acquires the shared
 rig lease, re-verifies the deployed policy identity, and only then permits
 actions. Stopping joins arm writes before tearing down the provider.
 
-![Inference tab with a verified deterministic mock deployment](assets/ctrl-pi-inference.png)
+![Inference tab with a verified deterministic mock deployment](/assets/ctrl-pi-inference.png)
 
 The screenshot shows mock mode. Mock mode exercises the same browser and
 orchestration lifecycle without Hugging Face or Modal calls; it is not
@@ -92,7 +96,7 @@ the **model repository root**. In particular, `config.json`,
 `model.safetensors`, `policy_preprocessor.json`, and
 `policy_postprocessor.json` must be root files, not only files below
 `checkpoints/<step>`. The executable upload in the
-[Trainer API](trainer-api.md#end-to-end-lerobot-fine-tune-and-checkpoint-flow)
+[Trainer API](/trainer-api#end-to-end-lerobot-fine-tune-and-checkpoint-flow)
 demonstrates and tests this layout.
 
 ## Runtime adapters
@@ -198,7 +202,7 @@ verification but before the action task is scheduled, and its observer records
 only actions already applied by the loop. On stop, the resulting recording is
 finalized locally. Upload to Hugging Face remains a separate, explicit action
 through the normal recording pipeline; see
-[Recording and teleoperation](recording.md).
+[Record and teleoperate](/recording).
 
 ## Stop, restart, and emergency cleanup
 
@@ -221,14 +225,14 @@ kind because no process-local inference loop survived the restart. The
 watchdog retries failed cleanup while the app runs, including after switching
 between mock and hardware mode. Shutdown uses the same stop ordering. If the
 normal route or shutdown was interrupted, run the
-ownership-safe procedure in [Modal operator cleanup](modal-operations.md).
+ownership-safe procedure in [Modal operations](/modal-operations).
 The panic command is a provider cleanup tool only; it does not finalize local
 recordings or revoke Proxy Tokens.
 
 ## Retained Milestone 11 live evidence
 
 The V1 real-GPU acceptance run was retained on 2026-08-28. This is distinct
-from the recurring stub smoke gate in [Full mock smoke gate](smoke-test.md).
+from the recurring stub smoke gate in [Full mock smoke gate](/smoke-test).
 
 | Evidence | Result |
 | --- | --- |

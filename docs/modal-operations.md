@@ -1,10 +1,14 @@
-# Modal operations and emergency cleanup
+---
+title: "Modal operations"
+description: "Stop exactly owned ctrl-π Modal Apps and verify emergency cleanup."
+icon: "cloud-off"
+---
 
 Use the Inference tab's Stop control for normal shutdown. It stops and joins
 robot actions, finalizes an optional local recording, then stops the owned
 Modal App and verifies a stopped/absent provider lifecycle with zero running
 tasks. The full ordering and runtime security boundary are in
-[Compute targets and inference](inference.md).
+[Inference](/inference).
 
 `make modal-panic` is the recovery command when a deploy, Stop request,
 backend shutdown, or restart reconciliation was interrupted. It scans the

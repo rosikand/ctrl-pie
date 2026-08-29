@@ -1,4 +1,8 @@
-# Docker deployment
+---
+title: "Docker deployment"
+description: "Run the single-process production image with persistent recording storage and scoped YAM access."
+icon: "container"
+---
 
 The Docker option runs ctrl-pi as one non-root service. A Node build stage
 compiles the Vite application, then the final Python image serves those static
@@ -34,7 +38,7 @@ docker compose build
 docker compose up -d --wait
 ```
 
-Open <http://127.0.0.1:8000>. `CTRL_PI_PORT` changes the host port and
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). `CTRL_PI_PORT` changes the host port and
 `CTRL_PI_BIND_ADDRESS` changes its bind address:
 
 ```bash
@@ -213,5 +217,5 @@ serial disconnect so Docker maps the current device node. The cloud test suite
 uses fake vendor objects and cannot validate motor direction/offsets, the
 wrist-flex/wrist-roll mapping, gravity compensation, physical limits, bus-off
 behavior, non-root access on the target kernel, or emergency-stop behavior.
-Complete the operator checklist in [YAM driver interface](yam-driver.md) before
+Complete the operator checklist in [YAM driver interface](/yam-driver) before
 allowing teleoperation or inference to move real hardware.

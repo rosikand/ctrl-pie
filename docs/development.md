@@ -1,12 +1,16 @@
-# Development
+---
+title: "Development"
+description: "Run ctrl-π from source, seed mock data, and execute the required quality gates."
+icon: "code-2"
+---
 
 Source development runs FastAPI and Vite as two processes. It uses the same
 service boundaries as production, but leaves `FRONTEND_DIST_DIR` unset so Vite
 owns frontend assets and hot reload. Mock mode is the default and requires no
 YAM hardware or Modal account.
 
-For the component and state model, read [Architecture](architecture.md). For a
-single production container, use [Docker deployment](docker-deployment.md).
+For the component and state model, read [Architecture](/architecture). For a
+single production container, use [Docker deployment](/docker-deployment).
 
 ## Prerequisites
 
@@ -72,7 +76,7 @@ Mock arms and Stub inference work with external credentials blank. A complete
 Record, Datasets, Training, or persisted Inference workflow needs PostgreSQL.
 Hub browsing/upload needs `HF_TOKEN` and `HF_NAMESPACE`. Real Modal inference
 also needs the Modal API and Proxy Token pairs described in
-[Setup and configuration](setup.md).
+[Configuration and credentials](/configuration).
 
 ### Apply migrations
 
@@ -107,9 +111,9 @@ Start Vite in a second terminal:
 npm --prefix frontend run dev -- --host 127.0.0.1
 ```
 
-Open <http://127.0.0.1:5173>. Vite proxies `/api` and `/ws` to port 8000.
-FastAPI exposes interactive OpenAPI documentation at
-<http://127.0.0.1:8000/docs>.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies `/api`
+and `/ws` to port 8000. FastAPI exposes interactive OpenAPI documentation at
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
 Do not add `--workers` or run several Uvicorn processes. `RigLease`, live
 telemetry, recording subprocesses, inference tasks, and action queues are
@@ -184,6 +188,23 @@ Check Python import/bytecode errors and whitespace before handoff:
 git diff --check
 ```
 
+Validate the Mintlify navigation, frontmatter, internal routes, anchors, and
+assets without installing a documentation dependency:
+
+```bash
+npm run docs:check
+```
+
+Preview or run Mintlify's strict build validation with the pinned CLI:
+
+```bash
+npm run docs:dev
+npm run docs:validate
+```
+
+Mintlify is configured as a monorepo project rooted at `/docs`; its required
+configuration file is `docs/docs.json`.
+
 Every milestone also requires Alembic against a real PostgreSQL database and
 both development servers to start cleanly. From Milestone 11 onward, the
 end-to-end gate is:
@@ -194,7 +215,7 @@ make smoke
 
 That default intentionally uses the configured real Hugging Face account. It
 creates, verifies, and deletes a uniquely named private dataset; it does not
-use Modal. Review [Full mock smoke gate](smoke-test.md) and grant the token's
+use Modal. Review [Full mock smoke gate](/smoke-test) and grant the token's
 delete permission before running it.
 
 For an offline development run with the deterministic filesystem Hub:
@@ -228,7 +249,7 @@ not belong in a migration or ORM column.
   distinct Modal Proxy Token pair. Settings reports presence/readiness without
   returning values.
 - Stop Uvicorn with `Ctrl-C` and let lifespan teardown finish. If a Modal App
-  cannot be proven stopped, use [Modal operator cleanup](modal-operations.md)
+  cannot be proven stopped, use [Modal operations](/modal-operations)
   rather than deleting resources by a name prefix.
 
 Never print `.env`, raw provider exceptions, request headers, presigned URLs,
@@ -236,10 +257,10 @@ or local Hub cache paths when diagnosing a failure.
 
 ## Related guides
 
-- [Architecture](architecture.md)
-- [Setup and configuration](setup.md)
-- [Recording and teleoperation](recording.md)
-- [YAM driver interface](yam-driver.md)
-- [Compute and inference](inference.md)
-- [Trainer API](trainer-api.md)
-- [Docker deployment](docker-deployment.md)
+- [Architecture](/architecture)
+- [Configuration and credentials](/configuration)
+- [Record and teleoperate](/recording)
+- [YAM driver interface](/yam-driver)
+- [Inference](/inference)
+- [Trainer API](/trainer-api)
+- [Docker deployment](/docker-deployment)

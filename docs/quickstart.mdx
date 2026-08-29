@@ -1,0 +1,102 @@
+---
+title: "Quickstart"
+description: "Exercise the complete ctrl-π workflow safely with mock arms, camera, and inference."
+icon: "rocket"
+---
+
+This walkthrough uses `MockYAMDriver`, the synthetic camera, and Stub compute.
+It exercises the real UI, PostgreSQL schema, FFmpeg capture, and inference
+orchestration without moving hardware or creating a Modal resource.
+
+<Note>
+  Hugging Face is optional for the walkthrough. If `HF_TOKEN` and
+  `HF_NAMESPACE` are configured, the upload and catalog steps use your real
+  namespace. Otherwise, stop after finalizing the local recording.
+</Note>
+
+## Before you begin
+
+Complete [Installation](/installation), set a reachable `DATABASE_URL`, and
+leave this value in `.env`:
+
+```dotenv
+CTRL_PI_MOCK_MODE=true
+```
+
+Start ctrl-π and open its browser URL.
+
+## Walk through the product
+
+<Steps>
+  <Step title="Confirm first-run readiness">
+    Open **Settings** from the gear icon. Mock setup is complete when
+    PostgreSQL is connected and the two mock arms are connected. Hugging Face
+    and Modal are optional in this mode.
+  </Step>
+  <Step title="Inspect and jog the mock follower">
+    Open **Arms**, select `YAM Follower`, and wait for **Telemetry live**.
+    Inspect joint, pose, gripper, and loop diagnostics. Apply one small joint
+    or gripper jog and confirm **Command applied**.
+  </Step>
+  <Step title="Record an episode">
+    Open **Record / Teleop** and create a session using `YAM Leader` and
+    `YAM Follower`. Start teleoperation, start an episode, let it run for at
+    least five seconds, then choose **Stop & save episode**. Stop teleoperation
+    after finalization completes.
+  </Step>
+  <Step title="Optionally upload and browse">
+    With Hugging Face configured, keep **Private dataset** selected, choose a
+    new repository slug, and upload. Open **Datasets**, refresh, choose the new
+    repository, and scrub the episode timeline. Video, observation state, and
+    actions remain pinned to the same immutable Hub revision.
+  </Step>
+  <Step title="Inspect external training views">
+    Open **Training**. The **Runs** view displays Trainer API reports and metric
+    curves; **Models** displays repositories from the configured Hugging Face
+    namespace. ctrl-π tracks training but does not launch it.
+  </Step>
+  <Step title="Run the mock policy">
+    Open **Inference**, select **Offline mock policy**, choose a runtime and
+    compute label, then deploy. Deployment verifies the endpoint identity but
+    does not move an arm. Select the connected follower, enter a task, and
+    choose **Start execution**. Watch latency, action rate, queue depth, and
+    executed steps update live.
+  </Step>
+  <Step title="Stop and verify teardown">
+    Choose **Stop session + endpoint**. Do not treat a stopped badge alone as
+    proof: wait for the green **Teardown verified** result. If inference
+    recording was enabled, upload the finalized episode separately.
+  </Step>
+</Steps>
+
+## Run the automated offline loop
+
+The offline acceptance command records a real five-second H.264 episode,
+converts it with LeRobot, lists it through a filesystem-backed fake Hub,
+executes exactly 100 mock-arm actions, and proves local teardown:
+
+<Tabs>
+  <Tab title="Source">
+
+```bash
+PYTHONPATH=backend/src \
+  .venv/bin/python -m ctrl_pi.smoke --fake-hub
+```
+  </Tab>
+  <Tab title="Docker">
+
+```bash
+docker compose exec app python -m ctrl_pi.smoke --fake-hub
+```
+  </Tab>
+</Tabs>
+
+The release gate `make smoke` is different: it intentionally creates,
+verifies, and deletes a private repository in the configured real Hugging Face
+namespace. See [Full mock smoke gate](/smoke-test) before running it.
+
+## Continue
+
+- [Configure Hugging Face and Modal](/configuration)
+- [Onboard real YAM hardware](/yam-setup)
+- [Understand deployment and robot-motion safety](/inference)

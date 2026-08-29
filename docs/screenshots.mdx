@@ -1,0 +1,76 @@
+---
+title: "Screenshots"
+description: "Tour the ctrl-π operator console across its primary workflows."
+---
+
+These captures come from the production UI running against `MockYAMDriver`, the
+mock camera, and the stubbed inference workload. Hub-backed views use the
+namespace configured on the server. No physical arm is required to reproduce
+them.
+
+## Arms
+
+Inspect the selected arm's connection, joint telemetry, end-effector pose,
+gripper state, and control-loop diagnostics before issuing a jog.
+
+<Frame caption="Live telemetry from a MockYAMDriver leader arm">
+  <img src="/assets/ctrl-pi-arms.png" alt="ctrl-pi Arms page showing connected leader-arm telemetry and diagnostics" />
+</Frame>
+
+See [Arms](/arms) for the controls and safety boundaries.
+
+## Record and teleoperate
+
+Create a session, observe the workspace camera, run leader/follower
+teleoperation, and capture episodes from one screen.
+
+<Frame caption="Recording form, mock camera, and active session controls">
+  <img src="/assets/ctrl-pi-record.png" alt="ctrl-pi Record and Teleop page with session form and mock camera" />
+</Frame>
+
+See [Record and teleoperate](/recording) for the complete episode lifecycle.
+
+## Datasets
+
+Browse LeRobot dataset cards in the configured Hugging Face namespace, then
+open an episode to inspect synchronized video and signals.
+
+<Frame caption="Private LeRobot datasets discovered in the configured Hub namespace">
+  <img src="/assets/ctrl-pi-datasets.png" alt="ctrl-pi Datasets page with four LeRobot dataset cards" />
+</Frame>
+
+See [Datasets](/datasets) for refresh, caching, and episode playback behavior.
+
+## Training
+
+Track runs reported by external Trainer clients. The detail view combines
+status, immutable input identity, scalar metrics, outputs, and checkpoints.
+
+<Frame caption="Reported runs and scalar metrics on the Training page">
+  <img src="/assets/ctrl-pi-training.png" alt="ctrl-pi Training page showing completed and running jobs with scalar metrics" />
+</Frame>
+
+See [Training](/training) and the [Trainer API](/trainer-api) to report a run.
+
+## Inference
+
+Select a deployable model revision, create a policy endpoint, start explicit
+follower-arm execution, and tear everything down from one ordered workflow.
+
+<Frame caption="Mock policy deployment with a pinned Hugging Face revision">
+  <img src="/assets/ctrl-pi-inference.png" alt="ctrl-pi Inference page showing a mock deployment and selected model revision" />
+</Frame>
+
+See [Inference](/inference) for lifecycle and safety semantics.
+
+## Settings
+
+Check service readiness without exposing secret values and edit the small set
+of non-secret defaults stored by ctrl-π.
+
+<Frame caption="First-run readiness checks and non-secret operational defaults">
+  <img src="/assets/ctrl-pi-settings.png" alt="ctrl-pi Settings page showing connected services in mock mode" />
+</Frame>
+
+See [First-time setup](/setup) and [Configuration and credentials](/configuration)
+for the corresponding environment variables.

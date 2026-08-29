@@ -1,4 +1,8 @@
-# Architecture
+---
+title: "Architecture"
+description: "Understand ctrl-π process boundaries, state ownership, control flows, and recovery invariants."
+icon: "network"
+---
 
 ctrl-π is a single-user, self-hosted control plane for the YAM robot-learning
 workflow. Application traffic and private assets never bypass the backend to
@@ -24,8 +28,8 @@ CAN / USB / local mock rig
 
 The production container serves the built Vite application and API from one
 origin on port 8000. Source development runs Vite on port 5173 and proxies
-`/api` and `/ws` to Uvicorn on port 8000. See [Development](development.md)
-and [Docker deployment](docker-deployment.md) for the two launch paths.
+`/api` and `/ws` to Uvicorn on port 8000. See [Development](/development)
+and [Docker deployment](/docker-deployment) for the two launch paths.
 
 ## Boundaries and components
 
@@ -127,7 +131,7 @@ only follower joint/gripper commands; Cartesian jog is unsupported.
 Teleop samples the leader, converts it to an absolute `ArmAction`, and applies
 that action to the follower. Recording adds camera capture and synchronized
 observation/action samples without changing the driver boundary. The complete
-lifecycle is in [Recording and teleoperation](recording.md).
+lifecycle is in [Record and teleoperate](/recording).
 
 ### Dataset and model browsing
 
@@ -161,7 +165,7 @@ Training never executes inside ctrl-π. External scripts use the REST API or
 the synchronous `ctrl_pi.trainer.Client` to create runs, report bounded scalar
 curves, and register model repository revisions. PostgreSQL stores that small
 state; the external training process uploads weights to Hub. See the
-[Trainer API](trainer-api.md).
+[Trainer API](/trainer-api).
 
 ### Inference
 
@@ -180,7 +184,7 @@ Optional inference recording is passive: it reuses the inference lease and
 records only actions the loop actually applied. Stop joins local arm writes,
 finalizes the episode, and then verifies provider teardown in a
 cancellation-deferring path. Recording upload remains an explicit later
-operation. Details are in [Compute and inference](inference.md).
+operation. Details are in [Inference](/inference).
 
 ## Startup, recovery, and shutdown
 
@@ -217,7 +221,7 @@ stops sampling, asks the follower plugin for its safe mode, and closes both
 devices. That plugin call is not an electrical torque-free guarantee; physical
 emergency-stop and firmware safety remain independent requirements. Compose
 supplies a 90-second grace period. If Modal cleanup remains uncertain, use the
-procedure in [Modal operator cleanup](modal-operations.md).
+procedure in [Modal operations](/modal-operations).
 
 The default `make yam-probe` checks hardware-mode configuration, exact pinned
 package metadata, readable model/calibration files, leader serial permissions,
@@ -230,7 +234,7 @@ vendor bus/control behavior. The real adapter has been tested with fake vendor
 objects only in this cloud workspace.
 Joint mapping, calibration contents, CAN type/bitrate, physical limits, failure
 response, and container device access still require the Ubuntu/YAM procedure
-in [YAM driver interface](yam-driver.md).
+in [YAM driver interface](/yam-driver).
 
 ## Trust and security boundary
 
@@ -264,11 +268,12 @@ Kubernetes, and additional compute providers are intentionally outside V1.
 
 ## Further reading
 
-- [Setup and configuration](setup.md)
-- [Development](development.md)
-- [YAM driver interface](yam-driver.md)
-- [Recording and teleoperation](recording.md)
-- [Compute and inference](inference.md)
-- [Trainer API](trainer-api.md)
-- [Docker deployment](docker-deployment.md)
-- [Full mock smoke gate](smoke-test.md)
+- [First-time setup](/setup)
+- [Configuration and credentials](/configuration)
+- [Development](/development)
+- [YAM driver interface](/yam-driver)
+- [Record and teleoperate](/recording)
+- [Inference](/inference)
+- [Trainer API](/trainer-api)
+- [Docker deployment](/docker-deployment)
+- [Full mock smoke gate](/smoke-test)

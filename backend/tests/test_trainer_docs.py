@@ -50,7 +50,7 @@ def test_end_to_end_lerobot_example_executes_offline_with_fakes(
         Path(__file__).parents[2] / "docs" / "trainer-api.md"
     ).read_text(encoding="utf-8")
     after_marker = documentation.split(
-        "<!-- executable-lerobot-example -->", 1
+        "{/* executable-lerobot-example */}", 1
     )[1]
     source = after_marker.split("```python\n", 1)[1].split("```", 1)[0]
     module: dict[str, object] = {"__name__": "trainer_docs_example"}
@@ -172,7 +172,7 @@ def test_end_to_end_lerobot_example_terminates_child_on_reporting_failure(
     documentation = (
         Path(__file__).parents[2] / "docs" / "trainer-api.md"
     ).read_text(encoding="utf-8")
-    source = documentation.split("<!-- executable-lerobot-example -->", 1)[1]
+    source = documentation.split("{/* executable-lerobot-example */}", 1)[1]
     source = source.split("```python\n", 1)[1].split("```", 1)[0]
     module: dict[str, object] = {"__name__": "trainer_docs_example"}
     exec(compile(source, "trainer-api.md:lerobot-example", "exec"), module)

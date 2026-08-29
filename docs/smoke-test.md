@@ -1,4 +1,8 @@
-# Full mock smoke gate
+---
+title: "Full mock smoke gate"
+description: "Run the required record, Hub, discovery, inference, and teardown acceptance loop."
+icon: "flame"
+---
 
 `make smoke` is the recurring Milestone 11+ acceptance gate. Robot arms,
 camera source, policy runtime, and compute target stay in deterministic mock
@@ -7,7 +11,7 @@ creates, reads, lists, and safely deletes a private dataset in the configured
 Hugging Face namespace.
 
 It is not a real Modal test. The retained real-GPU proof is documented under
-[Compute targets and inference](inference.md#retained-milestone-11-live-evidence).
+[Inference](/inference#retained-milestone-11-live-evidence).
 
 ## Prerequisites
 

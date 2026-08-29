@@ -1,4 +1,8 @@
-# Trainer API
+---
+title: "Trainer API"
+description: "Report training runs, scalar metrics, and Hugging Face checkpoints from external scripts."
+icon: "braces"
+---
 
 ctrl-π does not run training. The Trainer API is a small, local control-plane
 API that lets an external LeRobot, OpenPI, or custom training script report
@@ -316,7 +320,7 @@ write into any existing repository, so a typo cannot replace unrelated model
 files. Pick a new model slug for another run. Optional variables are
 `BASE_MODEL`, `OUTPUT_DIR`, and `STEPS`.
 
-<!-- executable-lerobot-example -->
+{/* executable-lerobot-example */}
 ```python
 from __future__ import annotations
 
