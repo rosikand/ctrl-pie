@@ -4,7 +4,7 @@ Self-hosted robot-learning operations for YAM arms: collect demonstrations,
 inspect LeRobot datasets and models, track training, and execute policies from
 one web console or typed Python client.
 
-![ctrl-π Inference tab in deterministic mock mode](docs/assets/ctrl-pi-inference.png)
+![ctrl-π Inference deployment in deterministic mock mode](docs/assets/ctrl-pi-inference.png)
 
 > [!WARNING]
 > ctrl-π has no authentication in V1. Bind it to localhost or a trusted,
@@ -17,13 +17,16 @@ small control-plane records, Hugging Face remains the source of truth for
 datasets and model artifacts, and Modal runs real inference and managed
 LeRobot training workloads. There is no hosted ctrl-π service.
 
-The interface has six first-class workflows:
+The console is grouped into Operate, Build, Deploy, and Admin:
 
-- **Arms** — inspect telemetry, stable bus identity, joints, pose, gripper/
-  handle state, and loop diagnostics. Bounded jog is available in mock and
-  retained legacy mode; the supervised all-CAN adapter rejects one-shot jog.
-- **Record / Teleop** — operate one leader/follower pair, capture episodes,
-  and publish LeRobot v3 datasets.
+- **Overview** — cell-wide status: robots, recording, training, deployment,
+  recent activity, and service readiness.
+- **Robots** — a list of every logical arm, then one arm's connection and
+  joint state, with pose, gripper/handle, diagnostics, and identity collapsed
+  behind detail sections. Bounded jog is available in mock and retained legacy
+  mode; the supervised all-CAN adapter rejects one-shot jog.
+- **Record** — operate one leader/follower pair with the camera as the primary
+  view, capture episodes, and publish LeRobot v3 datasets.
 - **Datasets** — browse namespace-scoped repositories and inspect immutable
   episodes, synchronized state/actions, and proxied video.
 - **Training** — observe externally reported runs and SDK-launched managed
@@ -31,8 +34,11 @@ The interface has six first-class workflows:
   checkpoint surfaces.
 - **Models** — browse Hugging Face model cards, immutable revisions, and
   checkpoint metadata in a separate read-only catalog.
-- **Inference** — deploy one pinned policy revision, explicitly start robot
-  execution, and stop with provider teardown verification.
+- **Inference** — deploy one pinned policy revision through a Model → Robot →
+  Compute → Deploy flow, explicitly start robot execution, and stop with
+  provider teardown verification.
+- **Set up** — the step-by-step path from `git clone` to connected YAM arms on
+  an Ubuntu box.
 
 Settings provides passive YAM-cell discovery, stable USB-CAN identity
 assignment, typed pair/group/side configuration, per-arm preflight and
@@ -131,7 +137,7 @@ examples. Before delegating those workflows, give your automation the
 
 - [Introduction](docs/index.mdx)
 - [Installation](docs/installation.mdx) and [mock quickstart](docs/quickstart.mdx)
-- [YAM setup](docs/yam-setup.md) and [Arms](docs/arms.md)
+- [YAM setup](docs/yam-setup.md) and [Robots](docs/arms.md)
 - [Recording](docs/recording.md), [Datasets](docs/datasets.md),
   [Training](docs/training.md), [managed training](docs/managed-training.md),
   [Models](docs/models.md), and

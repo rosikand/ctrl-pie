@@ -27,14 +27,15 @@ pre-upload recording staging only in the storage you configure.
   />
 </Frame>
 
-## One control plane, six workflows
+## One control plane, four sections
 
 <Columns cols={2}>
-  <Card title="Arms" icon="bot" href="/arms">
-    Inspect live connection, joint, pose, gripper, timing, and bus state. Mock
-    and retained legacy modes expose bounded jog; supervised all-CAN does not.
+  <Card title="Robots" icon="bot" href="/arms">
+    List every logical arm, then open one for connection and joint state, with
+    pose, gripper, timing, and bus detail collapsed. Mock and retained legacy
+    modes expose bounded jog; supervised all-CAN does not.
   </Card>
-  <Card title="Record / Teleop" icon="video" href="/recording">
+  <Card title="Record" icon="video" href="/recording">
     Mirror a leader to a follower, capture synchronized episodes, and publish
     LeRobot v3 datasets.
   </Card>
@@ -55,14 +56,15 @@ pre-upload recording staging only in the storage you configure.
     stop with provider teardown verification.
   </Card>
   <Card title="Settings" icon="settings" href="/yam-setup">
-    Check mode-aware readiness and edit non-secret recording and inference
-    defaults.
+    Check mode-aware readiness, configure the YAM cell, review credential
+    readiness, and edit non-secret defaults.
   </Card>
 </Columns>
 
 The browser and [`CtrlPiClient`](/python-sdk) call the same backend REST
-services. Settings remains available from the gear icon rather than becoming
-a seventh primary workflow tab.
+services. The sidebar groups these workflows under **Operate** (Overview,
+Robots, Record), **Build** (Datasets, Training, Models), **Deploy**
+(Inference), and **Admin** (Set up, Settings).
 
 ## Where state lives
 

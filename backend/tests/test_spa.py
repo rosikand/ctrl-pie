@@ -14,60 +14,89 @@ from ctrl_pi.main import create_app
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
-def test_frontend_has_six_primary_routes_and_separate_training_models_owners() -> None:
+def test_frontend_navigation_groups_and_separate_training_models_owners() -> None:
     app_source = (REPOSITORY_ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
     training_source = (REPOSITORY_ROOT / "frontend/src/pages/TrainingPage.tsx").read_text(encoding="utf-8")
+    run_source = (REPOSITORY_ROOT / "frontend/src/pages/TrainingRunPage.tsx").read_text(encoding="utf-8")
     models_source = (REPOSITORY_ROOT / "frontend/src/pages/ModelsPage.tsx").read_text(encoding="utf-8")
     navigation_source = app_source.split(
-        "const primaryNavigation: NavigationItem[] = [", 1
-    )[1].split("]", 1)[0]
+        "const navigationGroups: NavigationGroup[] = [", 1
+    )[1].split("\n];", 1)[0]
 
+    expected_groups = ('label: "Operate"', 'label: "Build"', 'label: "Deploy"', 'label: "Admin"')
     expected_navigation = (
-        '{ label: "Arms", path: "/arms"',
-        '{ label: "Record / Teleop", mobileLabel: "Record", path: "/record"',
+        '{ label: "Overview", path: "/overview"',
+        '{ label: "Robots", path: "/robots"',
+        '{ label: "Record", path: "/record"',
         '{ label: "Datasets", path: "/datasets"',
         '{ label: "Training", path: "/training"',
         '{ label: "Models", path: "/models"',
         '{ label: "Inference", path: "/inference"',
+        '{ label: "Set up", path: "/setup"',
+        '{ label: "Settings", path: "/settings"',
     )
-    assert navigation_source.count("{ label:") == 6
+    assert all(group in navigation_source for group in expected_groups)
+    assert navigation_source.count("{ label:") == 9
     assert all(item in navigation_source for item in expected_navigation)
     assert all(
         f'<Route path="{path}"' in app_source
-        for path in ("/arms", "/record", "/datasets", "/training", "/models", "/inference")
+        for path in (
+            "/overview",
+            "/robots",
+            "/robots/:robotId",
+            "/record",
+            "/datasets",
+            "/datasets/:repoName",
+            "/training",
+            "/training/:runId",
+            "/models",
+            "/inference",
+            "/inference/new",
+            "/inference/:deploymentId",
+            "/setup",
+            "/settings",
+        )
     )
-    assert "grid-cols-6" in app_source
+    # The V1 "Arms" URL keeps working after the rename to Robots.
+    assert '<Route path="/arms" element={<Navigate to="/robots" replace />} />' in app_source
 
+    # Training owns runs; Models owns model repositories. Neither renders the other.
     assert "useTrainerModels" not in training_source
+    assert "useTrainerModels" not in run_source
     assert "TrainerModelSummary" not in training_source
-    assert "ModelCard" not in training_source
+    assert "TrainerModelSummary" not in run_source
     assert 'from "./TrainingPage"' not in models_source
+    assert 'from "./TrainingRunPage"' not in models_source
     assert "useTrainerModels" in models_source
     assert "TrainerModelSummary" in models_source
-    assert "function ModelCard" in models_source
-    assert "const visibleLogs = logs.slice().reverse();" in training_source
-    assert "logs.slice(-500)" not in training_source
-    assert "ManagedJobCard" in training_source
-    assert 'job.target_kind === "modal"' in training_source
-    assert "Stub · no GPU" in training_source
-    assert "job.output_revision ?? job.output_marker_revision" in training_source
-    assert "run.managed_job?.output_revision ?? run.managed_job?.output_marker_revision" in training_source
-    assert "managedArtifactUrl ?" in training_source
-    assert ") : <ArtifactLink repoId={run.output_model_repo} />" in training_source
-    assert "Requested repo · existence not yet verified" in training_source
-    assert "Simulation teardown complete · no provider tasks" in training_source
-    assert "job.teardown_verified" in training_source
-    assert "job.event_gap" in training_source
+    assert "function ModelDetail" in models_source
+
+    # The run detail page keeps the bounded console and managed-job truth.
+    assert "const visibleLogs = logs.slice().reverse();" in run_source
+    assert "logs.slice(-500)" not in run_source
+    assert "ManagedJobPanel" in run_source
+    assert 'job.target_kind === "modal"' in run_source
+    assert "Stub · no GPU" in run_source
+    assert "job.output_revision ?? job.output_marker_revision" in run_source
+    assert "run.managed_job?.output_revision ?? run.managed_job?.output_marker_revision" in run_source
+    assert "managedArtifactUrl ?" in run_source
+    assert ") : <ArtifactLink repoId={run.output_model_repo} />" in run_source
+    assert "Requested repo · existence not yet verified" in run_source
+    assert "Simulation teardown complete · no provider tasks" in run_source
+    assert "job.teardown_verified" in run_source
+    assert "job.event_gap" in run_source
     assert "Launch a managed job from the Python SDK" in training_source
     assert "launch_managed_training" not in training_source
+    assert "launch_managed_training" not in run_source
     assert "cancel_managed_training" not in training_source
+    assert "cancel_managed_training" not in run_source
 
 
 def test_settings_exposes_service_backed_yam_onboarding_without_browser_device_logic() -> None:
     app_source = (REPOSITORY_ROOT / "frontend/src/App.tsx").read_text(encoding="utf-8")
     settings_source = (REPOSITORY_ROOT / "frontend/src/pages/SettingsPage.tsx").read_text(encoding="utf-8")
     panel_source = (REPOSITORY_ROOT / "frontend/src/components/YamSetupPanel.tsx").read_text(encoding="utf-8")
-    arms_source = (REPOSITORY_ROOT / "frontend/src/pages/ArmsPage.tsx").read_text(encoding="utf-8")
+    robot_source = (REPOSITORY_ROOT / "frontend/src/pages/RobotDetailPage.tsx").read_text(encoding="utf-8")
     hook_source = (REPOSITORY_ROOT / "frontend/src/hooks/useYamSetup.ts").read_text(encoding="utf-8")
     api_source = (REPOSITORY_ROOT / "frontend/src/lib/api.ts").read_text(encoding="utf-8")
     type_source = (REPOSITORY_ROOT / "frontend/src/types/yamSetup.ts").read_text(encoding="utf-8")
@@ -127,10 +156,10 @@ def test_settings_exposes_service_backed_yam_onboarding_without_browser_device_l
     assert "navigator.usb" not in panel_source
     assert "new WebSocket" not in panel_source
 
-    assert 'arm.driver === "i2rt-worker"' in arms_source
-    assert 'aria-label="Manual jog unavailable"' in arms_source
-    assert "One-shot jog commands are intentionally disabled" in arms_source
-    assert "Mock and legacy drivers retain manual jog." in arms_source
+    assert 'arm.driver === "i2rt-worker"' in robot_source
+    assert 'aria-label="Manual jog unavailable"' in robot_source
+    assert "One-shot jog commands are intentionally disabled" in robot_source
+    assert "Mock and legacy drivers retain manual jog." in robot_source
 
     # Refresh remains stable after state updates and every request is abortable.
     assert "const hasSetup = useRef(false);" in hook_source

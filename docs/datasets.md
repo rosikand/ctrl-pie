@@ -80,7 +80,7 @@ in 1,024-row batches rather than materializing an entire episode table.
 
 ## Create a dataset
 
-Datasets are produced through [Record / Teleop](/recording) or optional
+Datasets are produced through [Record](/recording) or optional
 [Inference](/inference) recording. Upload:
 
 1. converts every finalized episode with LeRobot 0.4.4;

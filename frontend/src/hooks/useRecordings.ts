@@ -24,6 +24,32 @@ import type {
 
 type RecordingAction = "create" | "teleop" | "sync" | "episode" | "upload" | null;
 
+/** Read-only session index for Overview, without the 500 ms state poll. */
+export function useRecordingList() {
+  const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await fetchRecordings();
+      setRecordings(response.recordings);
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load recording sessions.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { recordings, loading, error, refresh };
+}
+
 export function useRecordings() {
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [selectedId, setSelectedId] = useState("");
