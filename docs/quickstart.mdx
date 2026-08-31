@@ -35,12 +35,15 @@ Start ctrl-π and open its browser URL.
     and Modal are optional in this mode.
   </Step>
   <Step title="Inspect and jog the mock follower">
-    Open **Arms**, select `Right YAM Follower`, and wait for **Telemetry live**.
-    Inspect joint, pose, gripper, and loop diagnostics. Apply one small joint
-    or gripper jog and confirm **Command applied**.
+    Open **Robots**, choose `Right YAM Follower`, and wait for **Telemetry
+    live**. Its connection and joint state are shown first; pose, gripper, and
+    loop diagnostics are one click away under **Details**. Expand **Manual
+    jog**, apply one small joint or gripper jog, and confirm **Command
+    applied**.
   </Step>
   <Step title="Record an episode">
-    Open **Record / Teleop** and create a session using `YAM Leader` and
+    Open **Record**, choose **New session**, and create a session using
+    `YAM Leader` and
     `YAM Follower`. Start teleoperation, start an episode, let it run for at
     least five seconds, then choose **Stop & save episode**. Stop teleoperation
     after finalization completes.
@@ -64,10 +67,10 @@ Start ctrl-π and open its browser URL.
     local model artifacts.
   </Step>
   <Step title="Run the mock policy">
-    Open **Inference**, select **Offline mock policy**, choose a runtime and
-    compute label, then deploy. Deployment verifies the endpoint identity but
-    does not move an arm. Select the connected follower, enter a task, and
-    choose **Start execution**. Watch latency, action rate, queue depth, and
+    Open **Inference**, choose **New deployment**, and walk the Model → Robot →
+    Compute → Deploy steps with **Offline mock policy**. Deployment verifies
+    the endpoint identity but does not move an arm. On the deployment page,
+    enter a task and choose **Start execution**. Watch latency, action rate, queue depth, and
     executed steps update live.
   </Step>
   <Step title="Stop and verify teardown">
@@ -77,9 +80,10 @@ Start ctrl-π and open its browser URL.
   </Step>
 </Steps>
 
-Those steps cover all six primary tabs: **Arms**, **Record / Teleop**,
-**Datasets**, **Training**, **Models**, and **Inference**. **Settings** remains
-available from the gear icon.
+Those steps cover the operate, build, and deploy sections: **Robots**,
+**Record**, **Datasets**, **Training**, **Models**, and **Inference**.
+**Overview** summarizes all of them, and **Set up** and **Settings** sit under
+**Admin** in the sidebar.
 
 ## Check the same control plane from Python
 

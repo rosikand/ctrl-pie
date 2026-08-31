@@ -1,6 +1,6 @@
 ---
 title: "Screenshots"
-description: "Tour the six ctrl-π workflows and first-time YAM setup in deterministic mock mode."
+description: "Tour the ctrl-π console and first-time YAM setup in deterministic mock mode."
 ---
 
 These captures show the current ctrl-π interface with `MockYAMDriver`, the
@@ -9,31 +9,45 @@ server-configured Hugging Face namespace. A screenshot demonstrates the UI
 state only; it is not evidence that a physical YAM or a cloud workload was
 validated.
 
-## Arms
+## Overview
 
-Inspect the selected arm's connection, bus, joint state, end-effector pose,
-gripper, and live loop diagnostics. In this mock screenshot, manual jog
-commands remain bounded and require a connected arm. The supervised all-CAN
-adapter rejects one-shot jog. See [Arms](/arms) for the hardware safety
-boundary.
+Overview answers "what is this cell doing right now": connected robots,
+captured episodes, training progress, deployment state, recent activity, and
+service readiness. Safety warnings such as `NO SASH GUARD` surface here first.
 
-<Frame caption="Live MockYAMDriver telemetry on the Arms tab">
+<Frame caption="Cell-wide status in deterministic mock mode">
   <img
-    src="/assets/ctrl-pi-arms.png"
-    alt="ctrl-π Arms tab showing six-joint telemetry, end-effector pose, gripper state, and loop diagnostics"
+    src="/assets/ctrl-pi-overview.png"
+    alt="ctrl-π Overview dashboard showing robots, recording, training, and deployment counters beside recent activity and service readiness"
   />
 </Frame>
 
-## Record and teleoperate
+## Robots
 
-Create a named leader/follower session, inspect the camera, teleoperate, and
-capture structured episodes before uploading them to Hugging Face. See
+Robots lists every configured arm; opening one shows its connection and joint
+state first, with pose, gripper, pair alignment, diagnostics, identity, and
+manual jog collapsed under Details. Manual jog remains bounded and requires a
+connected arm; the supervised all-CAN adapter rejects one-shot jog. See
+[Robots](/arms) for the hardware safety boundary.
+
+<Frame caption="Live MockYAMDriver telemetry for one follower">
+  <img
+    src="/assets/ctrl-pi-arms.png"
+    alt="ctrl-π robot detail for one of the mock YAM arms, showing connection stats, six-joint state, and collapsed pose, gripper, and diagnostics sections"
+  />
+</Frame>
+
+## Record
+
+The camera is the primary view. A single rail carries the four ordered steps —
+teleoperation, pair synchronization, episode capture, and Hugging Face upload —
+next to live leader/follower readiness. See
 [Record and teleoperate](/recording) for the complete session lifecycle.
 
 <Frame caption="A recording session with the synthetic mock camera">
   <img
     src="/assets/ctrl-pi-record.png"
-    alt="ctrl-π Record and Teleop tab showing the new-session form, mock camera, and session controls"
+    alt="ctrl-π Record session showing the live mock camera, robot readiness for the pair, and the ordered episode controls"
   />
 </Frame>
 
@@ -46,55 +60,56 @@ The browser never receives the Hugging Face token. See [Datasets](/datasets).
 <Frame caption="Namespace-scoped LeRobot dataset catalog">
   <img
     src="/assets/ctrl-pi-datasets.png"
-    alt="ctrl-π Datasets tab showing four LeRobot dataset cards with episode and frame summaries"
+    alt="ctrl-π Datasets table listing four LeRobot datasets with episode, frame, FPS, and access columns"
   />
 </Frame>
 
 ## Training
 
 Training is a first-class observer for externally reported runs and managed
-jobs launched through the SDK/REST API. It renders bounded metrics,
-checkpoints, sanitized console lines, provider lifecycle, artifact identity,
-and teardown truth. See [Training](/training), [Managed training]
+jobs launched through the SDK/REST API. The run list opens a dedicated detail
+page with large metric charts, bounded console output, checkpoints, and
+configuration. See [Training](/training), [Managed training]
 (/managed-training), and the [Trainer API](/trainer-api).
 
 <Frame caption="Externally reported training run and scalar metrics">
   <img
     src="/assets/ctrl-pi-training.png"
-    alt="ctrl-π Training tab showing reported runs, run metadata, scalar metric charts, and trainer console"
+    alt="ctrl-π Training run detail showing run status, dataset, and a scalar metric chart with tabs for console, checkpoints, and configuration"
   />
 </Frame>
 
 ## Models
 
-Models is a separate read-only catalog backed by Hugging Face. It shows model
-cards, immutable revisions, and checkpoint metadata; artifact uploads stay in
-the user's existing Hub tooling. See [Models](/models).
+Models is a separate read-only catalog backed by Hugging Face. The table lists
+repositories and their immutable revisions; opening a row reveals the card,
+base models, and checkpoint files. Artifact uploads stay in the user's existing
+Hub tooling. See [Models](/models).
 
-<Frame caption="Hugging Face model catalog as its own first-class tab">
+<Frame caption="Hugging Face model catalog as its own first-class section">
   <img
     src="/assets/ctrl-pi-models.png"
-    alt="ctrl-π Models tab showing model cards, immutable revisions, metadata, and checkpoint files"
+    alt="ctrl-π Models table showing model repositories with pipeline, library, checkpoint, access, and revision columns"
   />
 </Frame>
 
 ## Inference
 
-Select an immutable policy revision, deploy its endpoint, then explicitly
-start robot execution only after endpoint and follower readiness are
-authoritative. Stop performs provider teardown verification. This capture uses
+A deployment is created through a Model → Robot → Compute → Deploy flow, then
+gets its own page: live latency, rates, and queue depth, with explicit start
+and stop gates. Stop performs provider teardown verification. This capture uses
 the deterministic local stub. See [Inference](/inference).
 
 <Frame caption="Pinned policy deployment and explicit robot execution gates">
   <img
     src="/assets/ctrl-pi-inference.png"
-    alt="ctrl-π Inference tab showing a pinned model revision, compute selection, deployment history, and robot execution controls"
+    alt="ctrl-π Inference deployment detail showing live latency and rate metrics beside robot execution status and stop controls"
   />
 </Frame>
 
 ## First-time YAM setup
 
-Settings guides one leader/follower pair through passive discovery, bounded
+Settings → Robots guides a cell through passive discovery, bounded
 configuration, calibration-artifact preflight, persistence, and an explicit
 connection. Hardware connection and automatic restoration require separate
 motion-risk acknowledgements. The mock-ready state below does not detect,
@@ -103,6 +118,6 @@ calibrate, connect, or validate a physical YAM. See [YAM setup](/yam-setup).
 <Frame caption="Deterministic mock representation of the YAM onboarding flow">
   <img
     src="/assets/ctrl-pi-yam-setup.png"
-    alt="ctrl-π Settings YAM onboarding panel showing readiness, passive discovery, configuration, and connection status"
+    alt="ctrl-π Settings Robots tab showing YAM cell readiness, passive discovery, and per-arm topology configuration"
   />
 </Frame>

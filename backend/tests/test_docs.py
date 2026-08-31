@@ -16,9 +16,10 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 DOCS_ROOT = REPOSITORY_ROOT / "docs"
 README = REPOSITORY_ROOT / "README.md"
 SCREENSHOTS = {
+    "ctrl-pi-overview.png": ("overview", "robots", "activity"),
     "ctrl-pi-arms.png": ("arms", "joint", "gripper"),
     "ctrl-pi-record.png": ("record", "session", "camera"),
-    "ctrl-pi-datasets.png": ("datasets", "cards", "episode"),
+    "ctrl-pi-datasets.png": ("datasets", "table", "episode"),
     "ctrl-pi-training.png": ("training", "run", "metric"),
     "ctrl-pi-models.png": ("models", "model", "revision"),
     "ctrl-pi-inference.png": ("inference", "deployment", "robot"),

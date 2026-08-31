@@ -1,16 +1,19 @@
 ---
-title: "Arms"
+title: "Robots"
 description: "Read live YAM telemetry and diagnostics, with mock/legacy bounded jog compatibility."
 icon: "bot"
 ---
 
-The Arms page is the live hardware view. It streams point-in-time snapshots
-over `/ws/arms`; joint state, pose, gripper values, bus health, and loop timing
-are never persisted.
+Robots is the live hardware view. It streams point-in-time snapshots over
+`/ws/arms`; joint state, pose, gripper values, bus health, and loop timing are
+never persisted. The earlier `/arms` URL now redirects to `/robots`.
 
 ## Select an arm
 
-Use **Active arm** to switch among every configured cell arm. Mock mode exposes
+**Robots** lists every configured cell arm with its role, pairing, connection,
+and bus. Opening a row shows that arm's connection summary and joint state
+first; pose, gripper or teaching handle, pair alignment, loop diagnostics,
+identity, and manual jog are collapsed under **Details**. Mock mode exposes
 two declared pairs: `yam-leader` / `yam-follower` and `yam-leader-left` /
 `yam-follower-left`. Hardware logical IDs come from the saved cell and remain
 stable even if USB enumeration changes or startup fails.

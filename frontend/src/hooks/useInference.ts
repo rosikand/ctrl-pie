@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   ApiError,
@@ -70,101 +70,123 @@ function isInferenceMessage(value: unknown): value is InferenceStreamMessage {
   );
 }
 
-function chooseDeployment(deployments: DeploymentRead[]): string | null {
-  return (
-    deployments.find((deployment) =>
-      ["deploying", "running", "stopping"].includes(deployment.status),
-    )?.id ?? deployments[0]?.id ?? null
-  );
-}
-
-export function useInference() {
+/** Durable deployment history behind the Inference table. */
+export function useDeploymentList(pollMs = 0) {
   const [deployments, setDeployments] = useState<DeploymentRead[]>([]);
-  const [selectedDeploymentId, setSelectedDeploymentId] = useState<string | null>(null);
-  const [state, setState] = useState<InferenceStateRead | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [stateLoading, setStateLoading] = useState(false);
-  const [listError, setListError] = useState<InferenceRequestError | null>(null);
-  const [stateError, setStateError] = useState<InferenceRequestError | null>(null);
-  const [operationError, setOperationError] = useState<InferenceRequestError | null>(null);
-  const [busy, setBusy] = useState<InferenceOperation | null>(null);
-  const [connection, setConnection] = useState<InferenceStreamConnection>("idle");
-  const [stateReload, setStateReload] = useState(0);
+  const [error, setError] = useState<InferenceRequestError | null>(null);
+  const sequence = useRef(0);
+  const controller = useRef<AbortController | null>(null);
+  const loaded = useRef(false);
 
-  const listSequence = useRef(0);
-  const listController = useRef<AbortController | null>(null);
-  const operationSequence = useRef(0);
-  const operationController = useRef<AbortController | null>(null);
-  const selectedIdRef = useRef<string | null>(null);
-  const selectedTerminalRef = useRef(false);
-  const deploymentsRef = useRef<DeploymentRead[]>([]);
-
-  const storeDeployments = useCallback((next: DeploymentRead[]) => {
-    deploymentsRef.current = next;
-    setDeployments(next);
-  }, []);
-
-  const upsertDeployment = useCallback((deployment: DeploymentRead) => {
-    const next = [
-      deployment,
-      ...deploymentsRef.current.filter((item) => item.id !== deployment.id),
-    ];
-    storeDeployments(next);
-  }, [storeDeployments]);
-
-  const publishState = useCallback((next: InferenceStateRead) => {
-    upsertDeployment(next);
-    if (selectedIdRef.current === next.id) {
-      selectedTerminalRef.current = isTerminal(next);
-      setState(next);
-      setStateError(null);
+  const load = useCallback(async (background = false) => {
+    const current = sequence.current + 1;
+    sequence.current = current;
+    controller.current?.abort();
+    const abort = new AbortController();
+    controller.current = abort;
+    if (!background) {
+      setError(null);
+      setInitialLoading(!loaded.current);
+      setRefreshing(loaded.current);
     }
-  }, [upsertDeployment]);
-
-  const loadDeployments = useCallback(async (refresh = false) => {
-    const sequence = listSequence.current + 1;
-    listSequence.current = sequence;
-    listController.current?.abort();
-    const controller = new AbortController();
-    listController.current = controller;
-    setListError(null);
-    setInitialLoading(!refresh && deploymentsRef.current.length === 0);
-    setRefreshing(refresh || deploymentsRef.current.length > 0);
     try {
-      const response = await fetchInferenceDeployments(controller.signal);
-      if (controller.signal.aborted || listSequence.current !== sequence) return;
-      storeDeployments(response.deployments);
-      setSelectedDeploymentId((current) => {
-        const next = current && response.deployments.some((item) => item.id === current)
-          ? current
-          : chooseDeployment(response.deployments);
-        selectedIdRef.current = next;
-        return next;
-      });
+      const response = await fetchInferenceDeployments(abort.signal);
+      if (abort.signal.aborted || sequence.current !== current) return;
+      setDeployments(response.deployments);
+      setError(null);
+      loaded.current = true;
     } catch (reason) {
-      if (controller.signal.aborted || listSequence.current !== sequence) return;
-      setListError(requestError(reason, "Could not load inference deployments."));
+      if (abort.signal.aborted || sequence.current !== current) return;
+      setError(requestError(reason, "Could not load inference deployments."));
     } finally {
-      if (listSequence.current === sequence) {
+      if (sequence.current === current) {
         setInitialLoading(false);
         setRefreshing(false);
       }
     }
-  }, [storeDeployments]);
+  }, []);
 
   useEffect(() => {
-    void loadDeployments();
+    void load();
     return () => {
-      listSequence.current += 1;
-      listController.current?.abort();
+      sequence.current += 1;
+      controller.current?.abort();
     };
-  }, [loadDeployments]);
+  }, [load]);
 
   useEffect(() => {
-    if (!selectedDeploymentId) {
+    if (!pollMs) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load(true);
+    }, pollMs);
+    return () => window.clearInterval(timer);
+  }, [load, pollMs]);
+
+  return {
+    deployments,
+    initialLoading,
+    refreshing,
+    error,
+    refresh: useCallback(() => load(), [load]),
+  };
+}
+
+/** Creates one deployment. Deploy never moves the robot. */
+export function useDeployPolicy() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<InferenceRequestError | null>(null);
+  const controller = useRef<AbortController | null>(null);
+
+  useEffect(() => () => controller.current?.abort(), []);
+
+  const deploy = useCallback(async (payload: CreateInferenceDeploymentRequest) => {
+    controller.current?.abort();
+    const abort = new AbortController();
+    controller.current = abort;
+    setBusy(true);
+    setError(null);
+    try {
+      return await createInferenceDeployment(payload, abort.signal);
+    } catch (reason) {
+      if (abort.signal.aborted) return null;
+      setError(requestError(reason, "Could not deploy this policy."));
+      return null;
+    } finally {
+      if (!abort.signal.aborted) setBusy(false);
+    }
+  }, []);
+
+  return { deploy, busy, error, clearError: useCallback(() => setError(null), []) };
+}
+
+/**
+ * One deployment's authoritative state: an initial snapshot, then the bounded
+ * live stream until the deployment reaches a terminal status.
+ */
+export function useDeployment(deploymentId: string) {
+  const [state, setState] = useState<InferenceStateRead | null>(null);
+  const [stateLoading, setStateLoading] = useState(true);
+  const [stateError, setStateError] = useState<InferenceRequestError | null>(null);
+  const [operationError, setOperationError] = useState<InferenceRequestError | null>(null);
+  const [busy, setBusy] = useState<InferenceOperation | null>(null);
+  const [connection, setConnection] = useState<InferenceStreamConnection>("idle");
+  const [reload, setReload] = useState(0);
+
+  const terminalRef = useRef(false);
+  const operationSequence = useRef(0);
+  const operationController = useRef<AbortController | null>(null);
+
+  const publishState = useCallback((next: InferenceStateRead) => {
+    terminalRef.current = isTerminal(next);
+    setState(next);
+    setStateError(null);
+  }, []);
+
+  useEffect(() => {
+    if (!deploymentId) {
       setState(null);
-      setStateError(null);
       setStateLoading(false);
       setConnection("idle");
       return;
@@ -176,8 +198,7 @@ export function useInference() {
     let reconnectAttempt = 0;
     let terminal = false;
     const controller = new AbortController();
-    const deploymentId = selectedDeploymentId;
-    selectedTerminalRef.current = false;
+    terminalRef.current = false;
 
     setState(null);
     setStateError(null);
@@ -185,7 +206,7 @@ export function useInference() {
     setConnection("connecting");
 
     const connect = () => {
-      if (!active || terminal || selectedTerminalRef.current) return;
+      if (!active || terminal || terminalRef.current) return;
       setConnection(reconnectAttempt === 0 ? "connecting" : "reconnecting");
       socket = new WebSocket(
         websocketUrl(`/api/inference/deployments/${encodeURIComponent(deploymentId)}/stream`),
@@ -193,7 +214,7 @@ export function useInference() {
 
       socket.addEventListener("open", () => {
         if (!active) return;
-        if (selectedTerminalRef.current) {
+        if (terminalRef.current) {
           setConnection("closed");
           socket?.close(1000);
           return;
@@ -232,11 +253,10 @@ export function useInference() {
       });
 
       socket.addEventListener("close", () => {
-        if (!active || terminal || selectedTerminalRef.current) return;
+        if (!active || terminal || terminalRef.current) return;
         setConnection("reconnecting");
-        const delay = RECONNECT_DELAYS_MS[
-          Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)
-        ];
+        const delay =
+          RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
         reconnectAttempt += 1;
         reconnectTimer = window.setTimeout(connect, delay);
       });
@@ -249,11 +269,8 @@ export function useInference() {
         if (!active || controller.signal.aborted || snapshot.id !== deploymentId) return;
         publishState(snapshot);
         terminal = isTerminal(snapshot);
-        if (terminal) {
-          setConnection("closed");
-        } else {
-          connect();
-        }
+        if (terminal) setConnection("closed");
+        else connect();
       })
       .catch((reason: unknown) => {
         if (!active || controller.signal.aborted) return;
@@ -270,103 +287,66 @@ export function useInference() {
       window.clearTimeout(reconnectTimer);
       socket?.close();
     };
-  }, [publishState, selectedDeploymentId, stateReload]);
+  }, [deploymentId, publishState, reload]);
 
-  useEffect(() => () => {
-    operationSequence.current += 1;
-    operationController.current?.abort();
-  }, []);
+  useEffect(
+    () => () => {
+      operationSequence.current += 1;
+      operationController.current?.abort();
+    },
+    [],
+  );
 
-  const selectDeployment = useCallback((deploymentId: string) => {
-    if (deploymentId === selectedIdRef.current) return;
-    selectedIdRef.current = deploymentId;
-    selectedTerminalRef.current = false;
-    setSelectedDeploymentId(deploymentId);
-  }, []);
+  const runOperation = useCallback(
+    async (
+      operation: InferenceOperation,
+      task: (signal: AbortSignal) => Promise<InferenceStateRead>,
+    ) => {
+      const sequence = operationSequence.current + 1;
+      operationSequence.current = sequence;
+      operationController.current?.abort();
+      const controller = new AbortController();
+      operationController.current = controller;
+      setBusy(operation);
+      setOperationError(null);
+      try {
+        const result = await task(controller.signal);
+        if (controller.signal.aborted || operationSequence.current !== sequence) return null;
+        publishState(result);
+        if (isTerminal(result)) setConnection("closed");
+        return result;
+      } catch (reason) {
+        if (controller.signal.aborted || operationSequence.current !== sequence) return null;
+        setOperationError(requestError(reason, `Could not ${operation} inference.`));
+        return null;
+      } finally {
+        if (operationSequence.current === sequence) setBusy(null);
+      }
+    },
+    [publishState],
+  );
 
-  const runOperation = useCallback(async <T,>(
-    operation: InferenceOperation,
-    task: (signal: AbortSignal) => Promise<T>,
-  ): Promise<T | null> => {
-    const sequence = operationSequence.current + 1;
-    operationSequence.current = sequence;
-    operationController.current?.abort();
-    const controller = new AbortController();
-    operationController.current = controller;
-    setBusy(operation);
-    setOperationError(null);
-    try {
-      const result = await task(controller.signal);
-      if (controller.signal.aborted || operationSequence.current !== sequence) return null;
-      return result;
-    } catch (reason) {
-      if (controller.signal.aborted || operationSequence.current !== sequence) return null;
-      setOperationError(requestError(reason, `Could not ${operation} inference.`));
-      return null;
-    } finally {
-      if (operationSequence.current === sequence) setBusy(null);
-    }
-  }, []);
+  const start = useCallback(
+    (payload: StartInferenceSessionRequest) =>
+      runOperation("start", (signal) => startInferenceSession(deploymentId, payload, signal)),
+    [deploymentId, runOperation],
+  );
 
-  const deploy = useCallback(async (payload: CreateInferenceDeploymentRequest) => {
-    const created = await runOperation("deploy", (signal) =>
-      createInferenceDeployment(payload, signal),
-    );
-    if (!created) return null;
-    upsertDeployment(created);
-    selectedIdRef.current = created.id;
-    setSelectedDeploymentId(created.id);
-    return created;
-  }, [runOperation, upsertDeployment]);
-
-  const start = useCallback(async (
-    deploymentId: string,
-    payload: StartInferenceSessionRequest,
-  ) => {
-    const started = await runOperation("start", (signal) =>
-      startInferenceSession(deploymentId, payload, signal),
-    );
-    if (started) publishState(started);
-    return started;
-  }, [publishState, runOperation]);
-
-  const stop = useCallback(async (
-    deploymentId: string,
-    payload: StopInferenceDeploymentRequest = {},
-  ) => {
-    const stopped = await runOperation("stop", (signal) =>
-      stopInferenceDeployment(deploymentId, payload, signal),
-    );
-    if (stopped) {
-      publishState(stopped);
-      if (isTerminal(stopped)) setConnection("closed");
-    }
-    return stopped;
-  }, [publishState, runOperation]);
-
-  const selectedDeployment = useMemo(
-    () => deployments.find((deployment) => deployment.id === selectedDeploymentId) ?? null,
-    [deployments, selectedDeploymentId],
+  const stop = useCallback(
+    (payload: StopInferenceDeploymentRequest = {}) =>
+      runOperation("stop", (signal) => stopInferenceDeployment(deploymentId, payload, signal)),
+    [deploymentId, runOperation],
   );
 
   return {
-    deployments,
-    selectedDeployment,
-    selectedDeploymentId,
-    selectDeployment,
     state,
-    initialLoading,
-    refreshing,
     stateLoading,
-    listError,
     stateError,
     operationError,
-    clearOperationError: () => setOperationError(null),
+    clearOperationError: useCallback(() => setOperationError(null), []),
     busy,
     connection,
-    refresh: () => loadDeployments(true),
-    retryState: () => setStateReload((value) => value + 1),
-    deploy,
+    retryState: useCallback(() => setReload((value) => value + 1), []),
     start,
     stop,
   };

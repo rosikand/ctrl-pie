@@ -1,183 +1,329 @@
-import {
-  AlertCircle,
-  ExternalLink,
-  GitBranch,
-  Lock,
-  Package,
-  ShieldAlert,
-  Tag,
-  Unlock,
-} from "lucide-react";
+import { ExternalLink, GitBranch, Lock, Package, RefreshCw, ShieldAlert, Unlock } from "lucide-react";
+import { useState } from "react";
 
+import { Page, PageHeader, PageSection } from "../components/layout/Page";
+import { LoadErrorBar, LoadErrorState } from "../components/LoadError";
+import { Alert } from "../components/ui/Alert";
+import { Badge, Mono } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { DescriptionList } from "../components/ui/DescriptionList";
+import { Drawer } from "../components/ui/Drawer";
+import { EmptyState } from "../components/ui/EmptyState";
+import { TableSkeleton } from "../components/ui/Skeleton";
 import {
-  appendHubPath,
-  formatTrainerTimestamp as formatTimestamp,
-  trainerCountFormatter as countFormatter,
-  TrainerDetailValue as DetailValue,
-  TrainerErrorPanel as ErrorPanel,
-  TrainerInlineError as InlineError,
-  TrainerViewHeader as ViewHeader,
-} from "../components/TrainerView";
+  RowButton,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeaderCell,
+  TableRow,
+} from "../components/ui/Table";
 import { useTrainerModels } from "../hooks/useTrainerModels";
+import { appendHubPath, formatCount, formatDateTime, formatRelative, safeHubUrl, shortRevision } from "../lib/format";
 import type { TrainerModelSummary } from "../types/training";
 
-function safeHubUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && url.hostname === "huggingface.co"
-      ? url.toString()
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function ModelsLoading() {
-  return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3" aria-busy="true">
-      <p className="sr-only" role="status">Loading models</p>
-      {Array.from({ length: 6 }).map((_, index) => (
-        <div key={index} className="h-[29rem] animate-pulse rounded-xl border border-slate-200 bg-white p-5 shadow-panel">
-          <div className="h-3 w-40 rounded bg-slate-100" />
-          <div className="mt-3 h-5 w-2/3 rounded bg-slate-100" />
-          <div className="mt-5 h-12 rounded bg-slate-50" />
-          <div className="mt-6 h-20 rounded bg-slate-50" />
-          <div className="mt-6 h-24 rounded bg-slate-50" />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ModelCard({ model }: { model: TrainerModelSummary }) {
+/** Read-only detail for one Hugging Face model repository. */
+function ModelDetail({ model }: { model: TrainerModelSummary }) {
   const hubUrl = safeHubUrl(model.hub_url);
-  const revisionUrl = hubUrl && model.revision
-    ? appendHubPath(hubUrl, ["tree", model.revision])
-    : null;
-  const visibleTags = model.tags.slice(0, 4);
+  const revisionUrl = hubUrl && model.revision ? appendHubPath(hubUrl, ["tree", model.revision]) : null;
 
   return (
-    <article className="flex min-h-full flex-col rounded-xl border border-slate-200 bg-white shadow-panel">
-      <div className="border-b border-slate-100 px-5 py-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="truncate font-mono text-[11px] text-slate-400" title={model.repo_id}>{model.repo_id}</p>
-            <h3 className="mt-1.5 text-base font-semibold text-slate-950">{model.name}</h3>
+    <div className="space-y-7">
+      {model.card ? (
+        <p className="text-[13px] leading-6 text-ink-secondary">
+          {model.card.description?.trim() || "No description was provided in the model card."}
+        </p>
+      ) : (
+        <Alert tone="warning">Model card metadata is unavailable for this repository.</Alert>
+      )}
+
+      <DescriptionList
+        items={[
+          { label: "Repository", value: model.repo_id, mono: true, span: true },
+          { label: "Pipeline", value: model.pipeline_tag || "—" },
+          { label: "Library", value: model.library_name || "—" },
+          {
+            label: "Revision",
+            value: model.revision ? (
+              revisionUrl ? (
+                <a
+                  href={revisionUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-accent-700 hover:text-accent-800"
+                >
+                  {shortRevision(model.revision, 12)}
+                  <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                </a>
+              ) : (
+                shortRevision(model.revision, 12)
+              )
+            ) : (
+              <span className="text-caution-700">Revision unavailable</span>
+            ),
+            mono: true,
+          },
+          { label: "Updated", value: formatDateTime(model.last_modified) },
+        ]}
+      />
+
+      {model.card && (
+        <div className="grid gap-6 sm:grid-cols-2">
+          <div>
+            <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">
+              Base model
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {model.card.base_model.length ? (
+                model.card.base_model.map((repo, index) => (
+                  <Mono key={`${repo}-${index}`} title={repo}>
+                    {repo}
+                  </Mono>
+                ))
+              ) : (
+                <span className="text-xs text-ink-faint">Not specified</span>
+              )}
+            </div>
           </div>
-          <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
-            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold ${model.private ? "bg-slate-100 text-slate-700" : "bg-emerald-50 text-emerald-700"}`}>
-              {model.private ? <Lock className="h-3 w-3" aria-hidden="true" /> : <Unlock className="h-3 w-3" aria-hidden="true" />}
-              {model.private ? "Private" : "Public"}
-            </span>
-            {model.gated && <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700"><ShieldAlert className="h-3 w-3" aria-hidden="true" />Gated</span>}
+          <div>
+            <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">
+              Training datasets
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {model.card.datasets.length ? (
+                model.card.datasets.map((repo, index) => (
+                  <Mono key={`${repo}-${index}`} title={repo}>
+                    {repo}
+                  </Mono>
+                ))
+              ) : (
+                <span className="text-xs text-ink-faint">Not specified</span>
+              )}
+            </div>
           </div>
         </div>
-        {model.card
-          ? <p className="mt-3 min-h-10 line-clamp-3 text-sm leading-5 text-slate-500">{model.card.description?.trim() || "No description was provided in the model card."}</p>
-          : <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />Model card metadata is unavailable.</div>}
-      </div>
-      <div className="flex flex-1 flex-col px-5 py-4">
-        <dl className="grid grid-cols-2 gap-2">
-          <DetailValue label="Pipeline">{model.pipeline_tag || "—"}</DetailValue>
-          <DetailValue label="Library">{model.library_name || "—"}</DetailValue>
-        </dl>
-        {model.card && (
-          <div className="mt-4 space-y-3 text-xs">
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Base model</p>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {model.card.base_model.length
-                  ? model.card.base_model.slice(0, 3).map((repo, index) => <span key={`${repo}-${index}`} className="max-w-full truncate rounded bg-blue-50 px-2 py-1 font-mono text-[10px] text-blue-700" title={repo}>{repo}</span>)
-                  : <span className="text-slate-400">Not specified</span>}
-              </div>
-            </div>
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Datasets</p>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {model.card.datasets.length
-                  ? model.card.datasets.slice(0, 3).map((repo, index) => <span key={`${repo}-${index}`} className="max-w-full truncate rounded bg-violet-50 px-2 py-1 font-mono text-[10px] text-violet-700" title={repo}>{repo}</span>)
-                  : <span className="text-slate-400">Not specified</span>}
-              </div>
-            </div>
-          </div>
-        )}
-        <div className="mt-4 rounded-lg bg-slate-50 px-3 py-3">
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Checkpoint files</p>
-            <span className="text-[10px] text-slate-400">{countFormatter.format(model.checkpoints.length)}</span>
-          </div>
-          {model.checkpoints.length ? (
-            <ul className="mt-2 space-y-1.5">
-              {model.checkpoints.slice(0, 5).map((checkpoint) => {
-                const url = hubUrl && model.revision
+      )}
+
+      <div>
+        <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">
+          Checkpoint files
+          <span className="ml-2 font-normal normal-case tracking-normal text-ink-muted">
+            {formatCount(model.checkpoints.length)}
+          </span>
+        </p>
+        {model.checkpoints.length ? (
+          <ul className="mt-2 space-y-1.5">
+            {model.checkpoints.map((checkpoint) => {
+              const url =
+                hubUrl && model.revision
                   ? appendHubPath(hubUrl, ["blob", model.revision, checkpoint])
                   : null;
-                return (
-                  <li key={checkpoint} className="flex min-w-0 items-center gap-1.5 font-mono text-[10px] text-slate-600">
-                    <GitBranch className="h-3 w-3 shrink-0 text-slate-300" aria-hidden="true" />
-                    {url
-                      ? <a href={url} target="_blank" rel="noreferrer" className="truncate hover:text-brand-600" title={checkpoint}>{checkpoint}</a>
-                      : <span className="truncate" title={checkpoint}>{checkpoint}</span>}
-                  </li>
-                );
-              })}
-              {model.checkpoints.length > 5 && <li className="text-[10px] text-slate-400">+{model.checkpoints.length - 5} more files</li>}
-            </ul>
-          ) : <p className="mt-2 text-[11px] text-slate-400">No checkpoint files discovered.</p>}
-        </div>
-        {visibleTags.length > 0 && (
-          <div className="mt-3 flex items-start gap-2">
-            <Tag className="mt-1 h-3.5 w-3.5 shrink-0 text-slate-300" aria-hidden="true" />
-            <div className="flex flex-wrap gap-1">
-              {visibleTags.map((tag, index) => <span key={`${tag}-${index}`} className="max-w-[11rem] truncate rounded px-1.5 py-1 text-[10px] text-slate-500 ring-1 ring-slate-100" title={tag}>{tag}</span>)}
-              {model.tags.length > visibleTags.length && <span className="px-1.5 py-1 text-[10px] text-slate-400">+{model.tags.length - visibleTags.length}</span>}
-            </div>
-          </div>
+              return (
+                <li key={checkpoint} className="flex min-w-0 items-center gap-2 font-mono text-2xs">
+                  <GitBranch className="h-3 w-3 shrink-0 text-ink-faint" aria-hidden="true" />
+                  {url ? (
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="truncate text-ink-secondary hover:text-accent-700"
+                      title={checkpoint}
+                    >
+                      {checkpoint}
+                    </a>
+                  ) : (
+                    <span className="truncate text-ink-secondary" title={checkpoint}>
+                      {checkpoint}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="mt-2 text-xs text-ink-faint">No checkpoint files discovered.</p>
         )}
-        <div className="mt-auto pt-4">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-slate-100 pt-3 text-[10px] text-slate-400">
-            <span>Updated {formatTimestamp(model.last_modified)}</span>
-            {model.revision
-              ? revisionUrl
-                ? <a href={revisionUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-mono text-brand-600 hover:text-brand-700" title={model.revision}>@{model.revision.slice(0, 8)}<ExternalLink className="h-3 w-3" aria-hidden="true" /></a>
-                : <span className="font-mono">@{model.revision.slice(0, 8)}</span>
-              : <span className="text-amber-600">Revision unavailable</span>}
-          </div>
-          {hubUrl && <a href={hubUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-600 hover:text-brand-700">Open model on Hugging Face<ExternalLink className="h-3.5 w-3.5" aria-hidden="true" /></a>}
-        </div>
+        <p className="mt-3 text-2xs leading-5 text-ink-muted">
+          Checkpoint paths are read-only metadata. Deployments always pin one immutable Git
+          revision, never an artifact path.
+        </p>
       </div>
-    </article>
-  );
-}
 
-function ModelsCatalog() {
-  const { data, initialLoading, refreshing, error, refresh, retry } = useTrainerModels();
-  const models = data?.models ?? [];
-
-  return (
-    <div>
-      <ViewHeader title="Namespace models" description={data ? `Hugging Face models discovered under ${data.namespace}.` : "Model artifacts discovered through the backend's configured Hugging Face namespace."} count={data?.total ?? (initialLoading ? null : models.length)} refreshing={refreshing || initialLoading} onRefresh={() => void refresh()} />
-      {data && <div className="mb-5 flex flex-wrap items-center gap-2 text-xs text-slate-400"><span className="rounded-md bg-white px-2 py-1 font-mono ring-1 ring-slate-200">{data.namespace}</span><span title={data.fetched_at}>Synced {formatTimestamp(data.fetched_at)}</span></div>}
-      {initialLoading && <ModelsLoading />}
-      {!initialLoading && error && !data && <ErrorPanel error={error} context="models" onRetry={() => void retry()} loading={refreshing || initialLoading} />}
-      {!initialLoading && data && error && <InlineError error={error} onRetry={() => void retry()} loading={refreshing} />}
-      {!initialLoading && data && !error && models.length === 0 && <section className="grid min-h-[20rem] place-items-center rounded-xl border border-slate-200 bg-white px-6 text-center shadow-panel"><div className="max-w-md"><Package className="mx-auto h-7 w-7 text-slate-300" aria-hidden="true" /><h2 className="mt-3 text-sm font-semibold text-slate-900">No model repositories found</h2><p className="mt-2 text-sm leading-6 text-slate-500">The configured namespace has no models to show yet.</p></div></section>}
-      {!initialLoading && data && models.length > 0 && <div className="grid items-stretch gap-4 md:grid-cols-2 xl:grid-cols-3" aria-busy={refreshing}>{models.map((model) => <ModelCard key={model.repo_id} model={model} />)}</div>}
+      {model.tags.length > 0 && (
+        <div>
+          <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">Tags</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {model.tags.map((tag, index) => (
+              <span
+                key={`${tag}-${index}`}
+                className="max-w-[12rem] truncate rounded-md px-1.5 py-0.5 text-2xs text-ink-muted ring-1 ring-line"
+                title={tag}
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 export function ModelsPage() {
+  const { data, initialLoading, refreshing, error, refresh, retry } = useTrainerModels();
+  const [selectedRepoId, setSelectedRepoId] = useState<string | null>(null);
+  const models = data?.models ?? [];
+  const selected = models.find((model) => model.repo_id === selectedRepoId) ?? null;
+
   return (
-    <div className="mx-auto max-w-7xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
-      <header>
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-600">Hugging Face artifacts</p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">Models</h1>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Browse model repositories, immutable revisions, checkpoint files, and card metadata in the configured namespace.</p>
-      </header>
-      <section className="mt-7">
-        <ModelsCatalog />
-      </section>
-    </div>
+    <Page>
+      <PageHeader
+        title="Models"
+        description="Model repositories discovered in the configured Hugging Face namespace, with their immutable revisions and checkpoint metadata."
+        meta={
+          data ? (
+            <>
+              <Mono>{data.namespace}</Mono>
+              <span className="text-xs text-ink-muted">{formatCount(data.total)} models</span>
+              <span className="text-xs text-ink-faint" title={data.fetched_at}>
+                Synced {formatRelative(data.fetched_at)}
+              </span>
+            </>
+          ) : undefined
+        }
+        actions={
+          <Button
+            variant="primary"
+            icon={RefreshCw}
+            loading={refreshing}
+            disabled={refreshing || initialLoading}
+            onClick={() => void refresh()}
+          >
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </Button>
+        }
+      />
+
+      <PageSection>
+        {initialLoading && <TableSkeleton rows={5} columns={6} label="Loading models" />}
+
+        {!initialLoading && error && !data && (
+          <LoadErrorState
+            error={error}
+            resource="models"
+            onRetry={() => void retry()}
+            busy={refreshing}
+          />
+        )}
+
+        {!initialLoading && data && (
+          <div className="space-y-5">
+            {error && (
+              <LoadErrorBar error={error} resource="models" onRetry={() => void retry()} busy={refreshing} />
+            )}
+
+            {models.length === 0 ? (
+              <EmptyState
+                icon={Package}
+                title="No model repositories found"
+                description="The configured namespace has no models yet. Managed or external training runs publish them here."
+              />
+            ) : (
+              <Table label="Namespace models" minWidth="56rem" busy={refreshing}>
+                <TableHead>
+                  <TableHeaderCell>Model</TableHeaderCell>
+                  <TableHeaderCell>Pipeline</TableHeaderCell>
+                  <TableHeaderCell>Library</TableHeaderCell>
+                  <TableHeaderCell align="right">Checkpoints</TableHeaderCell>
+                  <TableHeaderCell>Access</TableHeaderCell>
+                  <TableHeaderCell>Revision</TableHeaderCell>
+                  <TableHeaderCell align="right">Updated</TableHeaderCell>
+                </TableHead>
+                <TableBody>
+                  {models.map((model) => (
+                    <TableRow
+                      key={model.repo_id}
+                      interactive
+                      selected={model.repo_id === selectedRepoId}
+                    >
+                      <TableCell>
+                        <RowButton onClick={() => setSelectedRepoId(model.repo_id)}>
+                          {model.name}
+                        </RowButton>
+                        <p
+                          className="mt-0.5 truncate font-mono text-2xs text-ink-faint"
+                          title={model.repo_id}
+                        >
+                          {model.repo_id}
+                        </p>
+                      </TableCell>
+                      <TableCell>{model.pipeline_tag || "—"}</TableCell>
+                      <TableCell>{model.library_name || "—"}</TableCell>
+                      <TableCell align="right">{formatCount(model.checkpoints.length)}</TableCell>
+                      <TableCell>
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          <Badge tone={model.private ? "neutral" : "success"}>
+                            {model.private ? (
+                              <Lock className="h-3 w-3" aria-hidden="true" />
+                            ) : (
+                              <Unlock className="h-3 w-3" aria-hidden="true" />
+                            )}
+                            {model.private ? "Private" : "Public"}
+                          </Badge>
+                          {model.gated && (
+                            <Badge tone="warning">
+                              <ShieldAlert className="h-3 w-3" aria-hidden="true" />
+                              Gated
+                            </Badge>
+                          )}
+                        </span>
+                      </TableCell>
+                      <TableCell mono muted>
+                        {model.revision ? (
+                          shortRevision(model.revision)
+                        ) : (
+                          <span className="text-caution-700">unavailable</span>
+                        )}
+                      </TableCell>
+                      <TableCell align="right" muted>
+                        <span title={formatDateTime(model.last_modified)}>
+                          {formatRelative(model.last_modified)}
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </div>
+        )}
+      </PageSection>
+
+      <Drawer
+        open={selected !== null}
+        onClose={() => setSelectedRepoId(null)}
+        title={selected?.name ?? "Model"}
+        description={selected?.repo_id}
+        width="max-w-xl"
+        footer={
+          selected && safeHubUrl(selected.hub_url) ? (
+            <a
+              href={safeHubUrl(selected.hub_url) ?? "#"}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 text-[13px] font-medium text-accent-700 hover:text-accent-800"
+            >
+              Open on Hugging Face
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+            </a>
+          ) : (
+            <span className="text-xs text-ink-faint">Hub link unavailable</span>
+          )
+        }
+      >
+        {selected && <ModelDetail model={selected} />}
+      </Drawer>
+    </Page>
   );
 }

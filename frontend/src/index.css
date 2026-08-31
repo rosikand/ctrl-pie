@@ -3,11 +3,9 @@
 @tailwind utilities;
 
 :root {
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  color: #172033;
-  background: #f7f8fa;
+  font-family: theme("fontFamily.sans");
+  color: theme("colors.ink.DEFAULT");
+  background: theme("colors.canvas");
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -32,7 +30,21 @@ textarea {
 }
 
 ::selection {
-  background: #dbeafe;
-  color: #1e3a8a;
+  background: theme("colors.accent.100");
+  color: theme("colors.accent.800");
 }
 
+/* One focus treatment for the whole product. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid theme("colors.accent.600");
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Quiet scrollbars inside panels and logs. */
+@supports (scrollbar-width: thin) {
+  .scroll-quiet {
+    scrollbar-width: thin;
+    scrollbar-color: theme("colors.line.strong") transparent;
+  }
+}
