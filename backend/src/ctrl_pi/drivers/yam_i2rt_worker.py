@@ -13,6 +13,7 @@ RPC server, a shell launcher, or a network listener.
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
 import importlib
@@ -43,6 +44,7 @@ _MAX_LOG_CHARS = 512
 _MAX_DIAGNOSTIC_CHARS = 240
 _MAX_GIT_STATUS_BYTES = 64 * 1024
 _PR_SET_PDEATHSIG = 1
+logger = logging.getLogger(__name__)
 
 
 class I2RTWorkerError(RuntimeError):
@@ -284,6 +286,7 @@ class I2RTWorkerSnapshot:
     shutdown_uncertain: bool
     reaped: bool
     logs: tuple[WorkerLog, ...]
+    exitcode: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +314,59 @@ class _RobotLike(Protocol):
 
 RobotLoader = Callable[[I2RTArmWorkerConfig], _RobotLike]
 ChildTarget = Callable[..., None]
+
+
+class _I2RTProcessSpawner:
+    """Create i2rt children from one thread that outlives every child.
+
+    Linux ties ``PR_SET_PDEATHSIG`` to the thread that created the child, not
+    merely to the containing process. FastAPI synchronous routes run in AnyIO
+    worker threads that may retire while the application remains healthy, so
+    they must never call ``Process.start()`` directly.
+
+    Leases keep the single executor thread alive until every process it
+    created has been reaped. Releasing the last lease joins the thread; a
+    later hardware connection lazily creates a fresh one.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._executor: ThreadPoolExecutor | None = None
+        self._leases = 0
+
+    def acquire(self) -> None:
+        with self._lock:
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="ctrl-pi-i2rt-spawner",
+                )
+            self._leases += 1
+
+    def start_process(self, process: Any) -> None:
+        with self._lock:
+            executor = self._executor
+            if executor is None or self._leases <= 0:
+                raise RuntimeError("the i2rt process spawner has no active lease")
+            future = executor.submit(process.start)
+        # Process.start() exceptions retain their original type and cause the
+        # normal fail-closed startup cleanup in I2RTArmWorker.
+        future.result()
+
+    def release(self) -> None:
+        executor: ThreadPoolExecutor | None = None
+        with self._lock:
+            if self._leases <= 0:
+                raise RuntimeError("the i2rt process spawner lease is unbalanced")
+            self._leases -= 1
+            if self._leases == 0:
+                executor = self._executor
+                self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+_I2RT_PROCESS_SPAWNER = _I2RTProcessSpawner()
 
 
 class _LatestCommandMailbox:
@@ -1080,6 +1136,7 @@ class I2RTArmWorker:
         context: BaseContext | None = None,
         child_target: ChildTarget = i2rt_arm_worker_main,
         robot_loader: RobotLoader | None = None,
+        process_spawner: _I2RTProcessSpawner = _I2RT_PROCESS_SPAWNER,
     ) -> None:
         for name, value, lower, upper in (
             ("startup_timeout_seconds", startup_timeout_seconds, 0.05, 120.0),
@@ -1101,6 +1158,7 @@ class I2RTArmWorker:
         self._context = context or multiprocessing.get_context("spawn")
         self._child_target = child_target
         self._robot_loader = robot_loader
+        self._process_spawner = process_spawner
 
         self._condition = threading.Condition(threading.RLock())
         self._process_lock = threading.Lock()
@@ -1130,6 +1188,7 @@ class I2RTArmWorker:
         self._sequence = 0
         self._dropped_commands = 0
         self._reaped = False
+        self._spawner_acquired = False
 
     def __enter__(self) -> I2RTArmWorker:
         self.start()
@@ -1179,11 +1238,19 @@ class I2RTArmWorker:
                 daemon=False,
             )
             try:
-                self._process.start()
+                self._process_spawner.acquire()
+                self._spawner_acquired = True
+                self._process_spawner.start_process(self._process)
             except BaseException as error:
                 self._phase = "error"
                 self._fault = "The i2rt arm worker process could not be started."
                 self._shutdown_uncertain = True
+                process = self._process
+                if process is not None and process.pid is not None:
+                    self._force_stop_process()
+                    self._release_spawner_if_reaped()
+                else:
+                    self._release_spawner()
                 self._close_queues()
                 raise I2RTWorkerStartupError(self._fault) from error
             self._monitor_thread = threading.Thread(
@@ -1223,6 +1290,7 @@ class I2RTArmWorker:
             if process.is_alive():
                 self._force_stop_process()
             self._mark_reaped()
+            self._release_spawner_if_reaped()
         self._stop_monitor()
         self._close_queues()
 
@@ -1231,6 +1299,7 @@ class I2RTArmWorker:
             self._drain_incoming()
             request_shutdown = False
             force_cleanup = False
+            process_exited = False
             now = time.monotonic()
             with self._condition:
                 process = self._process
@@ -1261,9 +1330,12 @@ class I2RTArmWorker:
                     and not self._reaped
                     and self._phase not in {"stopping", "stopped"}
                 ):
+                    exitcode = process.exitcode
                     request_shutdown = self._latch_fault_locked(
-                        "The i2rt arm worker exited unexpectedly."
+                        "The i2rt arm worker exited unexpectedly "
+                        f"(exitcode={exitcode})."
                     ) or request_shutdown
+                    process_exited = True
                 if (
                     self._fault_latched_at is not None
                     and process_alive
@@ -1275,6 +1347,15 @@ class I2RTArmWorker:
                 self._send_control_without_wait("shutdown")
             if force_cleanup:
                 self._force_stop_process()
+            if process_exited:
+                logger.error(
+                    "i2rt arm worker %s exited unexpectedly (pid=%s, exitcode=%s)",
+                    self.config.logical_id,
+                    process.pid if process is not None else None,
+                    process.exitcode if process is not None else None,
+                )
+                self._mark_reaped()
+                self._release_spawner_if_reaped()
             self._monitor_stop.wait(0.010)
         self._drain_incoming()
 
@@ -1601,6 +1682,7 @@ class I2RTArmWorker:
                 shutdown_uncertain=self._shutdown_uncertain,
                 reaped=reaped,
                 logs=tuple(self._logs),
+                exitcode=(None if process is None else process.exitcode),
             )
 
     def shutdown(self) -> I2RTWorkerShutdownResult:
@@ -1666,6 +1748,7 @@ class I2RTArmWorker:
             self._phase = "stopped" if clean else "error"
             if uncertain and self._fault is None:
                 self._fault = "The i2rt arm shutdown could not be fully confirmed."
+        self._release_spawner_if_reaped()
         self._close_queues()
         return I2RTWorkerShutdownResult(
             clean=clean,
@@ -1727,6 +1810,8 @@ class I2RTArmWorker:
                 process.join(timeout=self._terminate_timeout)
             self._mark_reaped()
 
+        self._release_spawner_if_reaped()
+
     def _mark_reaped(self) -> None:
         process = self._process
         if process is None:
@@ -1738,6 +1823,25 @@ class I2RTArmWorker:
         with self._condition:
             self._reaped = not process.is_alive() and process.exitcode is not None
             self._condition.notify_all()
+
+    def _release_spawner_if_reaped(self) -> None:
+        process = self._process
+        if process is None:
+            self._release_spawner()
+            return
+        try:
+            reaped = not process.is_alive() and process.exitcode is not None
+        except (AssertionError, ValueError):
+            return
+        if reaped:
+            self._release_spawner()
+
+    def _release_spawner(self) -> None:
+        with self._condition:
+            if not self._spawner_acquired:
+                return
+            self._spawner_acquired = False
+        self._process_spawner.release()
 
     def _stop_monitor(self) -> None:
         self._monitor_stop.set()

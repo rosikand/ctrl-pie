@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -22,6 +23,7 @@ from ctrl_pi.drivers.yam_i2rt_worker import (
     PROTOCOL_VERSION,
     WorkerReady,
     WorkerTelemetry,
+    _I2RTProcessSpawner,
     _configure_linux_parent_death_signal,
     i2rt_arm_worker_main,
     verify_i2rt_checkout,
@@ -278,6 +280,43 @@ def _wait_until(predicate: Any, *, timeout: float = 2.0) -> None:
         time.sleep(0.01)
 
 
+def _spawner_threads() -> list[threading.Thread]:
+    return [
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("ctrl-pi-i2rt-spawner")
+    ]
+
+
+def test_process_spawner_serializes_launches_and_joins_after_last_lease() -> None:
+    class RecordingProcess:
+        def __init__(self) -> None:
+            self.creator_ident: int | None = None
+
+        def start(self) -> None:
+            self.creator_ident = threading.get_ident()
+
+    spawner = _I2RTProcessSpawner()
+    first = RecordingProcess()
+    second = RecordingProcess()
+    caller_ident = threading.get_ident()
+
+    spawner.acquire()
+    spawner.acquire()
+    spawner.start_process(first)
+    spawner.start_process(second)
+
+    assert first.creator_ident is not None
+    assert first.creator_ident == second.creator_ident
+    assert first.creator_ident != caller_ident
+    assert len(_spawner_threads()) == 1
+
+    spawner.release()
+    assert len(_spawner_threads()) == 1
+    spawner.release()
+    assert _spawner_threads() == []
+
+
 def test_config_requires_exact_identity_and_absolute_checkout(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="absolute"):
         _config(tmp_path, "0" * 40, checkout_root="relative/i2rt")
@@ -433,7 +472,73 @@ def test_real_child_loop_uses_fake_factory_latest_fresh_commands_and_clean_reap(
     assert result.reaped is True
     assert result.forced is False
     assert worker.snapshot().phase == "stopped"
+    assert worker.snapshot().exitcode == 0
+    assert _spawner_threads() == []
     assert not any(name == "i2rt" or name.startswith("i2rt.") for name in sys.modules)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="PR_SET_PDEATHSIG thread ownership is Linux-specific",
+)
+def test_pdeathsig_child_outlives_disposable_request_thread_and_spawner_stops(
+    fake_checkout: tuple[Path, str],
+) -> None:
+    root, commit = fake_checkout
+    worker = I2RTArmWorker(
+        _config(root, commit),
+        context=multiprocessing.get_context("spawn"),
+        robot_loader=_load_fake_robot,
+        startup_timeout_seconds=3.0,
+        heartbeat_timeout_seconds=0.5,
+        telemetry_timeout_seconds=0.5,
+        operation_timeout_seconds=0.5,
+        shutdown_timeout_seconds=1.0,
+        terminate_timeout_seconds=0.2,
+    )
+    startup_errors: list[BaseException] = []
+
+    def start_from_request_thread() -> None:
+        try:
+            worker.start()
+        except BaseException as error:
+            startup_errors.append(error)
+
+    request_thread = threading.Thread(
+        target=start_from_request_thread,
+        name="test-disposable-anyio-request-thread",
+    )
+    request_thread.start()
+    request_thread.join(timeout=5.0)
+
+    shutdown_results: list[Any] = []
+    try:
+        assert request_thread.is_alive() is False
+        assert startup_errors == []
+        assert len(_spawner_threads()) == 1
+        # With Process.start() on the request thread, its exit causes Linux to
+        # deliver the configured parent-death SIGTERM even though this process is
+        # healthy. The dedicated creator thread must keep heartbeats alive.
+        time.sleep(0.15)
+        worker.ensure_healthy()
+        assert worker.snapshot().exitcode is None
+
+        shutdown_thread = threading.Thread(
+            target=lambda: shutdown_results.append(worker.shutdown()),
+            name="test-app-shutdown-thread",
+        )
+        shutdown_thread.start()
+        shutdown_thread.join(timeout=5.0)
+
+        assert shutdown_thread.is_alive() is False
+        assert len(shutdown_results) == 1
+        assert shutdown_results[0].clean is True
+        assert worker.snapshot().exitcode == 0
+        assert _spawner_threads() == []
+    finally:
+        process = worker._process
+        if process is not None and process.is_alive():
+            worker.shutdown()
 
 
 def test_child_command_stream_watchdog_enters_safe_idle_and_faults_closed(
@@ -442,7 +547,7 @@ def test_child_command_stream_watchdog_enters_safe_idle_and_faults_closed(
     root, commit = fake_checkout
     worker = I2RTArmWorker(
         _config(root, commit, command_max_age_seconds=0.05),
-        context=_fork_context(),
+        context=multiprocessing.get_context("spawn"),
         robot_loader=_load_fake_robot,
         startup_timeout_seconds=2.0,
         heartbeat_timeout_seconds=0.5,
@@ -639,7 +744,10 @@ def test_post_ready_crash_is_latched_without_respawn_and_reaped(
     )
     worker.start()
     _wait_until(lambda: worker.snapshot().fault is not None)
-    with pytest.raises(I2RTWorkerUnavailableError, match="exited unexpectedly"):
+    snapshot = worker.snapshot()
+    assert snapshot.exitcode == 17
+    assert "exitcode=17" in (snapshot.fault or "")
+    with pytest.raises(I2RTWorkerUnavailableError, match="exitcode=17"):
         worker.ensure_healthy()
     result = worker.shutdown()
     assert result.reaped is True
